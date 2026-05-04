@@ -1,0 +1,14 @@
+name: LiveBlock
+options:
+  bundleIdPrefix: com.adamnolle
+targets:
+  LiveBlock:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        NSScreenCaptureUsageDescription: "LiveBlock uses ScreenCaptureKit to intercept and modify display frames."
+        NSPrincipalClass: NSApplication

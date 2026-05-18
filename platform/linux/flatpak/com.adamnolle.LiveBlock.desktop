@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=LiveBlock
+GenericName=Ad Blocker
+Comment=Local, on-device ad blocker
+Exec=liveblock-linux
+Icon=com.adamnolle.LiveBlock
+Categories=Utility;System;
+StartupWMClass=liveblock-linux
+Terminal=false

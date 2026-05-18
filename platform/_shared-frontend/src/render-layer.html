@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>LiveBlocker — Render Layer</title>
+    <style>
+      html, body { margin:0; height:100%; background: transparent; pointer-events: none; overflow: hidden; }
+      #patches { position:absolute; inset:0; pointer-events: none; }
+      .patch { position:absolute; border-radius: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="patches"></div>
+    <script type="module">
+      import { events } from "./ipc.ts";
+      const root = document.getElementById("patches");
+      events.onPatches(patches => {
+        root.innerHTML = "";
+        for (const p of patches) {
+          const img = document.createElement("img");
+          img.className = "patch";
+          img.src = p.png_data_url;
+          img.style.left = `${p.x * 100}%`;
+          img.style.top = `${p.y * 100}%`;
+          img.style.width = `${p.width * 100}%`;
+          img.style.height = `${p.height * 100}%`;
+          root.appendChild(img);
+        }
+      });
+    </script>
+  </body>
+</html>

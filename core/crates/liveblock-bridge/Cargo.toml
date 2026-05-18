@@ -1,0 +1,23 @@
+[package]
+name = "liveblock-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Swift / C-ABI bridge for the LiveBlock core engine"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+liveblock-core = { path = "../liveblock-core" }
+liveblock-regions = { path = "../liveblock-regions" }
+liveblock-labels = { path = "../liveblock-labels" }
+liveblock-detection = { path = "../liveblock-detection" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+swift-bridge = "0.1"
+
+[build-dependencies]
+swift-bridge-build = "0.1"

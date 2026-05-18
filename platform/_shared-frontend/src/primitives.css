@@ -1,0 +1,234 @@
+/* LiveBlocker — primitives. Port of `primitives.jsx` from the design bundle.
+   Vanilla CSS so the Tauri webview can use them without a framework. */
+
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700;12..96,800&family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap');
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--lb-bg);
+  color: var(--lb-ink);
+  font-family: var(--lb-font-ui);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'ss01','cv11';
+  user-select: none;
+}
+
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; cursor: pointer; }
+
+/* ── Type ─────────────────────────────────────────────────── */
+.lb-display {
+  font-family: var(--lb-font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.lb-mono {
+  font-family: var(--lb-font-mono);
+  font-feature-settings: 'tnum';
+}
+
+/* ── Pill button ─────────────────────────────────────────── */
+.lb-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 16px;
+  font: 600 13px/1 var(--lb-font-ui);
+  letter-spacing: -0.005em;
+  border-radius: 999px;
+  border: 0.5px solid rgba(255,255,255,0.5);
+  background: var(--lb-bg);
+  color: var(--lb-ink);
+  box-shadow:
+    4px 4px 10px var(--lb-shadow-dark),
+    -3px -3px 8px var(--lb-shadow-light);
+  cursor: pointer;
+  transition: transform .08s, box-shadow .15s;
+}
+.lb-pill:hover { transform: scale(1.02); }
+.lb-pill:active { transform: scale(0.97); }
+.lb-pill.lb-sm { padding: 6px 12px; font-size: 12px; }
+.lb-pill.lb-lg { padding: 12px 22px; font-size: 15px; }
+
+.lb-pill.lb-block {
+  background: linear-gradient(180deg, #ff5d3f 0%, #ee3b1f 100%);
+  color: #fff;
+  border: 0.5px solid rgba(120,20,0,0.4);
+  box-shadow:
+    4px 4px 10px rgba(184,40,12,0.35),
+    -3px -3px 8px #ffffff,
+    inset 0 1px 0 rgba(255,255,255,0.45);
+}
+.lb-pill.lb-train {
+  background: linear-gradient(180deg, #4a2a4d 0%, #2e1631 100%);
+  color: #f3e8ff;
+  border: 0.5px solid rgba(0,0,0,0.4);
+  box-shadow:
+    4px 4px 10px rgba(20,10,30,0.30),
+    -3px -3px 8px #ffffff,
+    inset 0 1px 0 rgba(255,255,255,0.18);
+}
+.lb-pill.lb-ghost {
+  background: transparent;
+  color: var(--lb-ink-2);
+  box-shadow: none;
+  border: 0.5px solid transparent;
+}
+
+/* ── Toggle ──────────────────────────────────────────────── */
+.lb-toggle {
+  position: relative;
+  width: 46px;
+  height: 26px;
+  border-radius: 999px;
+  border: 0.5px solid rgba(0,0,0,0.06);
+  background: var(--lb-bg);
+  box-shadow:
+    inset 3px 3px 6px var(--lb-shadow-dark),
+    inset -3px -3px 6px var(--lb-shadow-light);
+  cursor: pointer;
+  padding: 0;
+  transition: background .15s;
+}
+.lb-toggle .knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--lb-bg);
+  box-shadow:
+    2px 2px 5px var(--lb-shadow-dark),
+    -2px -2px 5px var(--lb-shadow-light);
+  transition: left .18s cubic-bezier(.3,.7,.4,1), background .15s;
+}
+.lb-toggle[data-on="true"] .knob {
+  left: 23px;
+  background: var(--lb-block);
+  box-shadow:
+    0 2px 4px rgba(0,0,0,0.25),
+    inset 0 1px 0 rgba(255,255,255,0.4);
+}
+.lb-toggle[data-accent="success"][data-on="true"] .knob { background: var(--lb-success); }
+.lb-toggle[data-accent="train"][data-on="true"] .knob { background: var(--lb-train); }
+.lb-toggle[data-accent="detect"][data-on="true"] .knob { background: var(--lb-detect); }
+
+/* ── Inset field ─────────────────────────────────────────── */
+.lb-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--lb-ink-2);
+  background: var(--lb-bg);
+  box-shadow:
+    inset 4.4px 4.4px 12.6px var(--lb-shadow-dark),
+    inset -4.4px -4.4px 12.6px var(--lb-shadow-light);
+}
+.lb-field input {
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font: inherit;
+  color: var(--lb-ink);
+  flex: 1;
+}
+.lb-field .placeholder { color: var(--lb-ink-faint); }
+
+/* ── Lavender title bar (with custom traffic lights) ─────── */
+.lb-titlebar {
+  height: 56px;
+  padding: 0 14px;
+  background: linear-gradient(180deg, #cdcce8 0%, #b9b8d8 100%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow:
+    inset 0 -1px 0 rgba(0,0,0,0.07),
+    inset 0  1px 0 rgba(255,255,255,0.4);
+  -webkit-app-region: drag;     /* draggable like a native title bar */
+}
+.lb-titlebar > .lb-pill, .lb-titlebar button { -webkit-app-region: no-drag; }
+
+.lb-traffic {
+  display: flex;
+  gap: 8px;
+}
+.lb-traffic .dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  box-shadow:
+    inset 0 0 0 0.5px rgba(0,0,0,0.15),
+    0 1px 1px rgba(255,255,255,0.5);
+}
+.lb-traffic .red    { background: #ff5e57; }
+.lb-traffic .yellow { background: #febc2e; }
+.lb-traffic .green  { background: #19c332; }
+
+/* ── Status dot with pulse ───────────────────────────────── */
+.lb-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--lb-block);
+  box-shadow: 0 0 0 4.5px color-mix(in srgb, var(--lb-block) 20%, transparent);
+}
+.lb-dot.success { background: var(--lb-success); box-shadow: 0 0 0 4.5px color-mix(in srgb, var(--lb-success) 20%, transparent); }
+.lb-dot.warn    { background: var(--lb-warn);    box-shadow: 0 0 0 4.5px color-mix(in srgb, var(--lb-warn) 20%, transparent); }
+.lb-dot.detect  { background: var(--lb-detect);  box-shadow: 0 0 0 4.5px color-mix(in srgb, var(--lb-detect) 20%, transparent); }
+.lb-dot.pulse {
+  animation: lb-pulse 1.6s ease-out infinite;
+}
+@keyframes lb-pulse {
+  0%   { box-shadow: 0 0 0 0 currentColor; }
+  100% { box-shadow: 0 0 0 14px transparent; }
+}
+
+/* ── Logo ────────────────────────────────────────────────── */
+/* Rendered by primitives.ts as inline SVG. Container ensures proper drop shadow. */
+.lb-logo {
+  position: relative;
+  display: inline-block;
+  filter: drop-shadow(0 0.025em 0.06em rgba(20,15,40,0.18));
+}
+
+/* ── Wordmark ────────────────────────────────────────────── */
+.lb-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--lb-font-display);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--lb-ink);
+}
+.lb-wordmark .red { color: var(--lb-block); }
+
+/* ── Layout helpers ──────────────────────────────────────── */
+.lb-row { display: flex; align-items: center; gap: 8px; }
+.lb-col { display: flex; flex-direction: column; }
+.lb-spacer { flex: 1; }
+.lb-uppercase {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--lb-ink-muted);
+}
+
+/* ── Window chrome ───────────────────────────────────────── */
+.lb-window {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--lb-bg);
+  overflow: hidden;
+}

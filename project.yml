@@ -1,14 +1,78 @@
 name: LiveBlock
 options:
   bundleIdPrefix: com.adamnolle
+  deploymentTarget:
+    macOS: "26.0"
 targets:
   LiveBlock:
     type: application
     platform: macOS
-    deploymentTarget: "14.0"
-    sources: [Sources]
+    deploymentTarget: "26.0"
+    sources:
+      - Sources
+      - path: core/crates/liveblock-bridge/generated/LiveBlockBridge/LiveBlockBridge.swift
+        group: Bridge
+      - path: core/crates/liveblock-bridge/generated/SwiftBridgeCore.swift
+        group: Bridge
     info:
       path: Info.plist
       properties:
         NSScreenCaptureUsageDescription: "LiveBlock uses ScreenCaptureKit to intercept and modify display frames."
+        NSAccessibilityUsageDescription: "LiveBlock uses Accessibility access to register global hotkeys."
         NSPrincipalClass: NSApplication
+        # Auto-load every .ttf/.otf in the bundle's Resources/ root. Bundling
+        # Geist (UI), Geist Mono (numerals), and Bricolage Grotesque (display)
+        # so Font.custom("Geist", ...) etc. resolve instead of silently falling
+        # back to SF Pro. All three are SIL OFL — GPL-3 compatible.
+        ATSApplicationFontsPath: "."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.adamnolle.LiveBlock
+        SWIFT_VERSION: "5.10"
+        CODE_SIGN_STYLE: Automatic
+        DEAD_CODE_STRIPPING: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_OBJC_BRIDGING_HEADER: "Sources/LiveBlock-Bridging-Header.h"
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/core/crates/liveblock-bridge/generated $(SRCROOT)/core/crates/liveblock-bridge/generated/LiveBlockBridge"
+        OTHER_LDFLAGS: "-lliveblock_bridge"
+      configs:
+        Debug:
+          LIBRARY_SEARCH_PATHS: "$(SRCROOT)/core/target/universal/debug"
+          # Hardened runtime blocks XCTest injection under a self-signed
+          # codesigning identity. Off for local dev, on for Release.
+          ENABLE_HARDENED_RUNTIME: NO
+        Release:
+          LIBRARY_SEARCH_PATHS: "$(SRCROOT)/core/target/universal/release"
+          ENABLE_HARDENED_RUNTIME: YES
+    preBuildScripts:
+      - name: Build liveblock-bridge (universal)
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/tools/build_bridge.sh"
+        outputFiles:
+          - $(SRCROOT)/core/target/universal/debug/libliveblock_bridge.a
+          - $(SRCROOT)/core/target/universal/release/libliveblock_bridge.a
+        basedOnDependencyAnalysis: false
+  LiveBlockTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - Tests/LiveBlockTests
+    dependencies:
+      - target: LiveBlock
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.adamnolle.LiveBlockTests
+        SWIFT_VERSION: "5.10"
+        GENERATE_INFOPLIST_FILE: YES
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/core/crates/liveblock-bridge/generated $(SRCROOT)/core/crates/liveblock-bridge/generated/LiveBlockBridge"
+schemes:
+  LiveBlock:
+    build:
+      targets:
+        LiveBlock: all
+        LiveBlockTests: [test]
+    test:
+      targets:
+        - LiveBlockTests

@@ -1,0 +1,10 @@
+# MSVC is the only supported toolchain for windows-rs + DirectML on Windows.
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+# ort downloads onnxruntime.dll on first build; pin the strategy for repro.
+ORT_STRATEGY = "download"

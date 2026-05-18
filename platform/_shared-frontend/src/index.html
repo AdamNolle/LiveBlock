@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>LiveBlocker</title>
+    <link rel="stylesheet" href="./tokens.css"/>
+    <link rel="stylesheet" href="./primitives.css"/>
+  </head>
+  <body>
+    <div style="display:grid;place-items:center;height:100vh;gap:24px">
+      <div id="brand"></div>
+      <div class="lb-uppercase">ON-DEVICE · MANUAL AD BLOCKER</div>
+    </div>
+    <script type="module">
+      import { wordmark } from "./primitives.ts";
+      document.getElementById("brand")?.appendChild(wordmark(28));
+    </script>
+  </body>
+</html>

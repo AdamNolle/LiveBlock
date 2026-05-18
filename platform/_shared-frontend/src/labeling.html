@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>LiveBlocker — Labeling</title>
+    <link rel="stylesheet" href="./tokens.css"/>
+    <link rel="stylesheet" href="./primitives.css"/>
+    <style>
+      .layout { display: flex; flex-direction: column; height: 100vh; }
+      .head {
+        padding: 14px 20px;
+        background: linear-gradient(180deg,#cdcce8,#b9b8d8);
+        border-bottom: 1px solid rgba(0,0,0,0.07);
+        display: flex; align-items: center; gap: 14px;
+      }
+      .body { flex: 1; display: flex; min-height: 0; }
+      .canvas { flex: 1; padding: 18px; display: grid; place-items: center; background: var(--lb-bg); }
+      .canvasInner {
+        width: 100%; height: 100%;
+        background: var(--lb-bg);
+        border-radius: 18px;
+        box-shadow:
+          inset 4.4px 4.4px 12.6px var(--lb-shadow-dark),
+          inset -4.4px -4.4px 12.6px var(--lb-shadow-light);
+        position: relative;
+      }
+      .footer {
+        padding: 12px 20px; display: flex; align-items: center; gap: 10px;
+        background: var(--lb-bg); border-top: 1px solid rgba(0,0,0,0.05);
+      }
+      .footer .legend { font: 500 11px var(--lb-font-mono); color: var(--lb-ink-faint); margin-left: auto; }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <div class="head">
+        <span id="brand"></span>
+        <div>
+          <div style="font:600 13px var(--lb-font-ui);color:var(--lb-ink)">Labeling</div>
+          <div id="status" style="font:500 11px var(--lb-font-ui);color:var(--lb-ink-muted)">No screenshots yet</div>
+        </div>
+        <div style="flex:1"></div>
+        <button class="lb-pill lb-sm" id="captureBtn">📷 Capture</button>
+        <button class="lb-pill lb-sm lb-block" id="acceptAllBtn" hidden>✓ Accept all</button>
+      </div>
+      <div class="body">
+        <div class="canvas"><div class="canvasInner" id="canvas"></div></div>
+      </div>
+      <div class="footer">
+        <button class="lb-pill lb-sm" id="prevBtn">← Prev</button>
+        <button class="lb-pill lb-block" id="nextBtn">Save & Next →</button>
+        <button class="lb-pill lb-sm lb-train" id="noAdsBtn">✓ No ads (N)</button>
+        <button class="lb-pill lb-sm lb-ghost" id="discardBtn">🗑 Discard</button>
+        <span class="legend">drag to draw · ⌫ del last · → next · ← prev · ⌘S save · ⌘⌫ discard</span>
+      </div>
+    </div>
+
+    <script type="module">
+      import { wordmark } from "./primitives.ts";
+      import { lb } from "./ipc.ts";
+
+      document.getElementById("brand").appendChild(wordmark(16));
+
+      document.getElementById("captureBtn").addEventListener("click", async () => {
+        await lb.captureScreenshot();
+      });
+    </script>
+  </body>
+</html>

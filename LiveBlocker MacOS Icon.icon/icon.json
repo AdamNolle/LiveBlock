@@ -1,0 +1,68 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "blur-material" : null,
+      "hidden" : false,
+      "layers" : [
+        {
+          "hidden" : false,
+          "image-name" : "shutter-light.png",
+          "name" : "shutter-light",
+          "position" : {
+            "scale" : 2.05,
+            "translation-in-points" : [
+              235.34375,
+              -248.8515625
+            ]
+          }
+        },
+        {
+          "image-name" : "Viewfinder.png",
+          "name" : "Viewfinder",
+          "position" : {
+            "scale" : 1.93,
+            "translation-in-points" : [
+              -1.1368683772161603e-13,
+              0
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : "none",
+          "hidden" : false,
+          "image-name" : "Pixel Grid.png",
+          "name" : "Pixel Grid",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 2.03,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting" : "individual",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

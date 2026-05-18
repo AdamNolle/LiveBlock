@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.adamnolle.LiveBlock</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>LiveBlock</name>
+  <summary>Local, on-device ad blocker</summary>
+  <description>
+    <p>
+      LiveBlock intercepts your screen frames in real time, detects
+      advertisements with an on-device neural network, and replaces them
+      with a content-aware fill — so ads vanish from anything you can see.
+    </p>
+    <p>
+      All processing is local. No frames leave your machine.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.adamnolle.LiveBlock.desktop</launchable>
+  <provides>
+    <binary>liveblock-linux</binary>
+  </provides>
+  <categories>
+    <category>Utility</category>
+    <category>System</category>
+  </categories>
+  <screenshots/>
+  <content_rating type="oars-1.1"/>
+</component>

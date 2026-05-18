@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>LiveBlocker — Region Editor</title>
+    <link rel="stylesheet" href="./tokens.css"/>
+    <link rel="stylesheet" href="./primitives.css"/>
+    <style>
+      body { background: linear-gradient(135deg,#1f1830 0%,#432a5a 100%); }
+      .stage { position:absolute; inset:0; }
+      .toolbar {
+        position:absolute; bottom: 24px; left:50%; transform:translateX(-50%);
+        display:flex; align-items:center; gap:8px;
+        padding: 10px;
+        border-radius: 28px;
+        background: var(--lb-bg);
+        box-shadow:
+          8px 8px 18px rgba(0,0,0,0.35),
+          -3px -3px 8px var(--lb-shadow-light);
+      }
+      .seg {
+        display:flex; gap:2px; padding:3px; border-radius:999px;
+        background: var(--lb-bg);
+        box-shadow:
+          inset 4.4px 4.4px 12.6px var(--lb-shadow-dark),
+          inset -4.4px -4.4px 12.6px var(--lb-shadow-light);
+      }
+      .seg .opt {
+        width:28px; height:28px; border-radius:999px;
+        display:flex; align-items:center; justify-content:center;
+        font: 700 12px var(--lb-font-ui); color: var(--lb-ink-2);
+        cursor:pointer; border: 0;
+      }
+      .seg .opt.active { background: var(--lb-block); color: #fff; box-shadow: 0 2px 6px rgba(255,74,46,0.4); }
+      .div { width:1px; height:28px; background: rgba(0,0,0,0.07); }
+      .cancel {
+        width:32px; height:32px; border-radius:50%;
+        background: var(--lb-bg); border:0; color: var(--lb-ink-muted);
+        font: 600 16px var(--lb-font-ui);
+        box-shadow:
+          3px 3px 6px var(--lb-shadow-dark),
+          -3px -3px 6px var(--lb-shadow-light);
+      }
+      .hint { margin-top:10px; text-align:center; color: rgba(255,255,255,0.65); font: 500 11px var(--lb-font-ui); letter-spacing: 0.04em; }
+    </style>
+  </head>
+  <body>
+    <div class="stage"></div>
+    <div style="position:absolute;left:50%;transform:translateX(-50%);bottom:24px;display:flex;flex-direction:column;align-items:center">
+      <div class="toolbar">
+        <span id="logo"></span>
+        <div class="div"></div>
+        <div class="seg" id="sizeSeg">
+          <button class="opt" data-id="sm">S</button>
+          <button class="opt active" data-id="md">M</button>
+          <button class="opt" data-id="lg">L</button>
+          <button class="opt" data-id="fs">⤢</button>
+        </div>
+        <div class="div"></div>
+        <button class="lb-pill lb-block" id="markBtn">▭ Drag to mark</button>
+        <div class="div"></div>
+        <button class="cancel" id="cancelBtn">×</button>
+      </div>
+      <div class="hint">CLICK & DRAG ANY REGION  ·  Ctrl+Shift+B HIDES THIS TOOL</div>
+    </div>
+
+    <script type="module">
+      import { logo } from "./primitives.ts";
+      import { lb } from "./ipc.ts";
+
+      document.getElementById("logo").appendChild(logo({ size: 32, radius: 8 }));
+      document.getElementById("cancelBtn").addEventListener("click", () => lb.hideWindow("editor"));
+      document.querySelectorAll("#sizeSeg .opt").forEach(b => {
+        b.addEventListener("click", () => {
+          document.querySelectorAll("#sizeSeg .opt").forEach(o => o.classList.remove("active"));
+          b.classList.add("active");
+        });
+      });
+      document.getElementById("markBtn").addEventListener("click", () => {
+        // TODO(windows-port / linux-port): wire drag-to-mark gesture once
+        // backend `add_region` is connected to a real coordinate flow.
+      });
+    </script>
+  </body>
+</html>

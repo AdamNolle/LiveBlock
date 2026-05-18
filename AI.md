@@ -25,16 +25,14 @@ The project follows a modular architecture centered around a high-performance vi
 - Streams `CVPixelBuffer` frames to the processing layer.
 
 ### 2. Analysis Layer (`VisionProcessor.swift`)
-- Responsible for detecting "blocks" (ads, UI elements) within the frame.
-- Integrates with CoreML models (YOLO).
-- **Current State**: Mock implementation for YOLOv11-OBB detection.
-- **Goal**: Use SAM 2 (Segment Anything Model) for pixel-perfect mask generation.
+- Loads the bundled `yolov8n.mlpackage` via `VNCoreMLModel` and runs `VNCoreMLRequest` on the capture queue.
+- **Current State**: The shipped weights are **generic YOLOv8n** trained on COCO (80 classes — `person`, `car`, `dog`, …). They are **not** trained to detect advertisements. Detection mode demonstrates the pipeline end-to-end; it does not actually identify ads. See `ASSESSMENT.md` §3 for the path to a real ad/logo detector (OpenLogo / LogoDet-3K fine-tune, or GroundingDINO + SigLIP zero-shot).
+- **Goal**: Replace the COCO weights with an ad/logo-specific detector or a SAM 2-based segmentation model.
 
 ### 3. Modification Layer (`InpaintingEngine.swift`)
-- Takes the original frame and the detected bounding boxes.
-- Performs "inpainting" to fill in the blocked areas.
-- **Current State**: Mock implementation using color fills.
-- **Goal**: Use Generative AI (Stable Diffusion or custom GANs) for seamless reconstruction.
+- Replaces target regions using **edge-color extrapolation** (sample the border, blur, composite). A `CVPixelBufferPool` keeps allocations off the hot path.
+- **Current State**: Lightweight, no ML weights. Visually acceptable for solid backgrounds; obvious on textured backgrounds.
+- **Goal**: Port Telea or LaMa/MAT to Metal Performance Shaders for true content-aware inpainting (`ASSESSMENT.md` §4, §8 Phase 7).
 
 ### 4. Presentation Layer (`OverlayWindow.swift` & `OverlayView.swift`)
 - Creates a transparent, full-screen (or windowed) overlay.
@@ -51,16 +49,20 @@ The project follows a modular architecture centered around a high-performance vi
 
 ## Key Files
 
-- [LiveBlockApp.swift](file:///Users/adamnolle/Desktop/LiveBlock/Sources/LiveBlockApp.swift): Entry point and app lifecycle.
-- [ScreenCaptureManager.swift](file:///Users/adamnolle/Desktop/LiveBlock/Sources/ScreenCaptureManager.swift): Core logic for frame interception.
-- [VisionProcessor.swift](file:///Users/adamnolle/Desktop/LiveBlock/Sources/VisionProcessor.swift): Detection and segmentation logic.
-- [InpaintingEngine.swift](file:///Users/adamnolle/Desktop/LiveBlock/Sources/InpaintingEngine.swift): Frame modification logic.
-- [project.yml](file:///Users/adamnolle/Desktop/LiveBlock/project.yml): XcodeGen project specification.
+- `Sources/LiveBlockApp.swift`: Entry point and app lifecycle.
+- `Sources/ScreenCaptureManager.swift`: Core logic for frame interception.
+- `Sources/VisionProcessor.swift`: Detection logic (CoreML / Vision).
+- `Sources/InpaintingEngine.swift`: Frame modification logic.
+- `Sources/RegionStore.swift`: Persistent normalized user-drawn regions.
+- `Sources/MenuBarController.swift`: Status-bar menu (start/stop, control mode, quit).
+- `Sources/HotKeyMonitor.swift`: Global hotkeys (⌘⇧B / ⌘⇧L).
+- `project.yml`: XcodeGen project specification.
+- `ASSESSMENT.md`: Standing audit + cross-platform roadmap.
 
 ## Development Workflow
 
 1. **Project Generation**: The project uses `xcodegen`. If you modify `project.yml`, run `xcodegen generate` to update the `.xcodeproj`.
-2. **Model Export**: Use `export_models.py` to convert YOLO `.pt` models to CoreML `.mlpackage` format.
+2. **Model Export**: Use `tools/export_models.py` to convert YOLO `.pt` weights (in `models/`) to CoreML `.mlpackage` format.
 
 ## AI Agent Tips
 

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>LiveBlocker — Control Panel</title>
+    <link rel="stylesheet" href="./tokens.css"/>
+    <link rel="stylesheet" href="./primitives.css"/>
+    <style>
+      .panel { padding: 18px; display:flex; flex-direction:column; gap:14px; }
+      .head { display:flex; align-items:center; gap:10px; }
+      .head .col { flex:1; min-width:0; }
+      .head .name { font: 600 13px var(--lb-font-ui); color: var(--lb-ink); }
+      .head .meta { display:flex; align-items:center; gap:5px; font: 500 11px var(--lb-font-ui); color: var(--lb-ink-muted); margin-top: 1px; }
+      .actions { display:flex; gap:8px; }
+      .actions .lb-pill { flex:1; justify-content:center; }
+      .stats { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; }
+      .stat {
+        padding: 10px 8px;
+        border-radius: 14px;
+        text-align:center;
+        background: var(--lb-bg);
+        box-shadow:
+          inset 4.4px 4.4px 12.6px var(--lb-shadow-dark),
+          inset -4.4px -4.4px 12.6px var(--lb-shadow-light);
+      }
+      .stat .v { font: 600 18px var(--lb-font-mono); line-height:1; }
+      .stat .l { font: 600 9px var(--lb-font-ui); margin-top:4px; letter-spacing:0.04em; text-transform:uppercase; color: var(--lb-ink-muted); }
+      .stat.block .v { color: var(--lb-block); }
+      .stat.train .v { color: var(--lb-train); }
+      .stat.detect .v { color: var(--lb-detect); }
+      .row {
+        display:flex; align-items:center; gap:10px;
+        padding: 8px 10px; border-radius: 10px;
+      }
+      .row.active { background: rgba(255,255,255,0.5); }
+      .footer { display:flex; align-items:center; gap:8px; }
+      .swatch { width:16px; height:16px; border-radius:4px; }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <div class="head">
+        <span id="logo"></span>
+        <div class="col">
+          <div class="name">LiveBlocker</div>
+          <div class="meta"><span class="lb-dot success pulse"></span><span id="status">Active · 0 regions</span></div>
+        </div>
+        <span id="powerToggle"></span>
+      </div>
+
+      <div class="actions">
+        <button class="lb-pill lb-block" id="blockBtn">⌧ Block</button>
+        <button class="lb-pill lb-train" id="trainBtn">⊕ Train</button>
+      </div>
+
+      <div class="stats">
+        <div class="stat block"><div class="v" id="statBlocked">0</div><div class="l">blocked today</div></div>
+        <div class="stat train"><div class="v" id="statRegions">0</div><div class="l">active regions</div></div>
+        <div class="stat detect"><div class="v">2.1</div><div class="l">ms/frame</div></div>
+      </div>
+
+      <div class="lb-uppercase">This space</div>
+      <div style="border-radius:14px;padding:4px;background:var(--lb-bg);box-shadow:inset 4.4px 4.4px 12.6px var(--lb-shadow-dark),inset -4.4px -4.4px 12.6px var(--lb-shadow-light)">
+        <div class="row active">
+          <div class="swatch" style="background:#3da6ff"></div>
+          <div style="flex:1;font-size:12px;font-weight:500">Foreground app</div>
+          <span class="lb-mono" style="font-size:11px;color:var(--lb-ink-muted)">—</span>
+          <span id="appToggle"></span>
+        </div>
+      </div>
+
+      <div class="footer">
+        <button class="lb-pill lb-sm" id="prefsBtn">⚙ Preferences</button>
+        <div class="lb-spacer"></div>
+        <span class="lb-mono" style="font-size:10px;color:var(--lb-ink-faint)">Ctrl+Shift+B</span>
+      </div>
+    </div>
+
+    <script type="module">
+      import { logo, toggle } from "./primitives.ts";
+      import { lb } from "./ipc.ts";
+
+      document.getElementById("logo").appendChild(logo({ size: 32, radius: 8 }));
+      document.getElementById("powerToggle").appendChild(toggle({ value: false, accent: "success", onChange: (on) => on ? lb.startCapture() : lb.stopCapture() }));
+      document.getElementById("appToggle").appendChild(toggle({ value: true, accent: "block" }));
+
+      document.getElementById("blockBtn").addEventListener("click", () => lb.showWindow("editor"));
+      document.getElementById("trainBtn").addEventListener("click", () => lb.showWindow("training"));
+      document.getElementById("prefsBtn").addEventListener("click", () => lb.showWindow("settings"));
+
+      // Refresh stats periodically
+      async function refresh() {
+        try {
+          const regions = await lb.listRegions();
+          document.getElementById("statRegions").textContent = String(regions.length);
+          document.getElementById("status").textContent = `Active · ${regions.length} region${regions.length === 1 ? "" : "s"}`;
+        } catch (_) { /* tauri not present in `vite preview` mode */ }
+      }
+      refresh();
+      setInterval(refresh, 1000);
+    </script>
+  </body>
+</html>

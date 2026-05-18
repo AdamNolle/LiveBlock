@@ -1,0 +1,11 @@
+[package]
+name = "liveblock-detection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "YOLO post-processing utilities (NMS, score filter, coord conversion) for LiveBlock"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

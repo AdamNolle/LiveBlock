@@ -1,0 +1,17 @@
+{
+  "name": "liveblocker-shared-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Shared Tauri webview frontend for the Windows + Linux LiveBlocker ports. Light-only neumorphism on a lavender base, ported verbatim from the Claude Design handoff bundle.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "typescript": "^5.5.0",
+    "@tauri-apps/api": "^2.0.0"
+  }
+}

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>LiveBlocker — Training</title>
+    <link rel="stylesheet" href="./tokens.css"/>
+    <link rel="stylesheet" href="./primitives.css"/>
+    <style>
+      .layout { display: flex; flex-direction: column; height: 100vh; }
+      .head {
+        padding: 14px 20px;
+        background: linear-gradient(180deg,#cdcce8,#b9b8d8);
+        border-bottom: 1px solid rgba(0,0,0,0.07);
+      }
+      .body { flex: 1; padding: 20px; overflow: auto; display: flex; flex-direction: column; gap: 16px; }
+      .stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; }
+      .stat { padding: 16px; border-radius: 16px; }
+      .stat .l { font:600 10px var(--lb-font-ui); letter-spacing: 0.06em; text-transform: uppercase; color: var(--lb-ink-muted); }
+      .stat .v { font: 700 28px var(--lb-font-display); line-height: 1; margin-top: 6px; }
+      .train-card { padding: 18px; border-radius: 22px; }
+      .stage { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+      .actions { display: flex; gap: 8px; }
+      .log { padding: 14px; border-radius: 16px; height: 200px; overflow: auto; }
+      .log pre { margin: 0; white-space: pre-wrap; font: 500 11px var(--lb-font-mono); color: var(--lb-ink); }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <div class="head">
+        <span id="brand"></span>
+        <div style="margin-top:6px">
+          <div class="lb-display" style="font-size:22px">Training Dashboard</div>
+          <div style="font: 500 12px var(--lb-font-ui); color: var(--lb-ink-muted)">Build your own ad detector from your labeled screenshots.</div>
+        </div>
+      </div>
+      <div class="body">
+        <div class="stats">
+          <div class="stat lb-raised"><div class="l">Screenshots</div><div class="v" style="color:var(--lb-block)" id="statShots">0</div></div>
+          <div class="stat lb-raised"><div class="l">Labeled</div><div class="v" style="color:var(--lb-success)" id="statLabeled">0</div></div>
+          <div class="stat lb-raised"><div class="l">Remaining</div><div class="v" style="color:var(--lb-train)" id="statRem">0</div></div>
+          <div class="stat lb-raised"><div class="l">Regions</div><div class="v" style="color:var(--lb-detect)" id="statRegions">0</div></div>
+        </div>
+
+        <div class="train-card lb-raised">
+          <div class="stage">
+            <div>
+              <div class="lb-uppercase">Training</div>
+              <div style="font:600 14px var(--lb-font-ui);margin-top:2px">Idle</div>
+            </div>
+            <div class="actions">
+              <button class="lb-pill lb-train" id="trainBtn">▶ Train Now</button>
+              <button class="lb-pill" id="labelBtn">✎ Label more</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="log lb-inset"><pre id="logTail">Logs will appear here while training runs.</pre></div>
+      </div>
+    </div>
+    <script type="module">
+      import { wordmark } from "./primitives.ts";
+      import { lb } from "./ipc.ts";
+
+      document.getElementById("brand").appendChild(wordmark(14));
+
+      document.getElementById("labelBtn").addEventListener("click", () => lb.showWindow("labeling"));
+      document.getElementById("trainBtn").addEventListener("click", () => {
+        const tail = document.getElementById("logTail");
+        tail.textContent += "\nTraining queue is platform-side — check the README for the auto.sh / auto.ps1 invocation.";
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,453 @@
+import AppKit
+import Combine
+import SwiftUI
+
+/// Central observable state for the whole app.
+///
+/// Owns the capture manager, region store, and weak references to the three
+/// runtime windows (Control Panel, Region Editor, Render Layer). Every action
+/// the user can take — start/stop capture, open/close editor, quit — flows
+/// through here, so the menu bar, hotkeys, and Control Panel stay in sync.
+@MainActor
+final class AppController: ObservableObject {
+    let regionStore: RegionStore
+    let captureManager: ScreenCaptureManager
+    let labelingController: LabelingController
+    let perAppRules: PerAppRulesStore
+
+    // Windows are created by AppDelegate after launch and owned here so they
+    // survive the launch scope. Previously these were `weak` and
+    // RegionEditorWindow/RenderLayerWindow had no `isReleasedWhenClosed = false`,
+    // causing the editor (and every entry point that opened it) to silently
+    // no-op. Strong refs + isReleasedWhenClosed=false is the standard AppKit
+    // pattern for app-lifetime singletons.
+    var controlPanel: ControlPanelWindow?
+    var regionEditor: RegionEditorWindow?
+    var renderLayer: RenderLayerWindow?
+    var labelingWindow: LabelingWindow?
+    var trainingDashboardWindow: TrainingDashboardWindow?
+    var miniHUDWindow: MiniHUDWindow?
+    var onboardingWindow: OnboardingWindow?
+    let trainingController: TrainingController
+
+    @Published private(set) var isRunning: Bool = false
+    @Published private(set) var detectionEnabled: Bool = true
+    @Published private(set) var regionCount: Int = 0
+    @Published private(set) var isEditorOpen: Bool = false
+    @Published private(set) var screenshotCount: Int = 0
+    @Published var autoCaptureEnabled: Bool = false {
+        didSet { updateAutoCaptureTimer() }
+    }
+    @Published var autoCaptureIntervalSeconds: Double = 60.0 {
+        didSet { updateAutoCaptureTimer() }
+    }
+    @Published private(set) var lastCaptureTimestamp: Date? = nil
+    /// Frontmost-app metadata, refreshed on `NSWorkspace.didActivateApplicationNotification`.
+    /// Drives the `pauseOnFullscreen` toggle and per-app rules pipeline gates.
+    @Published private(set) var frontmostBundleID: String? = nil
+    @Published private(set) var frontmostName: String? = nil
+
+    /// Live permission state. Re-checked when LiveBlock becomes active
+    /// (e.g. user returned from System Settings) so the UI never lies
+    /// about whether a grant was issued.
+    @Published private(set) var screenRecordingGranted: Bool = Permissions.screenRecordingGranted()
+    @Published private(set) var accessibilityGranted: Bool = Permissions.accessibilityGranted()
+
+    /// One source of truth for "what is the app actually doing right now."
+    /// Derived from running state, frontmost app, fullscreen, exclusion,
+    /// permission, and start error — composed into a single enum the
+    /// banner UI reads. Updated reactively, not polled.
+    @Published private(set) var pauseReason: PauseReason = .stopped
+
+    @AppStorage("pauseOnFullscreen") private var pauseOnFullscreenStored: Bool = true
+
+    private var cancellables = Set<AnyCancellable>()
+    private var autoCaptureTimer: Timer?
+    private var workspaceObserver: NSObjectProtocol?
+    private var didBecomeActiveObserver: NSObjectProtocol?
+
+    init() {
+        self.regionStore = RegionStore()
+        self.captureManager = ScreenCaptureManager(regionStore: regionStore)
+        self.labelingController = LabelingController()
+        self.trainingController = TrainingController()
+        self.perAppRules = PerAppRulesStore()
+
+        // After training installs a fresh model, drop both VisionProcessor
+        // caches so the next inference picks it up — no relaunch needed.
+        let cm = self.captureManager
+        let lc = self.labelingController
+        self.trainingController.onModelInstalled = { [weak cm, weak lc] in
+            cm?.reloadDetectionModel()
+            lc?.reloadDetectionModel()
+        }
+
+        captureManager.$isRunning
+            .receive(on: RunLoop.main)
+            .assign(to: &$isRunning)
+
+        captureManager.$detectionEnabled
+            .receive(on: RunLoop.main)
+            .assign(to: &$detectionEnabled)
+
+        regionCount = regionStore.current.count
+        screenshotCount = labelingController.totalCount
+
+        labelingController.$totalCount
+            .receive(on: RunLoop.main)
+            .assign(to: &$screenshotCount)
+
+        // Push the persisted fullscreen-pause preference into the capture
+        // manager so the SCStream callback honors it.
+        captureManager.pauseOnFullscreen = pauseOnFullscreenStored
+
+        // Track which app is frontmost so we can pause for fullscreen video
+        // and per-app exclusions without polling on every captured frame.
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            else { return }
+            Task { @MainActor [weak self] in
+                self?.handleFrontmostAppChange(app)
+            }
+        }
+        // Seed once on launch.
+        if let app = NSWorkspace.shared.frontmostApplication {
+            handleFrontmostAppChange(app)
+        }
+
+        // Re-evaluate exclusion when the user toggles a rule.
+        perAppRules.$excludedBundleIDs
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, let app = NSWorkspace.shared.frontmostApplication
+                else { return }
+                self.handleFrontmostAppChange(app)
+            }
+            .store(in: &cancellables)
+
+        // Re-check macOS permissions whenever LiveBlock returns to the
+        // foreground. The user has just been to System Settings; the UI
+        // must reflect the new grant state immediately, not on next launch.
+        didBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshPermissions()
+            }
+        }
+        // Seed once on construction.
+        refreshPermissions()
+
+        // Compose pauseReason from every input that affects it. This is
+        // the SINGLE source of truth the UI reads. Anything published here
+        // becomes the next banner state within one runloop tick.
+        Publishers.CombineLatest4(
+            captureManager.$isRunning,
+            captureManager.$lastStartError,
+            captureManager.$frontmostIsFullscreen,
+            captureManager.$frontmostIsExcluded
+        )
+        .combineLatest(
+            captureManager.$pauseOnFullscreen,
+            $screenRecordingGranted,
+            $frontmostName
+        )
+        .receive(on: RunLoop.main)
+        .map { tuple, pauseOnFullscreen, screenGranted, frontmostName -> PauseReason in
+            let (running, startErr, frontFullscreen, frontExcluded) = tuple
+            if !screenGranted { return .permissionDenied }
+            if let err = startErr, !err.isEmpty { return .startError(err) }
+            if !running { return .stopped }
+            if frontExcluded { return .excludedApp(frontmostName ?? "this app") }
+            if pauseOnFullscreen && frontFullscreen {
+                return .fullscreenApp(frontmostName ?? "this app")
+            }
+            return .none
+        }
+        .removeDuplicates()
+        .assign(to: &$pauseReason)
+    }
+
+    deinit {
+        if let observer = didBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = workspaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+    }
+
+    private func refreshPermissions() {
+        let sr = Permissions.screenRecordingGranted()
+        let ax = Permissions.accessibilityGranted()
+        if sr != screenRecordingGranted { screenRecordingGranted = sr }
+        if ax != accessibilityGranted { accessibilityGranted = ax }
+    }
+
+    private func handleFrontmostAppChange(_ app: NSRunningApplication) {
+        frontmostBundleID = app.bundleIdentifier
+        frontmostName = app.localizedName
+        captureManager.frontmostIsExcluded = perAppRules.isExcluded(app.bundleIdentifier ?? "")
+        captureManager.frontmostIsFullscreen = Self.isFrontmostAppFullscreen(app)
+    }
+
+    /// Heuristic: walk Quartz Window Services for windows owned by `app`'s
+    /// PID. If any of them spans the full screen frame and is on the active
+    /// space, treat the app as fullscreen. Cheap and doesn't require
+    /// extra entitlements.
+    private static func isFrontmostAppFullscreen(_ app: NSRunningApplication) -> Bool {
+        guard let mainScreen = NSScreen.main else { return false }
+        let screenSize = mainScreen.frame.size
+        let info = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] ?? []
+        for window in info {
+            guard let pid = window[kCGWindowOwnerPID as String] as? pid_t,
+                  pid == app.processIdentifier,
+                  let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+                  let w = bounds["Width"], let h = bounds["Height"]
+            else { continue }
+            // ±2 px slop for menu-bar inset and scaling rounding.
+            if abs(w - screenSize.width) <= 2 && abs(h - screenSize.height) <= 2 {
+                return true
+            }
+        }
+        return false
+    }
+
+    func updatePauseOnFullscreen(_ on: Bool) {
+        pauseOnFullscreenStored = on
+        captureManager.pauseOnFullscreen = on
+    }
+
+    // MARK: - Actions
+
+    func toggleCapture() {
+        if isRunning {
+            Task { await captureManager.stop() }
+        } else {
+            guard let screen = currentScreen() else { return }
+            Task { await captureManager.start(on: screen) }
+        }
+    }
+
+    func setDetectionEnabled(_ enabled: Bool) {
+        captureManager.detectionEnabled = enabled
+    }
+
+    func openEditor() {
+        guard let panel = regionEditor else {
+            NSLog("AppController.openEditor: regionEditor is nil — window was never created or got deallocated.")
+            assertionFailure("regionEditor missing")
+            return
+        }
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        isEditorOpen = true
+    }
+
+    func closeEditor() {
+        regionEditor?.orderOut(nil)
+        isEditorOpen = false
+        refreshRegionCount()
+    }
+
+    func toggleEditor() {
+        if isEditorOpen { closeEditor() } else { openEditor() }
+    }
+
+    func showControlPanel() {
+        controlPanel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func hideControlPanel() {
+        controlPanel?.orderOut(nil)
+    }
+
+    /// Show a confirm dialog before deleting all regions. Surfaced from
+    /// every "Clear regions" entry point. Skips the dialog if there's
+    /// nothing to delete.
+    func clearRegionsWithConfirm() {
+        let count = regionCount
+        guard count > 0 else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete all \(count) region\(count == 1 ? "" : "s")?"
+        alert.informativeText = "This can't be undone. Regions you've drawn (and their per-region toggles) will be removed."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete \(count)")
+        alert.addButton(withTitle: "Cancel")
+        // Make the destructive option the default-Enter target.
+        if let destructive = alert.buttons.first {
+            destructive.hasDestructiveAction = true
+        }
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            regionStore.clear()
+            refreshRegionCount()
+        }
+    }
+
+    func clearRegions() {
+        regionStore.clear()
+        refreshRegionCount()
+    }
+
+    func deleteRegion(id: UUID) {
+        regionStore.remove(id: id)
+        refreshRegionCount()
+    }
+
+    func addRegion(_ region: NormalizedRegion) {
+        regionStore.add(region)
+        refreshRegionCount()
+    }
+
+    func refreshRegionCount() {
+        regionCount = regionStore.current.count
+    }
+
+    // MARK: - Region enabled-state (per-region kill switch)
+    //
+    // The region store keeps every drawn region; this side-channel toggles
+    // whether each one feeds the inpaint pipeline. UserDefaults-backed so
+    // the state survives relaunch.
+
+    private static let disabledIdsKey = "disabledRegionIds"
+
+    func regionEnabled(id: UUID) -> Bool {
+        let disabled = UserDefaults.standard.stringArray(forKey: Self.disabledIdsKey) ?? []
+        return !disabled.contains(id.uuidString)
+    }
+
+    func setRegionEnabled(id: UUID, on: Bool) {
+        var disabled = Set(UserDefaults.standard.stringArray(forKey: Self.disabledIdsKey) ?? [])
+        if on { disabled.remove(id.uuidString) } else { disabled.insert(id.uuidString) }
+        UserDefaults.standard.set(Array(disabled), forKey: Self.disabledIdsKey)
+        // Trigger UI refresh
+        objectWillChange.send()
+    }
+
+    func quit() {
+        Task { @MainActor in
+            stopAutoCapture()
+            if isRunning { await captureManager.stop() }
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// Stop capture, hide the render-layer overlay, close the editor if
+    /// open, and surface the control panel. Wired to ⌘⇧⌥. and the visible
+    /// Panic button. The user wants a single instant action that gets
+    /// LiveBlock out of their way without quitting.
+    func panicDisable() {
+        Task { @MainActor in
+            stopAutoCapture()
+            if isRunning { await captureManager.stop() }
+            renderLayer?.orderOut(nil)
+            if isEditorOpen { closeEditor() }
+            showControlPanel()
+        }
+    }
+
+    // MARK: - Labeling pipeline
+
+    /// Capture the most recent frame as a PNG into the labeling queue.
+    /// If capture is off we start it briefly, save a frame, then leave it
+    /// running — visual users shouldn't have to first toggle capture before
+    /// being able to grab a screenshot.
+    func captureScreenshotForLabeling() {
+        Task { @MainActor in
+            if !isRunning {
+                guard let screen = currentScreen() else {
+                    NSLog("AppController: no screen to start capture on.")
+                    return
+                }
+                await captureManager.start(on: screen)
+                // Give SCStream one frame to land before we ask for it.
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            let url = await captureManager.saveLatestFrameForLabeling()
+            if url != nil {
+                self.lastCaptureTimestamp = Date()
+                self.labelingController.refresh()
+                NSSound(named: NSSound.Name("Tink"))?.play()
+            } else {
+                NSLog("AppController: capture screenshot returned nil.")
+            }
+        }
+    }
+
+    func showLabelingWindow() {
+        labelingController.refresh()
+        guard let win = labelingWindow else {
+            NSLog("AppController.showLabelingWindow: labelingWindow is nil.")
+            assertionFailure("labelingWindow missing")
+            return
+        }
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func showTrainingDashboard() {
+        guard let win = trainingDashboardWindow else {
+            NSLog("AppController.showTrainingDashboard: trainingDashboardWindow is nil.")
+            assertionFailure("trainingDashboardWindow missing")
+            return
+        }
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func showMiniHUD() {
+        miniHUDWindow?.orderFrontRegardless()
+    }
+    func hideMiniHUD() {
+        miniHUDWindow?.orderOut(nil)
+    }
+    func showOnboarding() {
+        guard let win = onboardingWindow else {
+            NSLog("AppController.showOnboarding: onboardingWindow is nil.")
+            return
+        }
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Re-show onboarding even if the user finished it before. Surfaced
+    /// from the menu bar so users can re-watch the tour.
+    func restartOnboarding() {
+        UserDefaults.standard.set(false, forKey: "didOnboard")
+        showOnboarding()
+    }
+
+    private func stopAutoCapture() {
+        autoCaptureTimer?.invalidate()
+        autoCaptureTimer = nil
+    }
+
+    private func updateAutoCaptureTimer() {
+        stopAutoCapture()
+        guard autoCaptureEnabled else { return }
+        let interval = max(5.0, autoCaptureIntervalSeconds)
+        autoCaptureTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.captureScreenshotForLabeling()
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    func currentScreen() -> NSScreen? {
+        if let panel = controlPanel, let screen = panel.screen { return screen }
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+}

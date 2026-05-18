@@ -1,58 +1,212 @@
 import Foundation
 import CoreVideo
 import CoreImage
+import CoreML
+import Vision
+import AppKit
 
-struct AdBoundingBox {
-    let rect: CGRect
-    let confidence: Float
-    let brandClass: String
+enum AdSource: String, Codable, Sendable {
+    case user
+    case detection
 }
 
-class VisionProcessor {
-    
+struct AdBoundingBox: Sendable {
+    let rect: CGRect          // pixel coords, bottom-left origin (CV space)
+    let confidence: Float
+    let label: String
+    let source: AdSource
+    /// Set when this box originates from a user-drawn region; lets the
+    /// capture pipeline attribute blocking events to a specific region.
+    let regionID: UUID?
+
+    init(rect: CGRect, confidence: Float, label: String, source: AdSource, regionID: UUID? = nil) {
+        self.rect = rect
+        self.confidence = confidence
+        self.label = label
+        self.source = source
+        self.regionID = regionID
+    }
+}
+
+/// Wraps a Vision/CoreML object detector around the bundled `yolov8n.mlpackage`.
+///
+/// IMPORTANT: the shipped model is **generic YOLOv8n trained on COCO** (80 classes:
+/// `person`, `car`, `dog`, …). It is NOT an ad/logo detector. Detection mode wires
+/// the pipeline end-to-end; producing actual ad masks requires a fine-tune
+/// (see ASSESSMENT.md §3 Path A) or a different model entirely.
+final class VisionProcessor: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var model: VNCoreMLModel?
+    private var realtimeRequest: VNCoreMLRequest?  // reused on the videoQueue
+    private var labelingRequest: VNCoreMLRequest?  // reused on background labeling tasks
+    private var loadFailed = false
+    private var _minimumConfidence: Float = 0.35
+
+    var minimumConfidence: Float {
+        lock.lock(); defer { lock.unlock() }
+        return _minimumConfidence
+    }
+
     init() {
-        // Here we would load YOLOv11-OBB and SAM 2 .mlpackage files.
-        // e.g., let model = try? YOLOv11(configuration: MLModelConfiguration())
-        print("VisionProcessor initialized. Waiting for CoreML models.")
+        // Build lazily on first detection call so init never blocks.
     }
-    
-    /// Detects commercial advertisements in the given CVPixelBuffer using YOLOv11-OBB.
-    func detectAds(in pixelBuffer: CVPixelBuffer) -> [AdBoundingBox] {
-        // MOCK IMPLEMENTATION
-        // In reality, this would perform a forward pass on the INT8 CoreML model.
-        // For demonstration, we simulate detecting an ad in the center of the frame.
-        
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        
-        // Return a mock ad box
-        let mockBox = AdBoundingBox(
-            rect: CGRect(x: width / 4, y: height / 4, width: width / 2, height: height / 4),
-            confidence: 0.85,
-            brandClass: "Generic Brand"
-        )
-        
-        return [mockBox]
+
+    /// Detects objects in `pixelBuffer` using the bundled YOLO model.
+    /// Returns `[]` if the model cannot be loaded — never throws.
+    func detect(in pixelBuffer: CVPixelBuffer) -> [AdBoundingBox] {
+        guard let vnModel = ensureModel() else { return [] }
+        let threshold = minimumConfidence  // snapshot under lock
+
+        // Reuse the cached request — VNCoreMLRequest is designed for create-once-reuse.
+        let request: VNCoreMLRequest = {
+            lock.lock(); defer { lock.unlock() }
+            if let r = realtimeRequest { return r }
+            let r = VNCoreMLRequest(model: vnModel)
+            r.imageCropAndScaleOption = .scaleFill
+            realtimeRequest = r
+            return r
+        }()
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+        do {
+            try handler.perform([request])
+        } catch {
+            NSLog("VisionProcessor: detect failed: \(error.localizedDescription)")
+            return []
+        }
+
+        let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+
+        let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
+        return observations.compactMap { obs -> AdBoundingBox? in
+            guard let top = obs.labels.first, top.confidence >= threshold else { return nil }
+            // VNRecognizedObjectObservation.boundingBox is normalized [0..1] with origin bottom-left.
+            let bb = obs.boundingBox
+            let pixelRect = CGRect(x: bb.minX * width,
+                                   y: bb.minY * height,
+                                   width: bb.width * width,
+                                   height: bb.height * height)
+            return AdBoundingBox(rect: pixelRect,
+                                 confidence: top.confidence,
+                                 label: top.identifier,
+                                 source: .detection)
+        }
     }
-    
-    /// Segments the exact pixels of the ads using SAM 2 for precise mask generation.
-    func segmentAds(in pixelBuffer: CVPixelBuffer, boundingBoxes: [AdBoundingBox]) -> CVPixelBuffer {
-        // MOCK IMPLEMENTATION
-        // This would use SAM 2's mask decoder. 
-        // We just return a black and white mask based on the bounding boxes.
-        
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        
-        var pixelBufferOut: CVPixelBuffer?
-        let attributes: [String: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey as String: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true
-        ]
-        
-        CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_OneComponent8, attributes as CFDictionary, &pixelBufferOut)
-        
-        // Normally we'd render the precise semantic mask here using Metal or CoreImage.
-        return pixelBufferOut ?? pixelBuffer
+
+    func updateMinimumConfidence(_ value: Float) {
+        lock.lock(); defer { lock.unlock() }
+        _minimumConfidence = max(0, min(1, value))
+    }
+
+    /// Detect against a PNG on disk. Returns proposals as `LabelBox` (normalized,
+    /// top-left origin) suitable for the labeling UI. Lower confidence threshold
+    /// than realtime detection so the user can prune false positives quickly.
+    func detectBoxesInPNGFile(at url: URL) async -> [LabelBox] {
+        guard let vnModel = ensureModel() else { return [] }
+        guard let nsImage = NSImage(contentsOf: url),
+              let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return []
+        }
+
+        let request: VNCoreMLRequest = {
+            lock.lock(); defer { lock.unlock() }
+            if let r = labelingRequest { return r }
+            let r = VNCoreMLRequest(model: vnModel)
+            r.imageCropAndScaleOption = .scaleFill
+            labelingRequest = r
+            return r
+        }()
+        let proposalThreshold: Float = 0.20  // lower than the 0.35 realtime default
+
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up)
+        do {
+            try handler.perform([request])
+        } catch {
+            NSLog("VisionProcessor: PNG detect failed: \(error.localizedDescription)")
+            return []
+        }
+
+        let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
+        return observations.compactMap { obs -> LabelBox? in
+            guard let top = obs.labels.first, top.confidence >= proposalThreshold else { return nil }
+            // VNRecognizedObjectObservation rect is bottom-left origin, normalized.
+            // LabelBox uses top-left origin, normalized.
+            let bb = obs.boundingBox
+            return LabelBox(x: Double(bb.minX),
+                            y: Double(1.0 - bb.maxY),
+                            width: Double(bb.width),
+                            height: Double(bb.height))
+        }
+    }
+
+    // MARK: - Model loading
+
+    /// Where the training pipeline drops the freshly trained model so the
+    /// running app picks it up on next inference call.
+    private static var runtimeModelDirectory: URL {
+        let support = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support")
+        return support.appendingPathComponent("LiveBlock/models", isDirectory: true)
+    }
+
+    /// Public entry the TrainingController calls after a successful install.
+    /// Clears the cached VNCoreMLModel so the very next detection call
+    /// reloads from disk, picking up whatever the training pipeline wrote
+    /// into Application Support/LiveBlock/models/.
+    func reloadModel() {
+        lock.lock()
+        defer { lock.unlock() }
+        model = nil
+        loadFailed = false
+        NSLog("VisionProcessor: model cache cleared; will reload on next inference.")
+    }
+
+    private func ensureModel() -> VNCoreMLModel? {
+        lock.lock(); defer { lock.unlock() }
+        if let model { return model }
+        if loadFailed { return nil }
+
+        do {
+            let mlModel = try Self.loadModel()
+            let vnModel = try VNCoreMLModel(for: mlModel)
+            self.model = vnModel
+            NSLog("VisionProcessor: loaded yolov8n CoreML model.")
+            return vnModel
+        } catch {
+            loadFailed = true
+            NSLog("VisionProcessor: failed to load yolov8n model: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Look up the model in priority order:
+    ///   1. The runtime directory the trainer writes to (newer than bundle).
+    ///   2. The app bundle (the original ships-with-app default).
+    private static func loadModel() throws -> MLModel {
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .all
+
+        let runtimeDir = runtimeModelDirectory
+        for ext in ["mlmodelc", "mlpackage"] {
+            let url = runtimeDir.appendingPathComponent("yolov8n.\(ext)")
+            if FileManager.default.fileExists(atPath: url.path) {
+                NSLog("VisionProcessor: loading model from runtime dir \(url.path)")
+                return try MLModel(contentsOf: url, configuration: configuration)
+            }
+        }
+
+        let bundle = Bundle.main
+        for ext in ["mlmodelc", "mlpackage"] {
+            if let url = bundle.url(forResource: "yolov8n", withExtension: ext) {
+                return try MLModel(contentsOf: url, configuration: configuration)
+            }
+        }
+        throw NSError(domain: "VisionProcessor", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "yolov8n model not found in bundle or runtime dir"
+        ])
     }
 }

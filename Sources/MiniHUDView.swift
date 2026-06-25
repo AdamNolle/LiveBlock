@@ -1,5 +1,13 @@
 import SwiftUI
 
+/// Mini HUD — the tiny always-on status pill. Mirrors `ScreenHUD`
+/// (design/project/screens-flow.jsx): a single 36pt-tall capsule with a
+/// translucent dark-blur fill, a pulsing "Blocking" StatusDot + label, a
+/// run of Theme.mono live stats (regions · ms · today), and a ghost Pause
+/// button — all separated by 1px hairline dividers.
+///
+/// Window/drag behaviour lives in `MiniHUDWindow` (movable-by-background,
+/// floating panel); this view only paints the pill.
 struct MiniHUDView: View {
     @ObservedObject var controller: AppController
 
@@ -13,113 +21,102 @@ struct MiniHUDView: View {
         }
     }
 
+    private var isBlocking: Bool { controller.isRunning && !isPausedActive }
+
     private var statusWord: String {
-        if !controller.isRunning { return "IDLE" }
-        return isPausedActive ? "PAUSED" : "BLOCKING"
+        if !controller.isRunning { return "Idle" }
+        return isPausedActive ? "Paused" : "Blocking"
     }
 
     private var statusColor: Color {
-        if !controller.isRunning { return Color.secondary }
-        return isPausedActive ? Theme.warn : Theme.block
+        if !controller.isRunning { return Theme.ink4 }
+        return isPausedActive ? Theme.warn : Theme.accent
     }
 
-    private var secondaryLine: String {
-        switch controller.pauseReason {
-        case .fullscreenApp(let name):
-            return "Paused — \(name) is fullscreen"
-        case .excludedApp(let name):
-            return "Excluded — \(name)"
-        case .userPaused:
-            return "Paused by you"
-        case .permissionDenied:
-            return "Screen Recording permission needed"
-        case .startError:
-            return "Couldn't start — check Control Panel"
-        case .stopped, .none:
-            return "\(controller.screenshotCount) captures saved"
+    /// Per-frame processing time derived from the live capture rate.
+    private var frameMS: String {
+        let fps = controller.captureManager.framesPerSecond
+        guard fps > 0 else { return "0.0" }
+        return String(format: "%.1f", 1000 / fps)
+    }
+
+    // Pill fill: translucent dark blur (design rgba(15,16,22,0.92)).
+    private var pillBackground: some View {
+        ZStack {
+            Capsule(style: .continuous).fill(.ultraThinMaterial)
+            Capsule(style: .continuous).fill(Color(hex: 0x0F1016).opacity(0.92))
         }
     }
 
     var body: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                LiveBlockerLogo(size: 42, cornerRadius: 11)
-                Circle()
-                    .fill(Theme.block)
-                    .frame(width: 14, height: 14)
-                    .overlay(Circle().strokeBorder(Color(.windowBackgroundColor), lineWidth: 2))
-                    .offset(x: 17, y: -17)
-                    .shadow(color: Theme.block.opacity(0.45), radius: 4)
+        HStack(spacing: 0) {
+            // ── status ──────────────────────────────────────────────
+            HStack(spacing: 8) {
+                StatusDot(color: statusColor, size: 7, pulse: isBlocking)
+                Text(statusWord)
+                    .font(Theme.ui(size: 12, weight: .semibold))
+                    .tracking(-0.06)
+                    .foregroundStyle(Theme.ink1)
             }
+            .padding(.horizontal, 12)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(statusWord)
-                        .font(Theme.ui(size: 12, weight: .semibold))
-                        .tracking(1)
-                        .foregroundStyle(statusColor)
-                    Text("·")
-                        .foregroundStyle(Color.secondary.opacity(0.6))
-                    Text(String(format: "%.0f fps", controller.captureManager.framesPerSecond))
-                        .font(Theme.mono(size: 11))
-                        .foregroundStyle(Color.secondary)
-                }
-                Text("\(controller.regionCount) region\(controller.regionCount == 1 ? "" : "s") · \(controller.captureManager.currentPatches.count) live")
-                    .font(Theme.display(size: 18, weight: .bold))
-                    .foregroundStyle(Color.primary)
-                Text(secondaryLine)
-                    .font(Theme.ui(size: 10))
-                    .foregroundStyle(Color.secondary)
+            divider
+
+            // ── live stats (mono) ───────────────────────────────────
+            HStack(spacing: 8) {
+                stat("\(controller.regionCount)", "regions", color: Theme.ink1)
+                dot
+                stat(frameMS, "ms", color: Theme.ml)
+                dot
+                stat("\(controller.screenshotCount)", "today", color: Theme.accent)
             }
+            .padding(.horizontal, 12)
 
-            Spacer(minLength: 8)
+            divider
 
-            // Inline action buttons — every feature reachable by mouse from
-            // the always-visible HUD without opening the Control Panel.
-            HStack(spacing: 6) {
-                hudButton(
-                    systemImage: "rectangle.dashed",
-                    tint: Theme.block,
-                    help: "Draw a region to block"
-                ) { controller.toggleEditor() }
-
-                hudButton(
-                    systemImage: "camera",
-                    tint: Theme.detect,
-                    help: "Capture a screenshot for labeling"
-                ) { controller.captureScreenshotForLabeling() }
-
-                hudButton(
-                    systemImage: controller.isRunning ? "pause.fill" : "play.fill",
-                    tint: controller.isRunning ? Theme.warn : Theme.success,
-                    help: controller.isRunning ? "Pause blocking" : "Resume blocking"
-                ) { controller.toggleCapture() }
-
-                hudButton(
-                    systemImage: "macwindow",
-                    tint: Color.secondary,
-                    help: "Open Control Panel"
-                ) { controller.showControlPanel() }
-            }
+            // ── pause / resume ──────────────────────────────────────
+            LBButton(
+                title: isBlocking ? "Pause" : "Resume",
+                variant: .ghost,
+                size: .sm,
+                systemIcon: isBlocking ? "pause.fill" : "play.fill"
+            ) { controller.toggleCapture() }
+            .help(isBlocking ? "Pause blocking" : "Resume blocking")
         }
-        .padding(14)
-        .glassEffect(in: RoundedRectangle(cornerRadius: 24))
-        .padding(8)
+        .frame(height: 36)
+        .padding(.horizontal, 4)
+        .background(pillBackground)
+        .overlay(
+            Capsule(style: .continuous).strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+        )
+        .clipShape(Capsule(style: .continuous))
+        .shadow(color: .black.opacity(0.4), radius: 15, y: 10)
+        .fixedSize()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .preferredColorScheme(.dark)
     }
 
-    private func hudButton(
-        systemImage: String,
-        tint: Color,
-        help: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 32, height: 32)
+    // 1px vertical hairline (design: width 1, line colour, 7pt vertical inset).
+    private var divider: some View {
+        Rectangle()
+            .fill(Theme.line)
+            .frame(width: 1)
+            .padding(.vertical, 7)
+    }
+
+    // Centre dot separator between stats.
+    private var dot: some View {
+        Text("·").foregroundStyle(Theme.ink5)
+    }
+
+    private func stat(_ number: String, _ label: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Text(number)
+                .font(Theme.mono(size: 11))
+                .foregroundStyle(color)
+            Text(label)
+                .font(Theme.ui(size: 11, weight: .regular))
+                .foregroundStyle(Theme.ink3)
         }
-        .buttonStyle(.glass)
-        .help(help)
     }
 }

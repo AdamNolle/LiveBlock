@@ -1,5 +1,7 @@
+pub mod embeddings;
 pub mod vocabulary;
 
+pub use embeddings::ClassEmbeddings;
 pub use vocabulary::{VocabClass, Vocabulary};
 
 #[derive(Debug, thiserror::Error)]

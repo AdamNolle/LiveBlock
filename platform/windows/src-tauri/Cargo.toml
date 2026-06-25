@@ -21,6 +21,7 @@ tauri-build = { version = "2.0", features = [] }
 liveblock-regions = { path = "../../../core/crates/liveblock-regions" }
 liveblock-labels = { path = "../../../core/crates/liveblock-labels" }
 liveblock-detection = { path = "../../../core/crates/liveblock-detection" }
+liveblock-config = { path = "../../../core/crates/liveblock-config" }
 
 tauri = { version = "2.0", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2.0"

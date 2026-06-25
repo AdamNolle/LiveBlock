@@ -130,7 +130,7 @@ fn apply_window_styles(_: &AppHandle) {}
 
 fn try_load_default_detector(app: &AppHandle) {
     let candidate: PathBuf = match app.path().resolve(
-        "yolov8n.onnx",
+        "liveblock-detector.onnx",
         tauri::path::BaseDirectory::Resource,
     ) {
         Ok(p) => p,
@@ -138,7 +138,7 @@ fn try_load_default_detector(app: &AppHandle) {
     };
     if !candidate.exists() {
         tracing::warn!(
-            "detector model not found at {} — drop yolov8n.onnx into resources/",
+            "detector model not found at {} — drop liveblock-detector.onnx into resources/",
             candidate.display()
         );
         return;

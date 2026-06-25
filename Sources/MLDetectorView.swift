@@ -68,7 +68,7 @@ struct MLDetectorView: View {
                         .font(Theme.mono(size: 12, weight: .semibold))
                         .foregroundStyle(Theme.block)
                 }
-                Slider(value: $minConfidence, in: 0.5...0.99) {
+                Slider(value: $minConfidence, in: 0.05...0.9) {
                     Text("Threshold")
                 } onEditingChanged: { _ in
                     controller.captureManager.setMinimumConfidence(Float(minConfidence))

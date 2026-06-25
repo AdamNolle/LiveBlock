@@ -44,7 +44,7 @@ final class VisionProcessor: @unchecked Sendable {
     private var realtimeRequest: VNCoreMLRequest?  // reused on the videoQueue
     private var labelingRequest: VNCoreMLRequest?  // reused on background labeling tasks
     private var loadFailed = false
-    private var _minimumConfidence: Float = 0.35
+    private var _minimumConfidence: Float = 0.25
 
     /// Per-class vocabulary + thresholds from the shared Rust config. Built
     /// lazily on first detection call so init never blocks.

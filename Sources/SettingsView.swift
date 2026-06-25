@@ -6,8 +6,8 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var controller: AppController
     @State private var section: Section = .blocking
-    @AppStorage("minConfidence") private var minConfidenceStored: Double = 0.84
-    @State private var minConfidence: Double = 0.84
+    @AppStorage("minConfidence") private var minConfidenceStored: Double = 0.25
+    @State private var minConfidence: Double = 0.25
 
     @AppStorage("pauseOnFullscreen") private var pauseOnFullscreen: Bool = true
 

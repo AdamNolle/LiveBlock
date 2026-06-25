@@ -1,0 +1,119 @@
+/* LiveBlocker — brutalist terminal tokens.
+   Cross-platform: macOS, Windows, Linux. No OS-specific chrome.
+   Dark, near-black surface; hairline 1px rules; monospace throughout;
+   one hot accent (block red-orange); status colors for ML / OK / warn.
+
+   Density and accent can be reshaped at runtime via the Tweaks panel.
+*/
+
+:root {
+  /* ── Surface ────────────────────────────────────────────── */
+  --lb-bg: #0a0a0c;          /* page background */
+  --lb-panel: #0e0e12;       /* card / panel surface */
+  --lb-panel-2: #15151b;     /* nested / pressed surface */
+  --lb-panel-3: #1c1c24;     /* hover / selected row */
+  --lb-overlay: rgba(10,10,12,0.78);
+
+  /* ── Hairlines ───────────────────────────────────────────── */
+  --lb-rule: rgba(255,255,255,0.08);
+  --lb-rule-2: rgba(255,255,255,0.14);
+  --lb-rule-3: rgba(255,255,255,0.22);
+
+  /* ── Ink ─────────────────────────────────────────────────── */
+  --lb-ink: #f2f2f5;
+  --lb-ink-2: #c9c9d2;
+  --lb-ink-muted: #7d7d8a;
+  --lb-ink-faint: #4a4a55;
+  --lb-ink-dim: #2a2a34;
+
+  /* ── Accents (used VERY sparingly) ──────────────────────── */
+  --lb-block: #ff3b1f;       /* the kill colour */
+  --lb-block-dim: rgba(255,59,31,0.15);
+  --lb-ok: #4ade80;          /* status: blocking, granted */
+  --lb-ml: #22d3ee;          /* ML detector / cyan */
+  --lb-warn: #fbbf24;        /* warn / review */
+  --lb-info: #a78bfa;        /* secondary actions / "train" */
+
+  /* ── Type ────────────────────────────────────────────────── */
+  --lb-font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --lb-font-display: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* ── Density ─────────────────────────────────────────────── */
+  --lb-base-fs: 13px;
+  --lb-gap: 14px;
+  --lb-pad: 16px;
+
+  /* ── Radii (mostly 0 — brutalist). 4px for tiny ───────── */
+  --lb-r-0: 0px;
+  --lb-r-1: 2px;
+  --lb-r-2: 4px;
+  --lb-r-3: 8px;
+}
+
+/* ── Base ─────────────────────────────────────────────────── */
+.lb {
+  font-family: var(--lb-font-mono);
+  color: var(--lb-ink);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'ss01','ss02','zero','tnum';
+  font-variant-numeric: tabular-nums;
+}
+
+.lb-mono { font-family: var(--lb-font-mono); font-feature-settings: 'tnum','zero'; }
+
+/* ── Hairlines ────────────────────────────────────────────── */
+.lb-hl  { border: 1px solid var(--lb-rule); }
+.lb-hl2 { border: 1px solid var(--lb-rule-2); }
+.lb-hl3 { border: 1px solid var(--lb-rule-3); }
+
+/* ── Panels (no rounding, no shadow — brutalist) ────────── */
+.lb-panel {
+  background: var(--lb-panel);
+  border: 1px solid var(--lb-rule);
+}
+.lb-panel-inset {
+  background: var(--lb-panel-2);
+  border: 1px solid var(--lb-rule);
+}
+
+/* ── Section labels (UPPERCASE tight) ─────────────────────── */
+.lb-label {
+  font-family: var(--lb-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--lb-ink-muted);
+}
+
+/* ── Scanline overlay (used in floating tool / HUD) ──────── */
+.lb-scan {
+  background-image: repeating-linear-gradient(
+    0deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 3px);
+}
+
+/* ── ASCII bars (block characters) ────────────────────────── */
+.lb-bars {
+  letter-spacing: 0.02em;
+  white-space: pre;
+}
+
+/* small dot pulse */
+@keyframes lb-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+.lb-pulse { animation: lb-pulse 1.4s ease-in-out infinite; }
+
+/* caret */
+@keyframes lb-caret {
+  0%, 49%  { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.lb-caret { animation: lb-caret 1s steps(1) infinite; }
+
+/* selection */
+.lb ::selection { background: var(--lb-block); color: #fff; }
+
+/* form reset for buttons inside .lb */
+.lb button { font-family: inherit; }

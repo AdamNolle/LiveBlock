@@ -31,12 +31,12 @@ struct AdBoundingBox: Sendable {
 /// Wraps a Vision/CoreML object detector around the bundled
 /// `liveblock-detector.mlpackage`.
 ///
-/// The target model is the open-vocabulary detector baked by
-/// `tools/build_openvocab.py` (classes from `tools/vocab/liveblock-vocab.json`:
-/// Logo / Ad banner / Sponsored). Until that artifact lands, the existing
-/// COCO-trained YOLOv8n weights ship under the new name so the path keeps
-/// loading. Per-class enable flags + score thresholds are read from the shared
-/// `liveblock-config` store via `DetectionVocabulary`.
+/// The bundled model is the open-vocabulary detector baked by
+/// `tools/build_openvocab.py` from YOLO-World-v2 — 9 concept prompts flattened
+/// from `tools/vocab/liveblock-vocab.json` (Logo / Ad banner / Sponsored),
+/// exported NMS-baked to CoreML. No training data: the vocabulary is text, and
+/// it generalises to unseen brands. Per-class enable flags + score thresholds
+/// are read from the shared `liveblock-config` store via `DetectionVocabulary`.
 final class VisionProcessor: @unchecked Sendable {
 
     private let lock = NSLock()

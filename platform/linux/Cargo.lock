@@ -2519,6 +2519,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "liveblock-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "liveblock-detection"
 version = "0.1.0"
 dependencies = [
@@ -2549,6 +2558,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs 5.0.1",
  "image",
+ "liveblock-config",
  "liveblock-detection",
  "liveblock-labels",
  "liveblock-regions",

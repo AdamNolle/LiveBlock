@@ -4,19 +4,34 @@
 //! the Windows port byte-for-byte.
 
 use anyhow::{Context, Result};
+use liveblock_config::Vocabulary;
 use liveblock_detection::{filter_by_score, non_max_suppression, Detection};
 use ndarray::{Array, Array4, IxDyn};
 use ort::session::{Session, SessionBuilder};
 use ort::value::Value;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy)]
+/// Default model artifact filename — the baked open-vocab detector. Replaces the
+/// old COCO `yolov8n.onnx`; same 640×640 input + YOLOv8 head, so decode/NMS are
+/// unchanged. Callers resolve this against the bundled resources dir.
+pub const MODEL_FILE_NAME: &str = "liveblock-detector.onnx";
+
+/// Bundled default open-vocab vocabulary, shared verbatim with the
+/// `liveblock-config` crate tests and the offline build tool. Class names are
+/// read from here so Linux reports `Logo`/`Ad banner`/`Sponsored` rather than a
+/// bare `class_id`.
+const DEFAULT_VOCAB_JSON: &str = include_str!("../../../../tools/vocab/liveblock-vocab.json");
+
+#[derive(Debug, Clone)]
 pub struct DetBox {
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
     pub class_id: u32,
+    /// Human-readable class name resolved from the shared vocabulary. Falls back
+    /// to `class_<id>` if the model emits an id outside the bundled vocab.
+    pub class_name: String,
     pub score: f32,
 }
 
@@ -27,6 +42,28 @@ pub struct Detector {
     input_size: u32,
     score_threshold: f32,
     iou_threshold: f32,
+    /// Class names indexed by class id, loaded from the shared vocabulary.
+    class_names: Vec<String>,
+}
+
+/// Load class names from the bundled open-vocab vocabulary, indexed by class id.
+/// Returns an empty vec if the embedded JSON ever fails to parse — callers then
+/// fall back to synthetic `class_<id>` names, so detection still functions.
+fn vocab_class_names() -> Vec<String> {
+    match Vocabulary::from_json(DEFAULT_VOCAB_JSON) {
+        Ok(v) => {
+            let max_id = v.classes.iter().map(|c| c.id).max().unwrap_or(0);
+            let mut names = vec![String::new(); max_id as usize + 1];
+            for c in &v.classes {
+                let idx = c.id as usize;
+                if idx < names.len() {
+                    names[idx] = c.name.clone();
+                }
+            }
+            names
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 impl Detector {
@@ -48,6 +85,7 @@ impl Detector {
             input_size: 640,
             score_threshold: 0.35,
             iou_threshold: 0.45,
+            class_names: vocab_class_names(),
         })
     }
 
@@ -73,6 +111,7 @@ impl Detector {
             pad_y,
             self.score_threshold,
             self.iou_threshold,
+            &self.class_names,
         ))
     }
 
@@ -166,6 +205,7 @@ fn decode_yolov8_head(
     pad_y: i32,
     score_threshold: f32,
     iou_threshold: f32,
+    class_names: &[String],
 ) -> Vec<DetBox> {
     let (nc, n_anchors) = match raw.shape() {
         &[1, c, n] => (c - 4, n),
@@ -219,6 +259,11 @@ fn decode_yolov8_head(
             w: d.width * src_w,
             h: d.height * src_h,
             class_id: d.class_id,
+            class_name: class_names
+                .get(d.class_id as usize)
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("class_{}", d.class_id)),
             score: d.score,
         })
         .collect()

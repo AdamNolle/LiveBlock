@@ -28,12 +28,15 @@ struct AdBoundingBox: Sendable {
     }
 }
 
-/// Wraps a Vision/CoreML object detector around the bundled `yolov8n.mlpackage`.
+/// Wraps a Vision/CoreML object detector around the bundled
+/// `liveblock-detector.mlpackage`.
 ///
-/// IMPORTANT: the shipped model is **generic YOLOv8n trained on COCO** (80 classes:
-/// `person`, `car`, `dog`, …). It is NOT an ad/logo detector. Detection mode wires
-/// the pipeline end-to-end; producing actual ad masks requires a fine-tune
-/// (see ASSESSMENT.md §3 Path A) or a different model entirely.
+/// The target model is the open-vocabulary detector baked by
+/// `tools/build_openvocab.py` (classes from `tools/vocab/liveblock-vocab.json`:
+/// Logo / Ad banner / Sponsored). Until that artifact lands, the existing
+/// COCO-trained YOLOv8n weights ship under the new name so the path keeps
+/// loading. Per-class enable flags + score thresholds are read from the shared
+/// `liveblock-config` store via `DetectionVocabulary`.
 final class VisionProcessor: @unchecked Sendable {
 
     private let lock = NSLock()
@@ -42,6 +45,10 @@ final class VisionProcessor: @unchecked Sendable {
     private var labelingRequest: VNCoreMLRequest?  // reused on background labeling tasks
     private var loadFailed = false
     private var _minimumConfidence: Float = 0.35
+
+    /// Per-class vocabulary + thresholds from the shared Rust config. Built
+    /// lazily on first detection call so init never blocks.
+    private var _vocabulary: DetectionVocabulary?
 
     var minimumConfidence: Float {
         lock.lock(); defer { lock.unlock() }
@@ -52,11 +59,40 @@ final class VisionProcessor: @unchecked Sendable {
         // Build lazily on first detection call so init never blocks.
     }
 
+    /// Where the persisted per-class detection settings live.
+    private static var detectionSettingsURL: URL {
+        let support = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support")
+        return support
+            .appendingPathComponent("LiveBlock", isDirectory: true)
+            .appendingPathComponent("detection-settings.json")
+    }
+
+    /// Lazily open the vocabulary store, seeding from the bundled vocab JSON on
+    /// first run. Caller holds `lock`.
+    private func ensureVocabularyLocked() -> DetectionVocabulary {
+        if let v = _vocabulary { return v }
+        let bundledJSON = Bundle.main.url(forResource: "liveblock-vocab", withExtension: "json")
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        let v = DetectionVocabulary(settingsURL: Self.detectionSettingsURL,
+                                    bundledVocabJSON: bundledJSON)
+        _vocabulary = v
+        return v
+    }
+
     /// Detects objects in `pixelBuffer` using the bundled YOLO model.
     /// Returns `[]` if the model cannot be loaded — never throws.
     func detect(in pixelBuffer: CVPixelBuffer) -> [AdBoundingBox] {
         guard let vnModel = ensureModel() else { return [] }
-        let threshold = minimumConfidence  // snapshot under lock
+        let globalThreshold: Float
+        let vocabulary: DetectionVocabulary
+        do {
+            lock.lock(); defer { lock.unlock() }
+            globalThreshold = _minimumConfidence
+            vocabulary = ensureVocabularyLocked()
+        }
 
         // Reuse the cached request — VNCoreMLRequest is designed for create-once-reuse.
         let request: VNCoreMLRequest = {
@@ -81,7 +117,12 @@ final class VisionProcessor: @unchecked Sendable {
 
         let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
         return observations.compactMap { obs -> AdBoundingBox? in
-            guard let top = obs.labels.first, top.confidence >= threshold else { return nil }
+            guard let top = obs.labels.first else { return nil }
+            // Per-class effective threshold keyed on the vocab class name. A nil
+            // result means the class is known and disabled -> drop the detection.
+            guard let threshold = vocabulary.effectiveThreshold(forLabel: top.identifier,
+                                                                globalFallback: globalThreshold),
+                  top.confidence >= threshold else { return nil }
             // VNRecognizedObjectObservation.boundingBox is normalized [0..1] with origin bottom-left.
             let bb = obs.boundingBox
             let pixelRect = CGRect(x: bb.minX * width,
@@ -174,11 +215,11 @@ final class VisionProcessor: @unchecked Sendable {
             let mlModel = try Self.loadModel()
             let vnModel = try VNCoreMLModel(for: mlModel)
             self.model = vnModel
-            NSLog("VisionProcessor: loaded yolov8n CoreML model.")
+            NSLog("VisionProcessor: loaded liveblock-detector CoreML model.")
             return vnModel
         } catch {
             loadFailed = true
-            NSLog("VisionProcessor: failed to load yolov8n model: \(error.localizedDescription)")
+            NSLog("VisionProcessor: failed to load liveblock-detector model: \(error.localizedDescription)")
             return nil
         }
     }
@@ -192,7 +233,7 @@ final class VisionProcessor: @unchecked Sendable {
 
         let runtimeDir = runtimeModelDirectory
         for ext in ["mlmodelc", "mlpackage"] {
-            let url = runtimeDir.appendingPathComponent("yolov8n.\(ext)")
+            let url = runtimeDir.appendingPathComponent("liveblock-detector.\(ext)")
             if FileManager.default.fileExists(atPath: url.path) {
                 NSLog("VisionProcessor: loading model from runtime dir \(url.path)")
                 return try MLModel(contentsOf: url, configuration: configuration)
@@ -201,12 +242,12 @@ final class VisionProcessor: @unchecked Sendable {
 
         let bundle = Bundle.main
         for ext in ["mlmodelc", "mlpackage"] {
-            if let url = bundle.url(forResource: "yolov8n", withExtension: ext) {
+            if let url = bundle.url(forResource: "liveblock-detector", withExtension: ext) {
                 return try MLModel(contentsOf: url, configuration: configuration)
             }
         }
         throw NSError(domain: "VisionProcessor", code: 1, userInfo: [
-            NSLocalizedDescriptionKey: "yolov8n model not found in bundle or runtime dir"
+            NSLocalizedDescriptionKey: "liveblock-detector model not found in bundle or runtime dir"
         ])
     }
 }

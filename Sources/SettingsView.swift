@@ -318,7 +318,7 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 infoRow(label: "Version", value: "\(version) (build \(build))")
-                infoRow(label: "Detector", value: "yolov8n CoreML (generic COCO weights — train your own from the Training tab)")
+                infoRow(label: "Detector", value: "liveblock-detector CoreML (open-vocabulary — blocks logos & ads with no training)")
                 infoRow(label: "Capture", value: "Apple ScreenCaptureKit at 60 Hz")
                 infoRow(label: "Inpainter", value: "Mirror-blend (sample band, reflect across edge, cross-fade)")
                 infoRow(label: "Network", value: "None. Zero outbound traffic. No telemetry.")

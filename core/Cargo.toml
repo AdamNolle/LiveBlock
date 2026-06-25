@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/liveblock-config",
     "crates/liveblock-core",
     "crates/liveblock-regions",
     "crates/liveblock-labels",

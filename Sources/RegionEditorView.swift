@@ -44,15 +44,11 @@ struct RegionEditorView: View {
                     regionView(region: region, canvasSize: geo.size)
                 }
 
-                // 3. Live preview of the rectangle being drawn from scratch.
+                // 3. Live preview of the rectangle being drawn from scratch —
+                //    the design's "marquee": spotlight dim + accent rect +
+                //    corner handles + mono "W × H" dimension label.
                 if case .creating(let start, let current) = active {
-                    Rectangle()
-                        .stroke(Color.accentColor, lineWidth: 2)
-                        .background(Color.accentColor.opacity(0.18))
-                        .frame(width: abs(current.x - start.x),
-                               height: abs(current.y - start.y))
-                        .position(x: (start.x + current.x) / 2,
-                                  y: (start.y + current.y) / 2)
+                    marqueePreview(start: start, current: current)
                         .allowsHitTesting(false)
                 }
 
@@ -80,6 +76,7 @@ struct RegionEditorView: View {
             .id(revision)
         }
         .ignoresSafeArea()
+        .preferredColorScheme(.dark)
         .onAppear {
             // Auto-dismiss the hint card after 8 s so it doesn't linger.
             showHintCard = (controller.regionCount == 0)
@@ -95,31 +92,95 @@ struct RegionEditorView: View {
         VStack(spacing: 8) {
             Image(systemName: "rectangle.dashed")
                 .font(.system(size: 36, weight: .semibold))
-                .foregroundStyle(Theme.block)
+                .foregroundStyle(Theme.accent)
             Text("Drag any rectangle on screen to block it")
                 .font(Theme.display(size: 18, weight: .bold))
-                .foregroundStyle(Color.primary)
+                .foregroundStyle(Theme.ink1)
             Text("Or use the size buttons above to drop a region of a fixed size. Press \u{2318}\u{21E9} to confirm and close, Esc to cancel.")
                 .font(Theme.ui(size: 12))
-                .foregroundStyle(Color.secondary)
+                .foregroundStyle(Theme.ink3)
                 .multilineTextAlignment(.center)
-            Button("Got it") { showHintCard = false }
-                .buttonStyle(.glassProminent)
-                .tint(Theme.block)
-                .controlSize(.small)
-                .padding(.top, 4)
+            LBButton(title: "Got it", variant: .accent, size: .sm) {
+                showHintCard = false
+            }
+            .padding(.top, 4)
         }
         .padding(20)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.large))
+        .lbCard(Theme.surface, radius: Theme.Radius.r5, stroke: Theme.line2)
+        .shadow(color: .black.opacity(0.5), radius: 28, y: 18)
     }
 
     // MARK: - Canvas (create new region)
 
     @ViewBuilder
     private func canvasLayer(in size: CGSize) -> some View {
-        Color.black.opacity(0.22)
+        // Translucent scrim — keeps the screen behind visible while marking,
+        // tinted with the design's deep base (#08090E).
+        Color(hex: 0x08090E).opacity(0.28)
             .contentShape(Rectangle())
             .gesture(createGesture(size: size))
+    }
+
+    // MARK: - Marquee preview (drag-to-create) — design ScreenFloatingClassic
+
+    @ViewBuilder
+    private func marqueePreview(start: CGPoint, current: CGPoint) -> some View {
+        let rect = CGRect(x: min(start.x, current.x),
+                          y: min(start.y, current.y),
+                          width: abs(current.x - start.x),
+                          height: abs(current.y - start.y))
+        ZStack {
+            // Spotlight dim — everything outside the marquee darkens (the design's
+            // `box-shadow: 0 0 0 9999px rgba(8,9,14,0.55)` cutout).
+            Color(hex: 0x08090E).opacity(0.5)
+                .mask {
+                    Rectangle()
+                        .overlay(
+                            Rectangle()
+                                .frame(width: rect.width, height: rect.height)
+                                .position(x: rect.midX, y: rect.midY)
+                                .blendMode(.destinationOut)
+                        )
+                        .compositingGroup()
+                }
+
+            // Marquee rect — 2px accent border + accentSoft fill.
+            RoundedRectangle(cornerRadius: Theme.Radius.r1, style: .continuous)
+                .fill(Theme.accentSoft)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.r1, style: .continuous)
+                        .stroke(Theme.accent, lineWidth: 2)
+                )
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+
+            // Corner handles — white fill, accent border.
+            ForEach(Array(marqueeCorners(rect).enumerated()), id: \.offset) { _, pt in
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(.white)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .stroke(Theme.accent, lineWidth: 2)
+                    )
+                    .frame(width: 10, height: 10)
+                    .position(x: pt.x, y: pt.y)
+            }
+
+            // Live dimension label — mono "W × H", accent chip above the rect.
+            Text("\(Int(rect.width)) × \(Int(rect.height))")
+                .font(Theme.mono(size: 11, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Theme.accent,
+                            in: RoundedRectangle(cornerRadius: Theme.Radius.r2, style: .continuous))
+                .position(x: rect.midX, y: max(12, rect.minY - 16))
+        }
+    }
+
+    private func marqueeCorners(_ r: CGRect) -> [CGPoint] {
+        [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY),
+         CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY)]
     }
 
     private func createGesture(size: CGSize) -> some Gesture {
@@ -169,10 +230,9 @@ struct RegionEditorView: View {
         ZStack(alignment: .topTrailing) {
             // Body — fills the region. Hover for handles. Drag to move.
             Rectangle()
-                .fill(Color.red.opacity(isHovered ? 0.18 : 0.10))
+                .fill(Theme.accent.opacity(isHovered ? 0.20 : 0.12))
                 .overlay(
-                    Rectangle().stroke(Color.red.opacity(0.9),
-                                       style: StrokeStyle(lineWidth: 2, dash: [6]))
+                    Rectangle().stroke(Theme.accent, lineWidth: 2)
                 )
                 .frame(width: rect.width, height: rect.height)
                 .position(x: rect.midX, y: rect.midY)
@@ -218,7 +278,7 @@ struct RegionEditorView: View {
         let pt = handlePosition(handle, in: regionRect)
         Circle()
             .fill(Color.white)
-            .overlay(Circle().stroke(Color.red, lineWidth: 2))
+            .overlay(Circle().stroke(Theme.accent, lineWidth: 2))
             .frame(width: handleSize, height: handleSize)
             .position(x: pt.x, y: pt.y)
             .gesture(resizeGesture(region: region, handle: handle, canvasSize: canvasSize))
@@ -389,79 +449,78 @@ struct RegionEditorView: View {
     }
 
     private var toolbar: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                LiveBlockerLogo(size: 32, cornerRadius: 8)
-                Divider().frame(height: 28)
+        HStack(spacing: 8) {
+            LiveBlockerLogo(size: 26, cornerRadius: 7)
 
-                // Drop a region of a fixed size at the center, no drag needed.
-                Button {
-                    dropRegion(width: 0.18, height: 0.10)
-                } label: {
-                    sizeLabel("S", caption: "Small")
-                }
-                .buttonStyle(.glass).controlSize(.small)
-                .help("Drop a small region (~18\u{00D7}10%)")
+            tbDivider
 
-                Button {
-                    dropRegion(width: 0.32, height: 0.18)
-                } label: {
-                    sizeLabel("M", caption: "Medium")
-                }
-                .buttonStyle(.glass).controlSize(.small)
-                .help("Drop a medium region (~32\u{00D7}18%)")
-
-                Button {
-                    dropRegion(width: 0.52, height: 0.32)
-                } label: {
-                    sizeLabel("L", caption: "Large")
-                }
-                .buttonStyle(.glass).controlSize(.small)
-                .help("Drop a large region (~52\u{00D7}32%)")
-
-                Button {
-                    addFullScreenRegion()
-                } label: {
-                    sizeLabel("FS", caption: "Full screen")
-                }
-                .buttonStyle(.glass).controlSize(.small)
-                .help("Block the whole screen")
-
-                Divider().frame(height: 28)
-
-                Button {
-                    controller.closeEditor()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark")
-                        Text("Done")
-                    }
-                }
-                .buttonStyle(.glassProminent).tint(Theme.success)
-                .help("Save and close (\u{2318}\u{21A9} or Esc)")
-                .keyboardShortcut(.return, modifiers: [.command])
-
-                Button {
-                    controller.closeEditor()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.glass).controlSize(.small)
-                .help("Close (Esc)")
+            // Drop a region of a fixed size at the center, no drag needed.
+            LBButton(title: "S", variant: .ghost, size: .sm, systemIcon: "plus") {
+                dropRegion(width: 0.18, height: 0.10)
             }
-            .padding(10)
-            .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.xl))
+            .help("Drop a small region (~18\u{00D7}10%)")
+
+            LBButton(title: "M", variant: .ghost, size: .sm, systemIcon: "plus") {
+                dropRegion(width: 0.32, height: 0.18)
+            }
+            .help("Drop a medium region (~32\u{00D7}18%)")
+
+            LBButton(title: "L", variant: .ghost, size: .sm, systemIcon: "plus") {
+                dropRegion(width: 0.52, height: 0.32)
+            }
+            .help("Drop a large region (~52\u{00D7}32%)")
+
+            LBButton(title: "FS", variant: .ghost, size: .sm, systemIcon: "plus") {
+                addFullScreenRegion()
+            }
+            .help("Block the whole screen")
+
+            tbDivider
+
+            // Nudge hint — the design's arrow keycaps (decorative hotkey cue).
+            HStack(spacing: 5) {
+                Caption("Nudge")
+                Kbd("\u{2190}", size: 10)
+                Kbd("\u{2192}", size: 10)
+                Kbd("\u{2191}", size: 10)
+                Kbd("\u{2193}", size: 10)
+            }
+
+            tbDivider
+
+            // Confirm — save + close. Accent action with ↵ keycap.
+            LBButton(title: "Confirm", variant: .accent, size: .sm,
+                     systemIcon: "checkmark", kbd: "\u{21A9}") {
+                controller.closeEditor()
+            }
+            .help("Save and close (\u{2318}\u{21A9} or Esc)")
+            .keyboardShortcut(.return, modifiers: [.command])
+
+            // Cancel — close. Ghost action with esc keycap.
+            LBButton(title: "Cancel", variant: .ghost, size: .sm,
+                     systemIcon: "xmark", kbd: "esc") {
+                controller.closeEditor()
+            }
+            .help("Close (Esc)")
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            ZStack {
+                Capsule(style: .continuous).fill(.ultraThinMaterial)
+                Capsule(style: .continuous).fill(Color(hex: 0x0E0F15).opacity(0.72))
+            }
+        )
+        .overlay(
+            Capsule(style: .continuous).strokeBorder(Theme.line2, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.55), radius: 24, y: 16)
         .frame(maxWidth: 720)
     }
 
-    private func sizeLabel(_ id: String, caption: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: "plus")
-                .font(.system(size: 9, weight: .bold))
-            Text(id)
-                .font(Theme.ui(size: 12, weight: .bold))
-        }
-        .help(caption)
+    private var tbDivider: some View {
+        Rectangle()
+            .fill(Theme.line)
+            .frame(width: 1, height: 22)
     }
 }

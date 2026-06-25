@@ -13,6 +13,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use thiserror::Error;
 
+pub use liveblock_config::{self as config, CoordinatorConfig};
 pub use liveblock_detection::{
     self as detection, flip_y, iou as detection_iou, non_max_suppression, to_pixel_rect_bottom_left,
     to_pixel_rect_top_left, Detection, PixelRect,
@@ -134,25 +135,6 @@ impl MaskCache {
     }
 }
 
-/// Coordinator config. `detect_every` runs the detector once every N frames;
-/// other frames reuse the most recent detections (cheaper steady-state).
-#[derive(Debug, Clone)]
-pub struct CoordinatorConfig {
-    pub detect_every: u64,
-    pub score_threshold: f32,
-    pub nms_iou_threshold: f32,
-}
-
-impl Default for CoordinatorConfig {
-    fn default() -> Self {
-        Self {
-            detect_every: 4,
-            score_threshold: 0.25,
-            nms_iou_threshold: 0.45,
-        }
-    }
-}
-
 /// Drives one tick of the capture -> detect -> inpaint pipeline.
 pub struct Coordinator<C: Capture, D: Detector, I: Inpainter> {
     capture: Arc<C>,
@@ -203,11 +185,11 @@ impl<C: Capture, D: Detector, I: Inpainter> Coordinator<C, D, I> {
 
         // Run the detector on every Nth frame; otherwise reuse the most-recent
         // detections.
-        let detections = if count % self.config.detect_every == 0 || count == 1 {
+        let detections = if count % self.config.detect_every as u64 == 0 || count == 1 {
             let raw = self.detector.detect(&frame).await?;
             let filtered = liveblock_detection::filter_by_score(&raw, self.config.score_threshold);
             let nms =
-                liveblock_detection::non_max_suppression(&filtered, self.config.nms_iou_threshold);
+                liveblock_detection::non_max_suppression(&filtered, self.config.iou_threshold);
             *self.last_detections.lock() = nms.clone();
             nms
         } else {
@@ -249,6 +231,15 @@ pub fn build_mask_from_detections(detections: &[Detection], width: u32, height: 
         height,
         bits: Arc::new(bits),
     }
+}
+
+#[test]
+fn reexports_config() {
+    let v = crate::config::Vocabulary {
+        version: 1,
+        classes: vec![],
+    };
+    assert_eq!(v.version, 1);
 }
 
 #[cfg(test)]
@@ -320,7 +311,7 @@ mod tests {
             CoordinatorConfig {
                 detect_every: 2,
                 score_threshold: 0.0,
-                nms_iou_threshold: 0.5,
+                iou_threshold: 0.5,
             },
         );
 

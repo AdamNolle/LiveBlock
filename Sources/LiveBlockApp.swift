@@ -189,6 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Theme.registerFonts()
         let screen = NSScreen.main ?? NSScreen.screens.first!
 
         // Render layer (always click-through)

@@ -7,6 +7,9 @@ pillow>=10.0
 pyyaml>=6.0
 huggingface_hub>=0.24
 # Open-vocabulary build + ONNX export (Route A)
+# CLIP text encoder used by ultralytics YOLOWorld.set_classes() to bake text
+# embeddings into the head. ultralytics expects its own fork at this exact URL.
+clip @ git+https://github.com/ultralytics/CLIP.git
 onnx>=1.16
 onnxruntime>=1.18
 onnxslim>=0.1.34

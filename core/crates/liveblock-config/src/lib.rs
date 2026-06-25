@@ -1,7 +1,9 @@
 pub mod embeddings;
+pub mod settings;
 pub mod vocabulary;
 
 pub use embeddings::ClassEmbeddings;
+pub use settings::{ClassRule, CoordinatorConfig, DetectionSettings, SettingsStore};
 pub use vocabulary::{VocabClass, Vocabulary};
 
 #[derive(Debug, thiserror::Error)]

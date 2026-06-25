@@ -1,0 +1,82 @@
+/* LiveBlocker — design tokens
+   Light-only neumorphism on a soft lavender base.
+   Colors lifted from the figma sketch: lavender title bar,
+   red-orange "Block" pill, aubergine "Train" pill. */
+
+:root {
+  /* Surface palette */
+  --lb-bg: #e6e7f1;          /* base — soft lavender-gray */
+  --lb-surface: #ecedf5;     /* slightly lighter for raised cards */
+  --lb-surface-2: #dfe0ec;   /* slightly darker for inset wells */
+  --lb-shadow-dark: #b8b9cb; /* cool gray drop shadow */
+  --lb-shadow-light: #ffffff;
+
+  /* Ink */
+  --lb-ink: #2b1d3a;         /* aubergine, from Train pill */
+  --lb-ink-2: #4a3d5c;
+  --lb-ink-muted: #7a7290;
+  --lb-ink-faint: #a9a3ba;
+
+  /* Accents */
+  --lb-block: #ff4a2e;       /* the Block red-orange */
+  --lb-block-soft: #ffe1d8;
+  --lb-train: #3b1f3d;       /* deep aubergine */
+  --lb-detect: #7c5cff;      /* ML detector violet */
+  --lb-success: #2bbf6c;
+  --lb-warn: #f0a72d;
+
+  /* Neumorphism intensity (mid-heavy default) */
+  --lb-shadow-blur: 18px;
+  --lb-shadow-offset: 8px;
+
+  /* Density */
+  --lb-density: 1;           /* multiplier 0.85 / 1 / 1.15 */
+
+  /* Typography */
+  --lb-font-display: 'Bricolage Grotesque', ui-sans-serif, system-ui, sans-serif;
+  --lb-font-ui: 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --lb-font-mono: 'Geist Mono', ui-monospace, 'SF Mono', monospace;
+
+  /* Radii */
+  --lb-r-sm: 10px;
+  --lb-r-md: 16px;
+  --lb-r-lg: 22px;
+  --lb-r-xl: 28px;
+  --lb-r-pill: 999px;
+}
+
+/* ── Neumorphism shadow utilities ─────────────────────────── */
+.lb-raised {
+  background: var(--lb-bg);
+  box-shadow:
+    var(--lb-shadow-offset) var(--lb-shadow-offset) var(--lb-shadow-blur) var(--lb-shadow-dark),
+    calc(var(--lb-shadow-offset) * -1) calc(var(--lb-shadow-offset) * -1) var(--lb-shadow-blur) var(--lb-shadow-light);
+}
+.lb-raised-sm {
+  background: var(--lb-bg);
+  box-shadow:
+    calc(var(--lb-shadow-offset) * 0.5) calc(var(--lb-shadow-offset) * 0.5) calc(var(--lb-shadow-blur) * 0.6) var(--lb-shadow-dark),
+    calc(var(--lb-shadow-offset) * -0.5) calc(var(--lb-shadow-offset) * -0.5) calc(var(--lb-shadow-blur) * 0.6) var(--lb-shadow-light);
+}
+.lb-inset {
+  background: var(--lb-bg);
+  box-shadow:
+    inset calc(var(--lb-shadow-offset) * 0.55) calc(var(--lb-shadow-offset) * 0.55) calc(var(--lb-shadow-blur) * 0.7) var(--lb-shadow-dark),
+    inset calc(var(--lb-shadow-offset) * -0.55) calc(var(--lb-shadow-offset) * -0.55) calc(var(--lb-shadow-blur) * 0.7) var(--lb-shadow-light);
+}
+.lb-pressed {
+  background: var(--lb-bg);
+  box-shadow:
+    inset calc(var(--lb-shadow-offset) * 0.75) calc(var(--lb-shadow-offset) * 0.75) calc(var(--lb-shadow-blur) * 0.85) var(--lb-shadow-dark),
+    inset calc(var(--lb-shadow-offset) * -0.75) calc(var(--lb-shadow-offset) * -0.75) calc(var(--lb-shadow-blur) * 0.85) var(--lb-shadow-light);
+}
+
+/* Type */
+.lb {
+  font-family: var(--lb-font-ui);
+  color: var(--lb-ink);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'ss01','cv11';
+}
+.lb-display { font-family: var(--lb-font-display); letter-spacing: -0.02em; font-weight: 700; }
+.lb-mono { font-family: var(--lb-font-mono); font-feature-settings: 'tnum'; }

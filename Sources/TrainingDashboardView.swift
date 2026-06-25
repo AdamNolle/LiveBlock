@@ -10,18 +10,22 @@ struct TrainingDashboardView: View {
     @State private var imgszField: Int = 640
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Spacing.l) {
-                header
-                preconditionCard
-                errorBanner
-                progressTrack
-                statsCard
-                trainingCard
-                logCard
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.Spacing.l) {
+                    header
+                    preconditionCard
+                    errorBanner
+                    progressTrack
+                    statsCard
+                    trainingCard
+                    logCard
+                }
+                .padding(Theme.Spacing.xl)
             }
-            .padding(Theme.Spacing.xl)
         }
+        .preferredColorScheme(.dark)
         .onAppear { training.recheckVenv() }
     }
 
@@ -34,40 +38,29 @@ struct TrainingDashboardView: View {
             HStack(spacing: 10) {
                 Image(systemName: "wrench.and.screwdriver.fill")
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Theme.detect)
+                    .foregroundStyle(Theme.ml)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Set up training environment")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.primary)
+                        .font(Theme.ui(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.ink1)
                     Text("First-time only: installs Python + ultralytics + coremltools (\u{007E}1\u{2013}3 minutes).")
-                        .font(.caption)
-                        .foregroundStyle(Color.secondary)
+                        .font(Theme.ui(size: 12, weight: .regular))
+                        .foregroundStyle(Theme.ink3)
                 }
                 Spacer(minLength: 0)
-                Button {
+                LBButton(
+                    title: training.isInstallingEnvironment ? "Installing\u{2026}" : "Install now",
+                    variant: .accent,
+                    size: .sm,
+                    systemIcon: training.isInstallingEnvironment ? "hourglass" : "arrow.down.circle.fill"
+                ) {
                     training.installEnvironment()
-                } label: {
-                    HStack(spacing: 4) {
-                        if training.isInstallingEnvironment {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.down.circle.fill")
-                        }
-                        Text(training.isInstallingEnvironment ? "Installing\u{2026}" : "Install now")
-                    }
                 }
-                .buttonStyle(.glassProminent).tint(Theme.detect)
-                .controlSize(.small)
                 .disabled(training.isInstallingEnvironment)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(Theme.detect.opacity(0.10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Theme.detect.opacity(0.35), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .lbCard(Theme.mlSoft, radius: Theme.Radius.r4, stroke: Theme.ml.opacity(0.35))
         }
     }
 
@@ -84,34 +77,27 @@ struct TrainingDashboardView: View {
                     .foregroundStyle(Theme.warn)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(err.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.primary)
+                        .font(Theme.ui(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.ink1)
                     Text(err.detail)
-                        .font(.caption)
-                        .foregroundStyle(Color.secondary)
+                        .font(Theme.ui(size: 12, weight: .regular))
+                        .foregroundStyle(Theme.ink3)
                         .fixedSize(horizontal: false, vertical: true)
                     if let hint = err.hint {
                         Text(hint)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(Color.primary.opacity(0.7))
+                            .font(Theme.mono(size: 12, weight: .regular))
+                            .foregroundStyle(Theme.ink2)
                             .padding(.top, 2)
                     }
                 }
                 Spacer(minLength: 0)
-                Button("Dismiss") {
+                LBButton(title: "Dismiss", variant: .outline, size: .sm) {
                     training.clearTerminalState()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(Theme.warn.opacity(0.12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Theme.warn.opacity(0.35), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .lbCard(Theme.warnSoft, radius: Theme.Radius.r4, stroke: Theme.warn.opacity(0.35))
         }
     }
 
@@ -157,7 +143,7 @@ struct TrainingDashboardView: View {
                 detail: "\(labeling.totalCount) screenshot\(labeling.totalCount == 1 ? "" : "s")",
                 hint: controller.isRunning ? "Press ⌘⇧S while you see an ad" : "Start capture first",
                 done: labeling.totalCount >= 5,
-                accent: Theme.block,
+                accent: Theme.accent,
                 action: { controller.captureScreenshotForLabeling() }
             )
             chev()
@@ -169,7 +155,7 @@ struct TrainingDashboardView: View {
                     ? "Capture some screenshots first"
                     : "Drag a rectangle around each ad",
                 done: labeling.labeledCount >= 20,
-                accent: Theme.detect,
+                accent: Theme.ml,
                 action: { controller.showLabelingWindow() }
             )
             chev()
@@ -181,7 +167,7 @@ struct TrainingDashboardView: View {
                     ? "Label at least 20 screenshots for a usable model"
                     : "Click Train Now below",
                 done: training.lastSuccessAt != nil,
-                accent: Theme.train,
+                accent: Theme.info,
                 action: nil
             )
         }
@@ -190,7 +176,7 @@ struct TrainingDashboardView: View {
     private func chev() -> some View {
         Image(systemName: "chevron.right")
             .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(Color.secondary.opacity(0.5))
+            .foregroundStyle(Theme.ink4)
     }
 
     private func stepCard(index: Int,
@@ -203,34 +189,34 @@ struct TrainingDashboardView: View {
         let card = VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 ZStack {
-                    Circle().fill(done ? Theme.success : accent.opacity(0.2))
+                    Circle().fill(done ? Theme.successSoft : accent.opacity(0.18))
                         .frame(width: 22, height: 22)
                     if done {
                         Image(systemName: "checkmark")
                             .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(Theme.success)
                     } else {
                         Text("\(index)")
-                            .font(.system(size: 11, weight: .bold))
+                            .font(Theme.ui(size: 11, weight: .bold))
                             .foregroundStyle(accent)
                     }
                 }
                 Text(title)
-                    .font(.headline)
-                    .foregroundStyle(Color.primary)
+                    .font(Theme.ui(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.ink1)
                 Spacer()
             }
             Text(detail)
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(Color.primary)
+                .font(Theme.ui(size: 18, weight: .semibold))
+                .foregroundStyle(Theme.ink1)
             Text(hint)
-                .font(.caption)
-                .foregroundStyle(Color.secondary)
+                .font(Theme.ui(size: 12, weight: .regular))
+                .foregroundStyle(Theme.ink3)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(Theme.Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+        .lbCard()
 
         return Group {
             if let action = action {
@@ -246,7 +232,7 @@ struct TrainingDashboardView: View {
         HStack(spacing: Theme.Spacing.m) {
             ZStack {
                 Circle()
-                    .fill(Theme.success.opacity(0.18))
+                    .fill(Theme.successSoft)
                     .frame(width: 48, height: 48)
                 Image(systemName: "brain.fill")
                     .font(.title)
@@ -254,16 +240,21 @@ struct TrainingDashboardView: View {
                     .symbolEffect(.pulse, isActive: training.isBusy)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text("Training Dashboard").font(.title2).bold()
+                Text("Training Dashboard")
+                    .font(Theme.display(size: 22, weight: .bold))
+                    .foregroundStyle(Theme.ink1)
+                    .tracking(-0.3)
                 Text("Build your own ad detector from your labeled screenshots.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.ui(size: 13, weight: .regular))
+                    .foregroundStyle(Theme.ink3)
             }
             Spacer()
             if let last = training.lastSuccessAt {
-                VStack(alignment: .trailing) {
-                    Text("Last train").font(.caption).foregroundStyle(.secondary)
-                    Text(last, style: .relative).font(.caption)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Eyebrow("Last train")
+                    Text(last, style: .relative)
+                        .font(Theme.mono(size: 12, weight: .regular))
+                        .foregroundStyle(Theme.ink2)
                 }
             }
         }
@@ -281,24 +272,30 @@ struct TrainingDashboardView: View {
     }
 
     private func stat(label: String, value: String, icon: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .foregroundStyle(Theme.block)
-                Text(label).font(.caption).foregroundStyle(.secondary)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                Caption(label)
             }
-            Text(value).font(.title2.weight(.semibold))
+            Text(value)
+                .font(Theme.mono(size: 28, weight: .semibold))
+                .tracking(-1)
+                .foregroundStyle(Theme.ink1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(Theme.Spacing.m)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+        .lbCard()
     }
 
     private var trainingCard: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.m) {
             HStack {
                 Text("Training")
-                    .font(.headline)
+                    .font(Theme.ui(size: 17, weight: .semibold))
+                    .tracking(-0.18)
+                    .foregroundStyle(Theme.ink1)
                 Spacer()
                 stateLabel
             }
@@ -313,20 +310,27 @@ struct TrainingDashboardView: View {
             }
         }
         .padding(Theme.Spacing.l)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.large))
+        .lbCard(Theme.surface, radius: Theme.Radius.r5)
     }
 
     private func stepper(_ label: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int) -> some View {
-        HStack(spacing: 6) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
-            Stepper(value: value, in: range, step: step) {
-                Text("\(value.wrappedValue)").monospacedDigit()
+        VStack(alignment: .leading, spacing: 6) {
+            Caption(label)
+            HStack(spacing: 6) {
+                Text("\(value.wrappedValue)")
+                    .font(Theme.mono(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.ink1)
+                Spacer(minLength: 0)
+                Stepper(value: value, in: range, step: step) {
+                    EmptyView()
+                }
+                .labelsHidden()
             }
-            .labelsHidden()
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .lbCard(Theme.surface2, radius: Theme.Radius.r3, stroke: Theme.line)
     }
 
     private var trainNowDisabledReason: String? {
@@ -338,34 +342,23 @@ struct TrainingDashboardView: View {
     private var actionRow: some View {
         HStack(spacing: Theme.Spacing.s) {
             if training.isBusy {
-                Button {
+                LBButton(title: "Cancel", variant: .primary, size: .lg,
+                         systemIcon: "stop.fill", fullWidth: true) {
                     training.cancel()
-                } label: {
-                    HStack { Image(systemName: "stop.fill"); Text("Cancel") }
-                        .frame(maxWidth: .infinity).padding(.vertical, 4)
                 }
-                .buttonStyle(.glassProminent).tint(Theme.block)
             } else {
-                Button {
+                LBButton(title: "Train Now", variant: .primary, size: .lg,
+                         systemIcon: "play.fill", fullWidth: true) {
                     training.startTraining(epochs: epochsField, imgsz: imgszField, batch: batchField)
-                } label: {
-                    HStack {
-                        Image(systemName: "play.fill")
-                        Text("Train Now").bold()
-                    }
-                    .frame(maxWidth: .infinity).padding(.vertical, 4)
                 }
-                .buttonStyle(.glassProminent).tint(Theme.train)
                 .disabled(labeling.labeledCount < 20 || !training.venvInstalled)
+                .opacity(labeling.labeledCount < 20 || !training.venvInstalled ? 0.5 : 1)
                 .help(trainNowDisabledReason ?? "Train a model on your labeled screenshots")
             }
-            Button {
+            LBButton(title: "Label more", variant: .secondary, size: .lg,
+                     systemIcon: "rectangle.and.pencil.and.ellipsis", fullWidth: true) {
                 controller.showLabelingWindow()
-            } label: {
-                HStack { Image(systemName: "rectangle.and.pencil.and.ellipsis"); Text("Label more") }
-                    .frame(maxWidth: .infinity).padding(.vertical, 4)
             }
-            .buttonStyle(.glass).controlSize(.small)
         }
     }
 
@@ -374,26 +367,28 @@ struct TrainingDashboardView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Epoch \(progress.epoch) / \(progress.totalEpochs)")
-                    .font(.subheadline.weight(.medium))
+                    .font(Theme.ui(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.ink1)
                 Spacer()
                 if let map50 = progress.map50 {
                     Text(String(format: "mAP@50  %.3f", map50))
-                        .font(.caption)
+                        .font(Theme.mono(size: 12, weight: .regular))
                         .foregroundStyle(Theme.success)
                 }
                 if let map = progress.map50_95 {
                     Text(String(format: "mAP@50-95  %.3f", map))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(Theme.mono(size: 12, weight: .regular))
+                        .foregroundStyle(Theme.ink3)
                 }
             }
-            ProgressView(value: training.progressFraction)
-                .tint(Theme.block)
+            LBProgress(value: training.progressFraction, color: Theme.info)
             HStack(spacing: 16) {
                 Label(String(format: "box %.3f", progress.box_loss), systemImage: "square.dashed")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(Theme.mono(size: 11, weight: .regular))
+                    .foregroundStyle(Theme.ink3)
                 Label(String(format: "cls %.3f", progress.cls_loss), systemImage: "tag")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(Theme.mono(size: 11, weight: .regular))
+                    .foregroundStyle(Theme.ink3)
             }
         }
     }
@@ -402,34 +397,21 @@ struct TrainingDashboardView: View {
         Group {
             switch training.state {
             case .idle:
-                pill("Idle", color: .secondary, icon: "moon.zzz")
+                LBPill(text: "Idle", tone: .neutral, dot: true)
             case .exporting:
-                pill("Exporting", color: Theme.detect, icon: "arrow.up.doc")
+                LBPill(text: "Exporting", tone: .ml, dot: true)
             case .training:
-                pill("Training", color: Theme.block, icon: "brain")
+                LBPill(text: "Training", tone: .accent, dot: true, pulse: true)
             case .installing:
-                pill("Installing", color: Theme.block, icon: "shippingbox")
+                LBPill(text: "Installing", tone: .info, dot: true, pulse: true)
             case .rebuilding:
-                pill("Rebuilding", color: Theme.block, icon: "hammer")
+                LBPill(text: "Rebuilding", tone: .info, dot: true, pulse: true)
             case .finished(let success, _):
-                pill(success ? "Done" : "Failed",
-                     color: success ? Theme.success : Theme.block,
-                     icon: success ? "checkmark.seal" : "xmark.octagon")
+                LBPill(text: success ? "Done" : "Failed",
+                       tone: success ? .success : .accent,
+                       dot: true)
             }
         }
-    }
-
-    private func pill(_ text: String, color: Color, icon: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-            Text(text)
-        }
-        .font(.caption.weight(.medium))
-        .foregroundStyle(color)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(color.opacity(0.15)))
-        .overlay(Capsule().strokeBorder(color.opacity(0.4), lineWidth: 1))
     }
 
     /// Parsed user-facing milestones from the raw log torrent. Recognizes:
@@ -456,12 +438,15 @@ struct TrainingDashboardView: View {
     private var logCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Progress").font(.headline)
+                Text("Progress")
+                    .font(Theme.ui(size: 17, weight: .semibold))
+                    .tracking(-0.18)
+                    .foregroundStyle(Theme.ink1)
                 Spacer()
                 if let path = training.datasetPath {
                     Text(path.lastPathComponent)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
+                        .font(Theme.mono(size: 12, weight: .regular))
+                        .foregroundStyle(Theme.ink3)
                 }
             }
 
@@ -469,8 +454,8 @@ struct TrainingDashboardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 if milestones.isEmpty {
                     Text("Click \u{201C}Train Now\u{201D} above to start. Progress will appear here.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(Theme.ui(size: 12, weight: .regular))
+                        .foregroundStyle(Theme.ink3)
                 } else {
                     ForEach(Array(milestones.enumerated()), id: \.offset) { _, m in
                         HStack(spacing: 8) {
@@ -478,8 +463,8 @@ struct TrainingDashboardView: View {
                                 .foregroundStyle(m.hasPrefix("FAILED") ? Theme.warn : Theme.success)
                                 .font(.system(size: 12))
                             Text(m)
-                                .font(.caption)
-                                .foregroundStyle(Color.primary)
+                                .font(Theme.ui(size: 12, weight: .regular))
+                                .foregroundStyle(Theme.ink2)
                         }
                     }
                 }
@@ -491,10 +476,10 @@ struct TrainingDashboardView: View {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(training.logTail.enumerated()), id: \.offset) { idx, line in
                                 Text(line)
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(line.contains("FAILED") ? Theme.block
+                                    .font(Theme.mono(size: 11, weight: .regular))
+                                    .foregroundStyle(line.contains("FAILED") ? Theme.accent
                                                     : line.contains("OK") || line.contains("ok") ? Theme.success
-                                                    : Color.primary.opacity(0.85))
+                                                    : Theme.ink2)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 1)
@@ -509,11 +494,15 @@ struct TrainingDashboardView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: 160, maxHeight: 240)
+                .padding(.top, 6)
+                .background(Theme.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.r3, style: .continuous))
             }
-            .font(.caption.weight(.medium))
-            .foregroundStyle(.secondary)
+            .font(Theme.ui(size: 12, weight: .medium))
+            .tint(Theme.ink3)
+            .foregroundStyle(Theme.ink3)
         }
         .padding(Theme.Spacing.l)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.large))
+        .lbCard(Theme.surface, radius: Theme.Radius.r5)
     }
 }

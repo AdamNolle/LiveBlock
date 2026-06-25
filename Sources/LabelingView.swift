@@ -11,7 +11,8 @@ struct LabelingView: View {
 
     var body: some View {
         ZStack {
-            
+            Theme.bg.ignoresSafeArea()
+
             VStack(spacing: Theme.Spacing.m) {
                 header
                 if labeling.totalCount == 0 {
@@ -25,6 +26,7 @@ struct LabelingView: View {
             }
             .padding(Theme.Spacing.l)
         }
+        .preferredColorScheme(.dark)
         .onAppear { labeling.refresh() }
     }
 
@@ -35,7 +37,7 @@ struct LabelingView: View {
             Wordmark(size: 16)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Labeling").font(Theme.ui(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.primary)
+                    .foregroundStyle(Theme.ink1)
                 if labeling.totalCount > 0 {
                     HStack(spacing: 4) {
                         Text("\(labeling.labeledCount)")
@@ -43,80 +45,76 @@ struct LabelingView: View {
                             .font(Theme.mono(size: 11, weight: .semibold))
                         Text("/ \(labeling.totalCount) labeled  ·  \(labeling.totalCount - labeling.labeledCount) remaining")
                             .font(Theme.ui(size: 11))
-                            .foregroundStyle(Color.secondary)
+                            .foregroundStyle(Theme.ink3)
                     }
                 } else {
                     Text("No screenshots yet — capture some first")
                         .font(Theme.ui(size: 11))
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(Theme.ink3)
                 }
             }
             Spacer()
 
             if !labeling.currentSuggestions.isEmpty {
-                Button {
+                LBButton(title: "Accept all (\(labeling.currentSuggestions.count))",
+                         variant: .accent, size: .sm,
+                         systemIcon: "checkmark.seal.fill") {
                     labeling.acceptAllSuggestions()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checkmark.seal.fill")
-                        Text("Accept all (\(labeling.currentSuggestions.count))")
-                    }
                 }
-                .buttonStyle(.glassProminent).controlSize(.small).tint(Theme.block)
                 .help("Promote all yellow proposals to confirmed boxes")
             }
 
             // Once the user has enough labeled examples, surface a one-click
             // shortcut into the Training Dashboard so they don't have to dig.
             if labeling.labeledCount >= 20 {
-                Button {
+                LBButton(title: "Train now",
+                         variant: .secondary, size: .sm,
+                         systemIcon: "brain.head.profile") {
                     controller.showTrainingDashboard()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "brain.head.profile")
-                        Text("Train now")
-                    }
                 }
-                .buttonStyle(.glassProminent).controlSize(.small).tint(Theme.train)
                 .help("You have enough labeled examples to train a useful model")
             }
 
-            Button {
+            LBButton(title: "Next unlabeled",
+                     variant: .secondary, size: .sm,
+                     systemIcon: "forward.end.alt.fill") {
                 labeling.goToFirstUnlabeled()
-            } label: {
-                HStack(spacing: 4) { Image(systemName: "forward.end.alt.fill"); Text("Next unlabeled") }
             }
-            .buttonStyle(.glass).controlSize(.small)
             .disabled(labeling.totalCount == 0)
 
-            Button {
+            LBButton(title: "Capture",
+                     variant: .primary, size: .sm,
+                     systemIcon: "camera") {
                 controller.captureScreenshotForLabeling()
-            } label: {
-                HStack(spacing: 4) { Image(systemName: "camera"); Text("Capture") }
             }
-            .buttonStyle(.glassProminent).controlSize(.small).tint(Theme.block)
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(!controller.isRunning)
             .help(controller.isRunning ? "⌘⇧S — saves the current frame for labeling"
                                        : "Start LiveBlock capturing first")
 
-            Button {
-                labeling.refresh()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.glass).controlSize(.small)
-            .keyboardShortcut("r", modifiers: [.command])
+            iconButton(systemName: "arrow.clockwise") { labeling.refresh() }
+                .keyboardShortcut("r", modifiers: [.command])
         }
         .padding(.horizontal, Theme.Spacing.l)
         .padding(.vertical, Theme.Spacing.m)
-        .background(.thinMaterial)
-        .overlay(
-            Rectangle()
-                .fill(Color.black.opacity(0.07))
-                .frame(height: 1),
-            alignment: .bottom
-        )
+        .lbCard(Theme.surface, radius: Theme.Radius.r4)
+    }
+
+    /// Compact icon-only button matching the v4 secondary button surface.
+    private func iconButton(systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.ink2)
+                .frame(width: 28, height: 28)
+                .background(Theme.surface3)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.r3, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.r3, style: .continuous)
+                        .strokeBorder(Theme.line2, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Empty state
@@ -125,34 +123,39 @@ struct LabelingView: View {
         VStack(spacing: 14) {
             Image(systemName: "photo.stack")
                 .font(.system(size: 48))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.ink4)
             Text("No screenshots yet")
-                .font(.title3)
+                .font(Theme.ui(size: 19, weight: .semibold))
+                .foregroundStyle(Theme.ink1)
             Text("Start LiveBlock capturing, then press ⌘⇧S whenever you see an ad on screen.\nThey'll show up here for labeling.")
+                .font(Theme.ui(size: 13))
                 .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.ink3)
+                .lineSpacing(2)
 
-            Button {
+            LBButton(title: "Capture one now",
+                     variant: .primary, size: .md,
+                     systemIcon: "camera") {
                 controller.captureScreenshotForLabeling()
-            } label: {
-                Label("Capture one now", systemImage: "camera")
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(!controller.isRunning)
 
             if !controller.isRunning {
                 Text("LiveBlock isn't capturing — start it from the Control Panel first.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                    .font(Theme.ui(size: 11))
+                    .foregroundStyle(Theme.warn)
             }
 
-            Button {
+            LBButton(title: "Refresh folder",
+                     variant: .ghost, size: .md,
+                     systemIcon: "arrow.clockwise") {
                 labeling.refresh()
-            } label: {
-                Label("Refresh folder", systemImage: "arrow.clockwise")
             }
         }
         .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .lbCard(Theme.surface, radius: Theme.Radius.r4)
     }
 
     // MARK: - Canvas
@@ -221,9 +224,9 @@ struct LabelingView: View {
                         let isHovered = hoveredBoxID == box.id
                         ZStack(alignment: .topTrailing) {
                             Rectangle()
-                                .stroke(Color.green.opacity(isHovered ? 1 : 0.85),
+                                .stroke(Theme.success.opacity(isHovered ? 1 : 0.85),
                                         style: StrokeStyle(lineWidth: 2))
-                                .background(Color.green.opacity(isHovered ? 0.18 : 0.08))
+                                .background(Theme.success.opacity(isHovered ? 0.18 : 0.08))
                                 .contentShape(Rectangle())
                             Button {
                                 labeling.removeBox(id: box.id)
@@ -249,8 +252,8 @@ struct LabelingView: View {
                     // In-progress drag rectangle
                     if let r = currentDragRect {
                         Rectangle()
-                            .stroke(Color.accentColor, lineWidth: 2)
-                            .background(Color.accentColor.opacity(0.18))
+                            .stroke(Theme.accent, lineWidth: 2)
+                            .background(Theme.accent.opacity(0.18))
                             .frame(width: r.width, height: r.height)
                             .position(x: r.midX, y: r.midY)
                             .allowsHitTesting(false)
@@ -280,43 +283,44 @@ struct LabelingView: View {
                 .allowsHitTesting(false)
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.r4, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.r4, style: .continuous)
+                .strokeBorder(Theme.line, lineWidth: 1)
+        )
     }
 
     // MARK: - Footer (action buttons + shortcut legend)
 
     private var footer: some View {
         HStack(spacing: Theme.Spacing.s) {
-            Button {
+            LBButton(title: "Prev",
+                     variant: .secondary, size: .sm,
+                     systemIcon: "chevron.left") {
                 labeling.goPrev()
-            } label: {
-                HStack(spacing: 4) { Image(systemName: "chevron.left"); Text("Prev") }
             }
-            .buttonStyle(.glass).controlSize(.small)
             .keyboardShortcut(.leftArrow, modifiers: [])
 
-            Button {
+            LBButton(title: "Save & Next",
+                     variant: .primary, size: .sm,
+                     systemIcon: "chevron.right") {
                 labeling.goNext()
-            } label: {
-                HStack(spacing: 4) { Text("Save & Next"); Image(systemName: "chevron.right") }
             }
-            .buttonStyle(.glassProminent).tint(Theme.block)
             .keyboardShortcut(.rightArrow, modifiers: [])
 
-            Button {
+            LBButton(title: "No ads (N)",
+                     variant: .secondary, size: .sm,
+                     systemIcon: "checkmark.circle") {
                 labeling.markCurrentAsNoAds()
                 labeling.goNext(saveCurrent: false)
-            } label: {
-                HStack(spacing: 4) { Image(systemName: "checkmark.circle"); Text("No ads (N)") }
             }
-            .buttonStyle(.glassProminent).controlSize(.small).tint(Theme.train)
             .keyboardShortcut("n", modifiers: [])
 
-            Button {
+            LBButton(title: "Discard",
+                     variant: .ghost, size: .sm,
+                     systemIcon: "trash") {
                 labeling.discardCurrent()
-            } label: {
-                HStack(spacing: 4) { Image(systemName: "trash"); Text("Discard") }
             }
-            .buttonStyle(.borderless).controlSize(.small)
 
             Spacer()
 
@@ -325,16 +329,16 @@ struct LabelingView: View {
                     StatusDot(color: labeling.currentIsLabeled ? Theme.success : Theme.warn)
                     Text("\(labeling.currentBoxes.count) box\(labeling.currentBoxes.count == 1 ? "" : "es")  ·  \(labeling.currentIsLabeled ? "saved" : "unsaved")")
                         .font(Theme.ui(size: 11, weight: .medium))
-                        .foregroundStyle(labeling.currentIsLabeled ? Color.secondary : Theme.warn)
+                        .foregroundStyle(labeling.currentIsLabeled ? Theme.ink3 : Theme.warn)
                 }
                 Text("Drag to draw  ·  ⌫ delete last  ·  → next  ·  ← prev  ·  ⌘S save  ·  ⌘⌫ discard")
                     .font(Theme.mono(size: 10))
-                    .foregroundStyle(Color.secondary.opacity(0.6))
+                    .foregroundStyle(Theme.ink4)
             }
         }
         .padding(.horizontal, Theme.Spacing.l)
         .padding(.vertical, Theme.Spacing.m)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.large))
+        .lbCard(Theme.surface, radius: Theme.Radius.r4)
     }
 
     // MARK: - Image layout helper (where the scaled-to-fit image actually lands)

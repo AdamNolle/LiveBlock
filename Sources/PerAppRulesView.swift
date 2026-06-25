@@ -1,13 +1,18 @@
 import SwiftUI
 import AppKit
 
-/// Settings → Per-app rules pane.
+/// Settings → Per-app rules pane — reskinned to the v4 dark dashboard
+/// (design/project/screens-app.jsx · "Apps & sites" app-list style). A
+/// `.lbCard` list of per-app rules: each row is an app icon/AppBadge + name +
+/// bundle id + a small `LBToggle` (block on/off), separated by hairline
+/// dividers. An `LBSectionHeader` tops the screen and a manual `LBField` +
+/// add `LBButton` lets users add apps that aren't running yet.
 ///
 /// Lists running, dock-visible apps with a toggle that adds / removes the
 /// app's bundle identifier from `PerAppRulesStore.excludedBundleIDs`. When
 /// the frontmost app is excluded, the capture pipeline pauses (see
 /// `AppController.handleFrontmostAppChange` and the `frontmostIsExcluded`
-/// gate in `ScreenCaptureManager`).
+/// gate in `ScreenCaptureManager`). All store bindings are preserved.
 struct PerAppRulesPane: View {
     @ObservedObject var rules: PerAppRulesStore
     let currentBundleID: String?
@@ -17,82 +22,30 @@ struct PerAppRulesPane: View {
     @State private var refreshTimer: Timer?
     @State private var manualBundleID: String = ""
 
+    // Deterministic AppBadge palette for apps without an icon.
+    private static let badgePalette: [Color] = [
+        Theme.accent, Theme.info, Theme.ml, Theme.success, Theme.warn,
+        Color(hex: 0x00C7BE), Color(hex: 0xEC407A), Color(hex: 0xFF9500),
+    ]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Per-app rules")
-                    .font(Theme.display(size: 28, weight: .bold))
-                    .foregroundStyle(Color.primary)
-                Text("Pause LiveBlock when these apps are frontmost. Useful for password managers, banking apps, or when you specifically want ads visible (e.g. previewing a campaign).")
-                    .font(Theme.ui(size: 13))
-                    .foregroundStyle(Color.secondary)
-            }
+            LBSectionHeader(
+                title: "Apps & sites",
+                subtitle: "Pause LiveBlock when these apps are frontmost. Useful for password managers, banking apps, or when you specifically want ads visible (e.g. previewing a campaign)."
+            )
 
-            // Live indicator: which app is frontmost right now, and whether
-            // we're paused for it. Helps the user verify the rule works.
-            HStack(spacing: 10) {
-                Image(systemName: "dot.radiowaves.left.and.right")
-                    .foregroundStyle(Color.secondary)
-                if let name = currentName {
-                    Text("Frontmost: \(name)")
-                        .font(Theme.ui(size: 12))
-                        .foregroundStyle(Color.primary)
-                    if let bundleID = currentBundleID, rules.isExcluded(bundleID) {
-                        Text("• paused")
-                            .font(Theme.ui(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.warn)
-                    }
-                } else {
-                    Text("No frontmost app detected")
-                        .font(Theme.ui(size: 12))
-                        .foregroundStyle(Color.secondary)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            frontmostBand
 
-            // The list of running, user-facing apps.
-            VStack(spacing: 0) {
-                ForEach(apps, id: \.processIdentifier) { app in
-                    appRow(app)
-                    Divider().background(Color.black.opacity(0.05))
-                }
-            }
-            .padding(6)
-            .glassEffect(in: RoundedRectangle(cornerRadius: 20))
-            .frame(maxWidth: .infinity)
+            appListCard
 
-            // Manual entry — for apps that aren't running yet, or background
-            // helpers that don't appear in the dock-visible list above.
-            HStack(spacing: 8) {
-                Image(systemName: "plus.app")
-                    .foregroundStyle(Color.secondary)
-                TextField("com.example.app  (bundle identifier)", text: $manualBundleID)
-                    .textFieldStyle(.plain)
-                    .font(Theme.mono(size: 12))
-                    .onSubmit { addManualExclusion() }
-                Button("Add") { addManualExclusion() }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
-                    .disabled(manualBundleID.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            addAppRow
 
-            HStack(spacing: 8) {
-                if !rules.excludedBundleIDs.isEmpty {
-                    Button("Clear exclusions") {
-                        rules.excludedBundleIDs = []
-                    }
-                    .buttonStyle(.borderless)
-                }
-                Spacer()
-                Text("\(rules.excludedBundleIDs.count) excluded")
-                    .font(Theme.ui(size: 11))
-                    .foregroundStyle(Color.secondary)
-            }
+            footerRow
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.bg)
+        .preferredColorScheme(.dark)
         .onAppear {
             refreshApps()
             // Cheap poll: the list re-renders when an app launches or quits.
@@ -105,6 +58,155 @@ struct PerAppRulesPane: View {
             refreshTimer = nil
         }
     }
+
+    // MARK: - Frontmost indicator
+
+    /// Live indicator: which app is frontmost right now, and whether we're
+    /// paused for it. Helps the user verify the rule works.
+    private var frontmostBand: some View {
+        HStack(spacing: 10) {
+            if let name = currentName {
+                let paused = currentBundleID.map { rules.isExcluded($0) } ?? false
+                StatusDot(color: paused ? Theme.warn : Theme.success, size: 7, pulse: !paused)
+                Text("Frontmost")
+                    .font(Theme.ui(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.ink3)
+                Text(name)
+                    .font(Theme.ui(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.ink1)
+                if paused {
+                    LBPill(text: "Paused", tone: .warn, size: .sm)
+                }
+            } else {
+                StatusDot(color: Theme.ink4, size: 7)
+                Text("No frontmost app detected")
+                    .font(Theme.ui(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.ink3)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .lbCard(Theme.surface2, radius: Theme.Radius.r3, stroke: Theme.line)
+    }
+
+    // MARK: - App list
+
+    private var appListCard: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("Where it's working")
+                    .font(Theme.ui(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.ink2)
+                Rectangle().fill(Theme.line).frame(height: 1)
+                Text("\(apps.count) apps")
+                    .font(Theme.mono(size: 11))
+                    .foregroundStyle(Theme.ink4)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+
+            ForEach(Array(apps.enumerated()), id: \.element.processIdentifier) { idx, app in
+                appRow(app)
+                if idx < apps.count - 1 {
+                    Rectangle()
+                        .fill(Theme.line)
+                        .frame(height: 1)
+                        .padding(.horizontal, 14)
+                }
+            }
+        }
+        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity)
+        .lbCard()
+    }
+
+    private func appRow(_ app: NSRunningApplication) -> some View {
+        let bundleID = app.bundleIdentifier ?? ""
+        let name = app.localizedName ?? bundleID
+        let excluded = rules.isExcluded(bundleID)
+
+        return HStack(spacing: 11) {
+            appIcon(app, name: name)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(Theme.ui(size: 13, weight: .semibold))
+                    .tracking(-0.06)
+                    .foregroundStyle(Theme.ink1)
+                Text(bundleID)
+                    .font(Theme.mono(size: 10))
+                    .foregroundStyle(Theme.ink3)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            if excluded {
+                LBPill(text: "Paused", tone: .warn, size: .sm)
+            }
+            LBToggle(
+                isOn: Binding(
+                    get: { excluded },
+                    set: { rules.setExcluded(bundleID, excluded: $0) }
+                ),
+                size: .sm
+            )
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private func appIcon(_ app: NSRunningApplication, name: String) -> some View {
+        if let icon = app.icon {
+            Image(nsImage: icon)
+                .resizable()
+                .frame(width: 26, height: 26)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.r2, style: .continuous))
+        } else {
+            let initial = String(name.prefix(1)).uppercased()
+            let color = Self.badgePalette[abs(name.hashValue) % Self.badgePalette.count]
+            AppBadge(initial: initial.isEmpty ? "?" : initial, color: color, size: 26)
+        }
+    }
+
+    // MARK: - Manual add
+
+    /// Manual entry — for apps that aren't running yet, or background helpers
+    /// that don't appear in the dock-visible list above.
+    private var addAppRow: some View {
+        HStack(spacing: 8) {
+            LBField(
+                text: $manualBundleID,
+                placeholder: "com.example.app  (bundle identifier)",
+                systemIcon: "plus.app"
+            )
+            LBButton(
+                title: "Add app",
+                variant: .secondary,
+                systemIcon: "plus",
+                action: addManualExclusion
+            )
+            .opacity(manualBundleID.trimmingCharacters(in: .whitespaces).isEmpty ? 0.5 : 1)
+            .disabled(manualBundleID.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+    }
+
+    // MARK: - Footer
+
+    private var footerRow: some View {
+        HStack(spacing: 8) {
+            if !rules.excludedBundleIDs.isEmpty {
+                LBButton(title: "Clear exclusions", variant: .ghost, size: .sm) {
+                    rules.excludedBundleIDs = []
+                }
+            }
+            Spacer()
+            Caption("\(rules.excludedBundleIDs.count) excluded")
+        }
+    }
+
+    // MARK: - Behaviour (unchanged)
 
     private func addManualExclusion() {
         let id = manualBundleID.trimmingCharacters(in: .whitespaces)
@@ -126,39 +228,5 @@ struct PerAppRulesPane: View {
             let bn = b.localizedName ?? ""
             return an.localizedCaseInsensitiveCompare(bn) == .orderedAscending
         }
-    }
-
-    private func appRow(_ app: NSRunningApplication) -> some View {
-        let bundleID = app.bundleIdentifier ?? ""
-        let name = app.localizedName ?? bundleID
-        let excluded = rules.isExcluded(bundleID)
-
-        return HStack(spacing: 12) {
-            if let icon = app.icon {
-                Image(nsImage: icon)
-                    .resizable()
-                    .frame(width: 28, height: 28)
-            } else {
-                RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.2))
-                    .frame(width: 28, height: 28)
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(name)
-                    .font(Theme.ui(size: 13, weight: .medium))
-                    .foregroundStyle(Color.primary)
-                Text(bundleID)
-                    .font(Theme.mono(size: 10))
-                    .foregroundStyle(Color.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer()
-            Toggle("", isOn: Binding(
-                get: { excluded },
-                set: { rules.setExcluded(bundleID, excluded: $0) }
-            ))
-            .labelsHidden()
-        }
-        .padding(.horizontal, 14).padding(.vertical, 10)
     }
 }

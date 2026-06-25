@@ -283,15 +283,15 @@ final class TrainingController: ObservableObject {
         let modelDir = support.appendingPathComponent("LiveBlock/models", isDirectory: true)
         try? fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
 
-        // The trainer writes new weights into `Sources/yolov8n.mlpackage` in
-        // the repo. Copy that into the runtime dir so SCStream-driven
+        // The trainer writes new weights into `Sources/liveblock-detector.mlpackage`
+        // in the repo. Copy that into the runtime dir so SCStream-driven
         // inference picks it up immediately.
-        let src = repoRoot.appendingPathComponent("Sources/yolov8n.mlpackage")
+        let src = repoRoot.appendingPathComponent("Sources/liveblock-detector.mlpackage")
         guard fm.fileExists(atPath: src.path) else {
             appendLog("Hot-reload skipped: \(src.path) not found.")
             return
         }
-        let dst = modelDir.appendingPathComponent("yolov8n.mlpackage")
+        let dst = modelDir.appendingPathComponent("liveblock-detector.mlpackage")
         try? fm.removeItem(at: dst)
         do {
             try fm.copyItem(at: src, to: dst)

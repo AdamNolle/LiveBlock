@@ -1,7 +1,7 @@
 //! Object detection via ONNX Runtime + DirectML EP. Mirrors `VisionProcessor.swift`.
 //!
-//! Bundled model is COCO-trained yolov8n until the user trains a logo model
-//! via `tools/train_logos.py` and exports to ONNX.
+//! Bundled model is the open-vocab `liveblock-detector.onnx`; class names come
+//! from the shared `tools/vocab/liveblock-vocab.json` via `liveblock-config`.
 
 use anyhow::{anyhow, Context, Result};
 use ndarray::{Array, Array4, IxDyn};
@@ -33,7 +33,7 @@ impl Detector {
     pub fn load(model_path: &Path) -> Result<Self> {
         if !model_path.exists() {
             return Err(anyhow!(
-                "Model not found at {}. Drop a yolov8n.onnx (or your trained logo model) into src-tauri/resources/.",
+                "Model not found at {}. Drop a liveblock-detector.onnx into src-tauri/resources/.",
                 model_path.display()
             ));
         }
@@ -58,9 +58,9 @@ impl Detector {
             .map(|o| o.name.clone())
             .context("model has no outputs")?;
 
-        // COCO 80 classes (Ultralytics yolov8n default). Replace when a logo
-        // model with different classes is bundled.
-        let class_names = coco_class_names();
+        // Open-vocab class names from the shared config, ordered so the Vec
+        // index matches the model's class id.
+        let class_names = vocab_class_names();
 
         Ok(Self {
             session,
@@ -216,18 +216,19 @@ fn non_max_suppression(mut boxes: Vec<DetBox>, iou_threshold: f32) -> Vec<DetBox
     keep
 }
 
-fn coco_class_names() -> Vec<String> {
-    [
-        "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
-        "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
-        "dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack",
-        "umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball",
-        "kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket",
-        "bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple",
-        "sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair",
-        "couch","potted plant","bed","dining table","toilet","tv","laptop","mouse",
-        "remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator",
-        "book","clock","vase","scissors","teddy bear","hair drier","toothbrush",
-    ]
-    .iter().map(|s| s.to_string()).collect()
+/// Open-vocab class names from the shared `tools/vocab/liveblock-vocab.json`,
+/// embedded at build time via `liveblock-config`. Classes are ordered by `id`
+/// so the returned Vec's index equals the model's class id.
+fn vocab_class_names() -> Vec<String> {
+    const VOCAB_JSON: &str = include_str!("../../../../tools/vocab/liveblock-vocab.json");
+    match liveblock_config::Vocabulary::from_json(VOCAB_JSON) {
+        Ok(mut vocab) => {
+            vocab.classes.sort_by_key(|c| c.id);
+            vocab.classes.into_iter().map(|c| c.name).collect()
+        }
+        Err(e) => {
+            tracing::error!("failed to parse bundled vocabulary: {e}");
+            Vec::new()
+        }
+    }
 }

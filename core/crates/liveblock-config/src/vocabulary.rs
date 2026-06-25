@@ -57,4 +57,16 @@ mod tests {
         let back = Vocabulary::from_json(&json).unwrap();
         assert_eq!(back.classes[0].prompts.len(), 2);
     }
+
+    #[test]
+    fn default_vocab_parses() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tools/vocab/liveblock-vocab.json"
+        );
+        let json = std::fs::read_to_string(path).expect("read default vocab");
+        let vocab = Vocabulary::from_json(&json).expect("parse default vocab");
+        assert_eq!(vocab.version, 1);
+        assert_eq!(vocab.classes.len(), 3);
+    }
 }

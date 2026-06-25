@@ -1,33 +1,73 @@
 import SwiftUI
 
-/// LiveBlocker brand layer.
+/// LiveBlocker v4 design tokens — "humanized dark dashboard".
 ///
-/// Chrome (surfaces, buttons, toggles) is delegated to macOS 26 Liquid Glass —
-/// `.glassEffect`, `.buttonStyle(.glass)`, `.buttonStyle(.glassProminent)`,
-/// the system Toggle. This file holds only the brand-specific bits: accent
-/// tints used on `.glassProminent` buttons, font helpers (with system
-/// fallback), geometry tokens, and three brand views (logo, wordmark,
-/// status dot).
+/// Ported from `design/project/tokens.css`. Calm dark surfaces with a cool-blue
+/// undertone, a single restrained red-orange "kill" accent (#ff5039) used only
+/// for live/block state, Geist (humanist sans) for UI + headings, Geist Mono
+/// (tabular figures) for live numbers / hotkeys, 4–16px radii.
+///
+/// The app renders dark by default (the design's default theme); the
+/// "scene stays dark" rule means capture-preview surfaces are always dark.
+/// Apply `.preferredColorScheme(.dark)` at the window root and paint
+/// backgrounds with `Theme.bg` / `Theme.surface`.
 enum Theme {
 
-    // MARK: - Accent tints (macOS system blue palette)
+    // MARK: - Surfaces
+    static let bg        = Color(hex: 0x0C0D12)
+    static let surface   = Color(hex: 0x14161E)
+    static let surface2  = Color(hex: 0x1A1D27)
+    static let surface3  = Color(hex: 0x232734)
+    static let surface4  = Color(hex: 0x2C3142)
+    static let overlay   = Color(hex: 0x0C0D12).opacity(0.78)
 
-    static let block       = Color(red: 0.039, green: 0.518, blue: 1.000)  // #0a84ff macOS system blue
-    static let blockSoft   = Color(red: 0.847, green: 0.910, blue: 1.000)  // #d8e8ff
-    static let train       = Color(red: 0.102, green: 0.310, blue: 0.549)  // #1a4f8c deep blue
-    static let detect      = Color(red: 0.369, green: 0.361, blue: 0.902)  // #5e5ce6 cool indigo
-    static let success     = Color(red: 0.169, green: 0.749, blue: 0.424)  // #2bbf6c (semantic — unchanged)
-    static let warn        = Color(red: 0.941, green: 0.655, blue: 0.176)  // #f0a72d (semantic — unchanged)
-    static var warning: Color { warn }  // legacy alias
+    // MARK: - Borders / hairlines
+    static let line       = Color.white.opacity(0.055)
+    static let line2      = Color.white.opacity(0.095)
+    static let lineStrong = Color.white.opacity(0.16)
 
-    // MARK: - Geometry
+    // MARK: - Ink (text)
+    static let ink1 = Color(hex: 0xF3F4F7)   // primary headings, numbers
+    static let ink2 = Color(hex: 0xD3D6DF)   // body
+    static let ink3 = Color(hex: 0x969AA7)   // secondary / captions
+    static let ink4 = Color(hex: 0x6A6E7C)   // tertiary / muted
+    static let ink5 = Color(hex: 0x44485A)   // faint
 
+    // MARK: - Accent (the kill / block colour) + semantics
+    static let accent      = Color(hex: 0xFF5039)
+    static let accentHover = Color(hex: 0xFF6A55)
+    static let accentSoft  = Color(hex: 0xFF5039).opacity(0.13)
+    static let accentRing  = Color(hex: 0xFF5039).opacity(0.32)
+
+    static let success     = Color(hex: 0x4ADE80)
+    static let successSoft = Color(hex: 0x4ADE80).opacity(0.13)
+    static let info        = Color(hex: 0x60A5FA)
+    static let infoSoft    = Color(hex: 0x60A5FA).opacity(0.13)
+    static let ml          = Color(hex: 0xA78BFA)   // purple = "smart"
+    static let mlSoft      = Color(hex: 0xA78BFA).opacity(0.13)
+    static let warn        = Color(hex: 0xFBBF24)
+    static let warnSoft    = Color(hex: 0xFBBF24).opacity(0.13)
+
+    // Back-compat aliases (existing views reference these; now mapped to v4).
+    static let block     = accent
+    static let blockSoft = accentSoft
+    static let train     = info
+    static let detect    = ml
+    static var warning: Color { warn }
+
+    // MARK: - Geometry (v4 radii: 4/6/8/12/16)
     enum Radius {
-        static let small: CGFloat = 10
-        static let medium: CGFloat = 16
-        static let large: CGFloat = 22
-        static let xl: CGFloat = 28
+        static let r1: CGFloat = 4
+        static let r2: CGFloat = 6
+        static let r3: CGFloat = 8
+        static let r4: CGFloat = 12
+        static let r5: CGFloat = 16
         static let pill: CGFloat = 999
+        // Back-compat aliases remapped to the tighter v4 scale.
+        static let small: CGFloat = 8
+        static let medium: CGFloat = 12
+        static let large: CGFloat = 16
+        static let xl: CGFloat = 16
     }
 
     enum Spacing {
@@ -41,10 +81,13 @@ enum Theme {
     static let spring: Animation = .spring(response: 0.4, dampingFraction: 0.8)
     static let snappy: Animation = .spring(response: 0.24, dampingFraction: 0.85)
 
-    // MARK: - Fonts (Bricolage / Geist if bundled, else system fallback)
-
+    // MARK: - Fonts
+    // Geist (humanist sans) for UI + headings; Geist Mono (tabular) for
+    // numbers/hotkeys — the bundled stand-ins for Plus Jakarta Sans + JetBrains
+    // Mono. Registered at launch by `Theme.registerFonts()`. Falls back to the
+    // system font if registration fails.
     static func display(size: CGFloat, weight: Font.Weight = .bold) -> Font {
-        Font.custom("Bricolage Grotesque", size: size).weight(weight)
+        Font.custom("Geist", size: size).weight(weight)
     }
     static func ui(size: CGFloat, weight: Font.Weight = .regular) -> Font {
         Font.custom("Geist", size: size).weight(weight)
@@ -52,9 +95,39 @@ enum Theme {
     static func mono(size: CGFloat, weight: Font.Weight = .regular) -> Font {
         Font.custom("Geist Mono", size: size).weight(weight)
     }
+
+    /// Register the bundled variable fonts so `Font.custom` resolves regardless
+    /// of `ATSApplicationFontsPath` quirks. Idempotent; safe to call at launch.
+    static func registerFonts() {
+        let names = ["Geist-Variable", "GeistMono-Variable", "BricolageGrotesque-Variable"]
+        for name in names {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "ttf",
+                                            subdirectory: "Fonts")
+                ?? Bundle.main.url(forResource: name, withExtension: "ttf") else { continue }
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+    }
 }
 
-// MARK: - LiveBlocker logo
+// MARK: - Card surface modifier
+
+extension View {
+    /// v4 `.card`: surface fill + 1px hairline + radius. Replaces Liquid Glass
+    /// chrome with the design's flat dark surfaces.
+    func lbCard(_ fill: Color = Theme.surface,
+                radius: CGFloat = Theme.Radius.r4,
+                stroke: Color = Theme.line) -> some View {
+        self
+            .background(fill)
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(stroke, lineWidth: 1)
+            )
+    }
+}
+
+// MARK: - LiveBlocker logo (unchanged — already matches the v4 design)
 
 /// 12×12 deterministic pixel grid + four black corner brackets + red
 /// record dot. Pure SwiftUI Canvas — composes on top of any background.
@@ -144,7 +217,7 @@ struct Wordmark: View {
     private var attributed: AttributedString {
         let live = AttributedString("Live")
         var block = AttributedString("Block")
-        block.foregroundColor = Theme.block
+        block.foregroundColor = Theme.accent
         let er = AttributedString("er")
         return live + block + er
     }
@@ -154,16 +227,16 @@ struct Wordmark: View {
             LiveBlockerLogo(size: size + 12, cornerRadius: (size + 12) * 0.22)
             Text(attributed)
                 .font(Theme.display(size: size, weight: .bold))
-                .foregroundStyle(.primary)
-                .tracking(-1)
+                .foregroundStyle(Theme.ink1)
+                .tracking(-0.4)
         }
     }
 }
 
-// MARK: - Status dot
+// MARK: - Status dot (v4 pulse + halo)
 
 struct StatusDot: View {
-    var color: Color = Theme.block
+    var color: Color = Theme.success
     var size: CGFloat = 8
     var pulse: Bool = false
 

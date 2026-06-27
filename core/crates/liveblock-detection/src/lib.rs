@@ -7,6 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 
+mod gallery;
+mod iab;
+mod number_gate;
+
+pub use gallery::{cosine_similarity, GalleryMatcher};
+pub use iab::{iab_slot_match, iab_slot_match_tol, DEFAULT_ASPECT_TOLERANCE};
+pub use number_gate::is_protected_number;
+
 /// A single detection in normalized [0..1] coordinates with origin top-left.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Detection {

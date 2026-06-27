@@ -61,10 +61,20 @@ final class AppController: ObservableObject {
 
     @AppStorage("pauseOnFullscreen") private var pauseOnFullscreenStored: Bool = true
 
+    /// One canonical default for the auto-block confidence threshold. The UI
+    /// (SettingsView/MLDetectorView) and the capture pipeline both read this so
+    /// the persisted value, the slider, and VisionProcessor never disagree.
+    /// Previously SettingsView defaulted to 0.84, the slider clamped to
+    /// 0.5...0.99, and VisionProcessor's internal default was 0.35 — and nothing
+    /// ever pushed the persisted value into VisionProcessor at launch, so the
+    /// first session always ran at 0.35 regardless of the saved setting.
+    static let defaultMinConfidence: Double = 0.5
+
     private var cancellables = Set<AnyCancellable>()
     private var autoCaptureTimer: Timer?
     private var workspaceObserver: NSObjectProtocol?
     private var didBecomeActiveObserver: NSObjectProtocol?
+    private var screenParamsObserver: NSObjectProtocol?
 
     init() {
         self.regionStore = RegionStore()
@@ -100,6 +110,17 @@ final class AppController: ObservableObject {
         // Push the persisted fullscreen-pause preference into the capture
         // manager so the SCStream callback honors it.
         captureManager.pauseOnFullscreen = pauseOnFullscreenStored
+
+        // Confidence desync fix: the persisted "minConfidence" never reached
+        // VisionProcessor (which sat at its internal 0.35 default) until the
+        // user touched the slider. Read the stored value once at startup —
+        // falling back to the single canonical default — and push it into the
+        // capture pipeline so the very first detection honors the saved
+        // threshold. UserDefaults.double returns 0 when the key is absent, so
+        // treat 0 as "unset" and substitute the default.
+        let storedConfidence = UserDefaults.standard.object(forKey: "minConfidence") as? Double
+        let effectiveConfidence = storedConfidence ?? Self.defaultMinConfidence
+        captureManager.setMinimumConfidence(Float(effectiveConfidence))
 
         // Track which app is frontmost so we can pause for fullscreen video
         // and per-app exclusions without polling on every captured frame.
@@ -144,6 +165,23 @@ final class AppController: ObservableObject {
         // Seed once on construction.
         refreshPermissions()
 
+        // Multi-display fix: when the display layout changes (a monitor is
+        // added/removed, resolution changes, or arrangement is reshuffled) the
+        // overlay + editor windows must follow the actual capture screen.
+        // Previously RenderLayer/RegionEditor were pinned to NSScreen.main at
+        // launch and never re-aligned, so on a multi-monitor setup the overlay
+        // landed on the wrong display. Re-align here; if capture is running on
+        // a screen that vanished, reconfigure onto the new current screen.
+        screenParamsObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleScreenParametersChanged()
+            }
+        }
+
         // Compose pauseReason from every input that affects it. This is
         // the SINGLE source of truth the UI reads. Anything published here
         // becomes the next banner state within one runloop tick.
@@ -176,6 +214,9 @@ final class AppController: ObservableObject {
 
     deinit {
         if let observer = didBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = screenParamsObserver {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = workspaceObserver {
@@ -234,6 +275,10 @@ final class AppController: ObservableObject {
             Task { await captureManager.stop() }
         } else {
             guard let screen = currentScreen() else { return }
+            // Align the overlay + editor to the screen we're about to capture
+            // BEFORE the first frame lands, so patches composite over the right
+            // display on multi-monitor setups.
+            alignOverlayWindows(to: screen)
             Task { await captureManager.start(on: screen) }
         }
     }
@@ -370,6 +415,7 @@ final class AppController: ObservableObject {
                     NSLog("AppController: no screen to start capture on.")
                     return
                 }
+                alignOverlayWindows(to: screen)
                 await captureManager.start(on: screen)
                 // Give SCStream one frame to land before we ask for it.
                 try? await Task.sleep(nanoseconds: 200_000_000)
@@ -441,6 +487,74 @@ final class AppController: ObservableObject {
             Task { @MainActor in
                 self?.captureScreenshotForLabeling()
             }
+        }
+    }
+
+    // MARK: - Multi-display overlay alignment
+
+    /// Stable display identifier for an NSScreen. After a display reconfigure
+    /// AppKit can hand back fresh NSScreen *instances* for the same physical
+    /// display, so pointer-identity comparison is unreliable — compare on the
+    /// CoreGraphics display ID instead (the same key `ScreenCaptureManager`
+    /// uses to pick the SCDisplay).
+    static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+
+    /// Look up the live NSScreen for a display ID, if it's still attached.
+    private func liveScreen(forDisplayID id: CGDirectDisplayID) -> NSScreen? {
+        NSScreen.screens.first { Self.displayID(of: $0) == id }
+    }
+
+    /// The screen the overlay + editor should currently track. When capture is
+    /// running we follow the screen we started capture on (so the overlay sits
+    /// on the captured display even if the user moves the control panel to
+    /// another monitor). Otherwise we fall back to wherever the control panel
+    /// lives, then to the main screen.
+    func captureScreen() -> NSScreen? {
+        if let target = captureManager.targetScreen,
+           let id = Self.displayID(of: target),
+           let live = liveScreen(forDisplayID: id) {
+            return live
+        }
+        return currentScreen()
+    }
+
+    /// Point the render-layer overlay and the region editor at `screen`. Wired
+    /// on every capture start and whenever the display layout changes, replacing
+    /// the dead `align(to:)` calls that only ever ran once at launch against
+    /// NSScreen.main.
+    func alignOverlayWindows(to screen: NSScreen) {
+        renderLayer?.align(to: screen)
+        regionEditor?.align(to: screen)
+    }
+
+    /// React to `NSApplication.didChangeScreenParametersNotification`.
+    /// Re-align the overlay + editor onto the current capture screen. If we
+    /// were capturing a display that no longer exists, restart capture on the
+    /// new current screen so blocking keeps working after a monitor unplug.
+    private func handleScreenParametersChanged() {
+        // Did the display we were capturing disappear? Compare on display ID,
+        // not NSScreen identity, since AppKit replaces NSScreen instances on
+        // reconfigure even when the physical display persists.
+        if isRunning,
+           let target = captureManager.targetScreen,
+           let id = Self.displayID(of: target),
+           liveScreen(forDisplayID: id) == nil {
+            NSLog("AppController: capture screen vanished — reconfiguring on current screen.")
+            Task { @MainActor in
+                await captureManager.stop()
+                if let screen = currentScreen() {
+                    alignOverlayWindows(to: screen)
+                    await captureManager.start(on: screen)
+                }
+            }
+            return
+        }
+        // Otherwise the captured display is still around (possibly at a new
+        // size/origin) — just re-align the overlay + editor onto it.
+        if let screen = captureScreen() {
+            alignOverlayWindows(to: screen)
         }
     }
 

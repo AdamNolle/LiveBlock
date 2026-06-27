@@ -22,6 +22,51 @@ pub enum LabelError {
     Date(String),
 }
 
+/// Semantic intent of a labeled box: whether the pixels under it should be
+/// REMOVED (a commercial ad / sponsor mark) or explicitly KEPT (a team/league
+/// identity mark, or a player/car number — the sports-broadcast case where
+/// erasing identity is the spec-forbidden failure).
+///
+/// Backward compatibility: legacy single-class datasets written by the macOS
+/// app have no `class` key. They deserialize as [`LabelClass::Ad`] and, because
+/// the (de)serializers omit the key when it is `Ad`, they re-serialize
+/// byte-identically — so existing on-disk label files are untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LabelClass {
+    /// Legacy / general meaning: "this region is an advertisement" (remove).
+    #[default]
+    #[serde(rename = "ad")]
+    Ad,
+    /// A commercial sponsor mark in sports content — livery, billboard, jersey
+    /// patch (remove).
+    #[serde(rename = "sponsor_remove")]
+    SponsorRemove,
+    /// A team or league identity mark to preserve (keep).
+    #[serde(rename = "team_keep")]
+    TeamKeep,
+    /// A player or car number to preserve (keep).
+    #[serde(rename = "number_keep")]
+    NumberKeep,
+}
+
+impl LabelClass {
+    /// Pixels under this box should be inpainted away.
+    pub fn is_remove(self) -> bool {
+        matches!(self, LabelClass::Ad | LabelClass::SponsorRemove)
+    }
+
+    /// This box marks content to explicitly preserve.
+    pub fn is_keep(self) -> bool {
+        !self.is_remove()
+    }
+
+    /// Serde + manual-serializer guard: omit the `class` key for the legacy
+    /// default so existing datasets stay byte-identical.
+    fn is_ad(&self) -> bool {
+        matches!(self, LabelClass::Ad)
+    }
+}
+
 /// A single labeled box on a screenshot. Coords normalized [0..1] with
 /// origin top-left. Clamped on construction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,6 +76,10 @@ pub struct LabelBox {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// Keep-vs-remove intent. Defaults to [`LabelClass::Ad`] and is omitted from
+    /// serialized output when default (legacy byte-compatibility).
+    #[serde(default, skip_serializing_if = "LabelClass::is_ad")]
+    pub class: LabelClass,
 }
 
 impl LabelBox {
@@ -49,7 +98,14 @@ impl LabelBox {
             y: cy,
             width: cw,
             height: ch,
+            class: LabelClass::Ad,
         }
+    }
+
+    /// Builder: set the keep-vs-remove class on a box.
+    pub fn classified(mut self, class: LabelClass) -> Self {
+        self.class = class;
+        self
     }
 
     /// Pixel rect for the given image size. Returns `(x, y, w, h)`.
@@ -244,6 +300,11 @@ impl LabelDocument {
                 m.insert("y", serde_json::json!(b.y));
                 m.insert("width", serde_json::json!(b.width));
                 m.insert("height", serde_json::json!(b.height));
+                // Omit `class` for the legacy default so files written before the
+                // multi-class schema (and by the macOS app) stay byte-identical.
+                if !b.class.is_ad() {
+                    m.insert("class", serde_json::json!(b.class));
+                }
                 serde_json::Value::from_iter(m)
             })
             .collect();
@@ -353,5 +414,67 @@ mod tests {
         assert!(image_pos < height_pos);
         assert!(height_pos < width_pos);
         assert!(width_pos < labeled_pos);
+    }
+
+    #[test]
+    fn legacy_box_without_class_loads_as_ad() {
+        // Shaped exactly like the macOS app writes today (no `class` key).
+        let json = r#"{
+  "boxes": [
+    {
+      "height": 0.4,
+      "id": "11111111-2222-3333-4444-555555555555",
+      "width": 0.3,
+      "x": 0.1,
+      "y": 0.2
+    }
+  ],
+  "image": "shot.png",
+  "imageHeight": 1080,
+  "imageWidth": 1920,
+  "labeledAt": "1970-01-01T00:00:00Z"
+}"#;
+        let doc: LabelDocument = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.boxes.len(), 1);
+        assert_eq!(doc.boxes[0].class, LabelClass::Ad);
+        assert!(doc.boxes[0].class.is_remove());
+    }
+
+    #[test]
+    fn default_class_is_omitted_non_default_is_written() {
+        let doc = LabelDocument {
+            image: "shot.png".to_string(),
+            image_width: 100,
+            image_height: 100,
+            boxes: vec![
+                LabelBox::with_id(Uuid::nil(), 0.1, 0.1, 0.1, 0.1), // Ad -> omitted
+                LabelBox::with_id(Uuid::nil(), 0.5, 0.5, 0.1, 0.1)
+                    .classified(LabelClass::TeamKeep),
+            ],
+            labeled_at: Iso8601::from_unix_seconds(0),
+        };
+        let s = String::from_utf8(doc.to_pretty_sorted_bytes().unwrap()).unwrap();
+        // Only the TeamKeep box emits a `class` key; the Ad box stays legacy.
+        assert_eq!(s.matches("\"class\"").count(), 1, "{s}");
+        assert!(s.contains("team_keep"));
+    }
+
+    #[test]
+    fn non_default_class_round_trips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("shot.json");
+        let doc = LabelDocument {
+            image: "shot.png".to_string(),
+            image_width: 1920,
+            image_height: 1080,
+            boxes: vec![LabelBox::with_id(Uuid::nil(), 0.1, 0.2, 0.3, 0.4)
+                .classified(LabelClass::NumberKeep)],
+            labeled_at: Iso8601::from_unix_seconds(0),
+        };
+        doc.save(&path).unwrap();
+        let loaded = LabelDocument::load(&path).unwrap();
+        assert_eq!(loaded.boxes[0].class, LabelClass::NumberKeep);
+        assert!(loaded.boxes[0].class.is_keep());
+        assert_eq!(loaded, doc);
     }
 }

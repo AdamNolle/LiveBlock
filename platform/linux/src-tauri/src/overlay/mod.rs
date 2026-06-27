@@ -20,6 +20,29 @@ pub enum OverlayStrategy {
     X11OverrideRedirect,
 }
 
+/// Fidelity class of an overlay strategy. `LayerExact` means a true full-screen,
+/// pixel-exact, click-through overlay; `FloatingDegraded` is the GNOME fallback
+/// (a movable always-on-top window). The frontend uses this to decide whether to
+/// show the degraded-mode banner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayFidelity {
+    /// wlr-layer-shell (Wayland) and X11 override-redirect both achieve this.
+    LayerExact,
+    /// GNOME/Mutter — no layer-shell, best-effort floating window.
+    FloatingDegraded,
+}
+
+impl OverlayStrategy {
+    pub fn fidelity(self) -> OverlayFidelity {
+        match self {
+            OverlayStrategy::WaylandLayerShell | OverlayStrategy::X11OverrideRedirect => {
+                OverlayFidelity::LayerExact
+            }
+            OverlayStrategy::WaylandGnomeMode => OverlayFidelity::FloatingDegraded,
+        }
+    }
+}
+
 pub fn pick_strategy() -> OverlayStrategy {
     match detect_session() {
         SessionType::Wayland => {

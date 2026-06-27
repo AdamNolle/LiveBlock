@@ -1,0 +1,10 @@
+[package]
+name = "liveblock-tracker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LiveBlock temporal tracker: constant-velocity box association with sticky keep/remove verdicts"
+
+[dependencies]
+# Pure-algorithmic; no dependencies. Coordinates are normalized [0..1] so the
+# tracker is resolution- and platform-independent, exactly like Detection.

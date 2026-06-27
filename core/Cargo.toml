@@ -5,6 +5,8 @@ members = [
     "crates/liveblock-regions",
     "crates/liveblock-labels",
     "crates/liveblock-detection",
+    "crates/liveblock-tracker",
+    "crates/liveblock-inpainting",
     "crates/liveblock-bridge",
 ]
 

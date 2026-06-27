@@ -189,7 +189,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let screen = NSScreen.main ?? NSScreen.screens.first!
+        // Seed the overlay + editor on the controller's current screen. The
+        // controller re-aligns these to the ACTUAL capture screen on every
+        // start and on NSApplication.didChangeScreenParametersNotification, so
+        // this is only the initial placement, not a permanent pin to main.
+        let screen = controller.currentScreen() ?? NSScreen.main ?? NSScreen.screens.first!
 
         // Render layer (always click-through)
         let renderLayer = RenderLayerWindow(
@@ -204,6 +208,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             targetScreen: screen
         )
         controller.regionEditor = regionEditor
+
+        // Ensure both windows are aligned to the current screen now that the
+        // controller holds references to them (covers the case where the
+        // control panel lands on a non-main display at launch).
+        controller.alignOverlayWindows(to: screen)
 
         // Control panel (always visible main UI)
         let controlPanel = ControlPanelWindow(

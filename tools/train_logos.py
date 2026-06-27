@@ -99,17 +99,40 @@ def main() -> int:
 
     best_pt = train(args)
 
-    # Hand off to the exporter for the CoreML conversion + optional install.
-    print()
-    print("→ Exporting to CoreML…")
+    # Hand off to the exporter(s). One training run feeds every platform:
+    #   - macOS: CoreML .mlpackage (for Vision/CoreML) + ONNX (portability)
+    #   - Windows/Linux: ONNX only (coremltools is macOS-only; CoreML is a no-op)
     sys.path.insert(0, str(REPO_ROOT / "tools"))
-    from export_to_coreml import export, install_into_repo  # type: ignore
 
-    mlpackage = export(best_pt, int8=args.int8, nms=args.nms)
-    if args.install:
-        install_into_repo(mlpackage)
+    if sys.platform == "darwin":
+        print()
+        print("-> Exporting to CoreML (+ ONNX) ...")
+        from export_to_coreml import (  # type: ignore
+            export as export_coreml,
+            install_into_repo as install_coreml,
+        )
+
+        mlpackage = export_coreml(best_pt, int8=args.int8, nms=args.nms)
+        if args.install:
+            install_coreml(mlpackage)
+
+        # ORT's NMS op isn't always available; the Rust detector does its own NMS.
+        from export_onnx import export as export_onnx, install_into_repo as install_onnx  # type: ignore
+
+        onnx = export_onnx(best_pt, opset=12, simplify=True, nms=False, half=False, dynamic=False)
+        if args.install:
+            install_onnx(onnx)
+    else:
+        print()
+        print("-> Exporting to ONNX (Windows/Linux ONNX Runtime) ...")
+        from export_onnx import export as export_onnx, install_into_repo as install_onnx  # type: ignore
+
+        onnx = export_onnx(best_pt, opset=12, simplify=True, nms=False, half=False, dynamic=False)
+        if args.install:
+            install_onnx(onnx)
+
     print()
-    print("✓ Done.")
+    print("OK Done.")
     return 0
 
 

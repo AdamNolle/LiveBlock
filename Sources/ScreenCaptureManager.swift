@@ -64,7 +64,10 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
 
     // MARK: - Internals
     private var stream: SCStream?
-    private var targetScreen: NSScreen?
+    /// The screen capture is currently bound to. Exposed read-only so the
+    /// AppController can keep the overlay + editor aligned to the captured
+    /// display across multi-monitor changes.
+    private(set) var targetScreen: NSScreen?
 
     nonisolated private let visionProcessor = VisionProcessor()
     nonisolated private let inpaintingEngine = InpaintingEngine()
@@ -83,7 +86,11 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     nonisolated private let detectionInterval = 4 // 4 → ~15Hz at 60fps capture
 
     // Detection results cached between detection runs.
+    // `detectionCache` holds allowlist-gated boxes that feed the eraser
+    // (currently empty). `displayDetectionCache` holds the ungated boxes used
+    // only for the live ML-detector log so the UI shows what the model sees.
     nonisolated private let detectionCache = DetectionCache()
+    nonisolated private let displayDetectionCache = DetectionCache()
 
     // Throttle main-actor patch updates.
     nonisolated private let lastEmitClock = AtomicTime()
@@ -178,8 +185,22 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
             let pixelWidth = Int(screen.frame.width * scale)
             let pixelHeight = Int(screen.frame.height * scale)
 
+            // Self-exclusion: exclude LiveBlock's own windows from capture so
+            // the always-on-top render overlay can't feed its own patches back
+            // into the next captured frame (a visible feedback loop / smearing
+            // bug). Match our bundle id against the shareable application list;
+            // if it isn't present (we have no on-screen windows yet) the filter
+            // simply excludes nothing extra. sharingType=.none on the overlay
+            // window is the belt; this is the suspenders.
+            let ownBundleID = Bundle.main.bundleIdentifier
+            let selfApps = availableContent.applications.filter {
+                $0.bundleIdentifier == ownBundleID
+            }
+            if selfApps.isEmpty {
+                NSLog("ScreenCaptureManager: own app not yet in shareable list; relying on sharingType=.none for self-exclusion.")
+            }
             let filter = SCContentFilter(display: display,
-                                         excludingApplications: [],
+                                         excludingApplications: selfApps,
                                          exceptingWindows: [])
 
             let configuration = SCStreamConfiguration()
@@ -260,9 +281,21 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
         let paused = pausedForFullscreen || pausedForApp
 
         // Detection: only every Nth frame, only when enabled, only when not paused.
+        //
+        // Two outputs from one inference pass:
+        //   • `detectForDisplay` — every COCO detection, for the live UI log
+        //     ONLY. These never reach the eraser.
+        //   • `detect` — gated through the (empty) sponsor-class allowlist, so
+        //     it currently returns nothing. This is what feeds the eraser, which
+        //     is why the generic model no longer erases people/cars.
+        // Both are cached NORMALIZED and projected per-frame onto the current
+        // buffer size, so a mid-stream resolution change can't mis-map them.
         if !paused, detectionEnabledStorage.get(), frameIdx % detectionInterval == 0 {
-            let detected = visionProcessor.detect(in: pixelBuffer)
-            detectionCache.store(detected)
+            // Single inference pass; gated set feeds the eraser (empty until a
+            // real sponsor model ships), ungated set feeds the live UI log.
+            let result = visionProcessor.detectGatedAndDisplay(in: pixelBuffer)
+            detectionCache.store(result.forErase)
+            displayDetectionCache.store(result.forDisplay)
         }
 
         // Build the active set of regions for this frame.
@@ -274,13 +307,39 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
                           source: .user,
                           regionID: region.id)
         }
+        // Allowlist-gated model boxes (currently always empty). Converted from
+        // the normalized cache to pixel space for THIS frame's buffer size.
         let detectedBoxes = (!paused && detectionEnabledStorage.get())
-            ? detectionCache.load()
+            ? detectionCache.load(forPixelBufferSize: bufferSize)
             : []
         let allBoxes = userBoxes + detectedBoxes
 
+        // DRM-safe paint-over split. For every active region, sample the
+        // captured buffer: if it reads as protected/near-uniform black (the
+        // HDCP/DRM blanking signature) we draw a SOLID opaque cover instead of
+        // mirror-blending — mirror-blend on black only smears black, and we must
+        // not rely on reading protected pixels. Everything else takes the normal
+        // content-extrapolating inpaint path.
+        //
+        // Note: on a fully-protected video the WHOLE frame is black, so there's
+        // nothing to auto-detect beyond the regions the user marked — paint-over
+        // is then driven entirely by those user/static regions, exactly the
+        // capture-free PaintOver design.
+        var protectedBoxes: [AdBoundingBox] = []
+        var inpaintBoxes: [AdBoundingBox] = []
+        for box in allBoxes {
+            let normTopLeft = Self.normalizedTopLeftRect(forCVRect: box.rect, bufferSize: bufferSize)
+            if ProtectedRegionDetector.regionIsProtectedBlack(pixelBuffer, normRect: normTopLeft) {
+                protectedBoxes.append(box)
+            } else {
+                inpaintBoxes.append(box)
+            }
+        }
+
         // Inpaint every frame regardless — boxes may have moved or disappeared.
-        let patches = inpaintingEngine.inpaintPatches(frame: pixelBuffer, regions: allBoxes)
+        var patches = inpaintingEngine.inpaintPatches(frame: pixelBuffer, regions: inpaintBoxes)
+        // Append solid opaque-black covers for the protected regions.
+        patches += inpaintingEngine.paintOverPatches(regions: protectedBoxes, bufferSize: bufferSize)
 
         // Per-region blocking-event count. Increment once per active user region.
         var perRegion: [UUID: Int] = [:]
@@ -291,7 +350,10 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
         // Throttle SwiftUI updates to ≤30Hz.
         guard lastEmitClock.shouldEmit(minInterval: minEmitInterval) else { return }
 
-        let labels = detectedBoxes.map { "\($0.label) (\(Int($0.confidence * 100))%)" }
+        let displayBoxes = (!paused && detectionEnabledStorage.get())
+            ? displayDetectionCache.load(forPixelBufferSize: bufferSize)
+            : []
+        let labels = displayBoxes.map { "\($0.label) (\(Int($0.confidence * 100))%)" }
         let patchCount = patches.count
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -341,6 +403,19 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
         }
     }
 
+    /// Convert a CV-space pixel rect (bottom-left origin) into a normalized
+    /// [0..1] TOP-LEFT rect, the convention `ProtectedRegionDetector` (and
+    /// `NormalizedRegion`) expect. Y is flipped because pixel buffers are
+    /// row-major from the top while CV rects originate bottom-left.
+    nonisolated static func normalizedTopLeftRect(forCVRect rect: CGRect,
+                                                  bufferSize: CGSize) -> CGRect {
+        guard bufferSize.width > 0, bufferSize.height > 0 else { return .zero }
+        return CGRect(x: rect.minX / bufferSize.width,
+                      y: (bufferSize.height - rect.maxY) / bufferSize.height,
+                      width: rect.width / bufferSize.width,
+                      height: rect.height / bufferSize.height)
+    }
+
     // MARK: - Display selection (S8)
     nonisolated private func pickDisplay(for screen: NSScreen, in displays: [SCDisplay]) -> SCDisplay? {
         let targetID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
@@ -385,15 +460,22 @@ final class AtomicTime: @unchecked Sendable {
     }
 }
 
+/// Caches detections BETWEEN detection runs so every frame can inpaint even
+/// though we only run the model every Nth frame. Stores resolution-independent
+/// NORMALIZED detections (not absolute pixels): the cached set is projected
+/// onto the CURRENT buffer size on every frame via `load(forPixelBufferSize:)`,
+/// so a mid-stream resolution change can never mis-map stale pixel rects.
 final class DetectionCache: @unchecked Sendable {
     private let lock = NSLock()
-    private var boxes: [AdBoundingBox] = []
-    func store(_ newBoxes: [AdBoundingBox]) {
-        lock.lock(); boxes = newBoxes; lock.unlock()
+    private var detections: [NormalizedDetection] = []
+    func store(_ newDetections: [NormalizedDetection]) {
+        lock.lock(); detections = newDetections; lock.unlock()
     }
-    func load() -> [AdBoundingBox] {
-        lock.lock(); defer { lock.unlock() }
-        return boxes
+    /// Project the cached normalized detections onto a concrete buffer size,
+    /// returning pixel-space boxes for the current frame.
+    func load(forPixelBufferSize size: CGSize) -> [AdBoundingBox] {
+        lock.lock(); let snapshot = detections; lock.unlock()
+        return snapshot.map { $0.adBox(inPixelBufferSize: size) }
     }
 }
 

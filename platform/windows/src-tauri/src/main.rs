@@ -1,7 +1,13 @@
 //! LiveBlock — Windows entry. DPI-aware Tauri 2 app with a Rust hot path.
+//!
+//! The realtime path is fully native: WGC capture -> off-thread pipeline worker
+//! (detect -> Tracker -> decide_verdict[safe stub] -> build_remove_mask_from_tracks
+//! -> DRM-aware cover) -> a native layered overlay window. There is no
+//! webview/base64 patch channel anymore.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod actions;
 mod capture;
 mod detection;
 mod hotkeys;
@@ -9,7 +15,9 @@ mod inpainting;
 mod labels;
 mod overlay;
 mod paths;
+mod pipeline;
 mod regions;
+mod screenshot;
 mod state;
 mod tray;
 mod training;
@@ -17,21 +25,18 @@ mod training;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
-use crate::capture::{enumerate_monitors, CaptureSession, FrameView};
-use crate::detection::{DetBox, Detector};
-use crate::inpainting::PatchPayload;
+use crate::capture::enumerate_monitors;
+use crate::detection::Detector;
 use crate::labels::{LabelDocument, ScreenshotEntry};
 use crate::regions::{NormalizedRegion, RegionStore};
 use crate::state::AppState;
 
-/// Set DPI awareness so the layered overlay tracks per-monitor DPI.
+/// Set DPI awareness so the layered overlay tracks per-monitor DPI (V2).
 #[cfg(windows)]
 fn set_dpi_awareness() {
     use windows::Win32::UI::HiDpi::{
@@ -66,11 +71,14 @@ fn main() {
             let state = AppState::new(handle.clone(), regions.clone());
             app.manage(state);
 
-            // Apply per-window native styles after Tauri has created HWNDs.
+            // Apply native click-through / capture-exclusion styles to the
+            // existing Tauri webview windows (control/editor/render).
             apply_window_styles(&handle);
 
-            // Register tray + global hotkeys.
-            tray::install(&handle).ok();
+            // Register tray + global hotkeys (both drive real backend actions).
+            if let Err(e) = tray::install(&handle) {
+                tracing::error!("tray install failed: {e}");
+            }
             hotkeys::spawn(handle.clone());
 
             // Try to load a default detector if the model is present.
@@ -81,6 +89,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_capture,
             stop_capture,
+            start_paint_over,
             set_detection_enabled,
             list_monitors,
             list_regions,
@@ -97,8 +106,9 @@ fn main() {
             start_training,
             cancel_training,
             quit,
-            window_show,
-            window_hide,
+            show_window,
+            hide_window,
+            panic_disable,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -107,9 +117,13 @@ fn main() {
 #[cfg(windows)]
 fn apply_window_styles(app: &AppHandle) {
     use windows::Win32::Foundation::HWND;
+    // Tauri/tao use a DIFFERENT windows-rs version than this crate, so
+    // `w.hwnd()` yields their HWND. Rebuild OUR `windows-0.58` HWND from the raw
+    // pointer (`*mut c_void`) — both are pointer-newtypes, compatible by value.
+    let rebuild = |raw: *mut core::ffi::c_void| HWND(raw);
     if let Some(w) = app.get_webview_window("render") {
         if let Ok(h) = w.hwnd() {
-            let hwnd = HWND(h.0 as isize);
+            let hwnd = rebuild(h.0 as *mut _);
             if let Err(e) = overlay::make_render_overlay(hwnd) {
                 tracing::error!("make_render_overlay: {e}");
             }
@@ -117,7 +131,7 @@ fn apply_window_styles(app: &AppHandle) {
     }
     if let Some(w) = app.get_webview_window("editor") {
         if let Ok(h) = w.hwnd() {
-            let hwnd = HWND(h.0 as isize);
+            let hwnd = rebuild(h.0 as *mut _);
             if let Err(e) = overlay::make_editor(hwnd) {
                 tracing::error!("make_editor: {e}");
             }
@@ -129,10 +143,10 @@ fn apply_window_styles(app: &AppHandle) {
 fn apply_window_styles(_: &AppHandle) {}
 
 fn try_load_default_detector(app: &AppHandle) {
-    let candidate: PathBuf = match app.path().resolve(
-        "yolov8n.onnx",
-        tauri::path::BaseDirectory::Resource,
-    ) {
+    let candidate: PathBuf = match app
+        .path()
+        .resolve("yolov8n.onnx", tauri::path::BaseDirectory::Resource)
+    {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -154,90 +168,61 @@ fn try_load_default_detector(app: &AppHandle) {
     }
 }
 
-// ===== Tauri commands =====
+// ===== Monitor enumeration =====
+
+/// Frontend `MonitorInfo`: `{ id: string, name: string, is_primary: bool }`.
+#[derive(Serialize)]
+struct MonitorInfo {
+    /// Stringified HMONITOR pointer value; pass back to `start_capture`.
+    id: String,
+    name: String,
+    is_primary: bool,
+}
 
 #[tauri::command]
 fn list_monitors() -> Vec<MonitorInfo> {
+    let primary = actions::primary_monitor_id();
     enumerate_monitors()
         .into_iter()
-        .enumerate()
-        .map(|(i, (h, name))| MonitorInfo { index: i as u32, hmonitor: h.0 as i64, name })
+        .map(|(h, name)| {
+            let id = (h.0 as isize as i64).to_string();
+            let is_primary = Some(h.0 as isize as i64) == primary;
+            MonitorInfo { id, name, is_primary }
+        })
         .collect()
 }
 
-#[derive(Serialize)]
-struct MonitorInfo {
-    index: u32,
-    hmonitor: i64,
-    name: String,
-}
+// ===== Capture lifecycle (thin wrappers over `actions`) =====
 
+/// Start capturing. The frontend calls this with no arguments (capture the
+/// primary display); an optional `monitor_id` (stringified HMONITOR from
+/// `list_monitors`) selects a specific display.
 #[tauri::command]
-fn start_capture(monitor_hmonitor: i64, state: State<'_, AppState>) -> Result<(), String> {
-    use windows::Win32::Graphics::Gdi::HMONITOR;
-
-    let app = state.app.clone();
-    let regions_arc = state.regions.clone();
-    let inpainter_arc = state.inpainter.clone();
-    let detector_arc = state.detector.clone();
-    let detection_on = state.detection_enabled.clone();
-    let last_detection: Arc<Mutex<(Instant, Vec<DetBox>)>> =
-        Arc::new(Mutex::new((Instant::now() - Duration::from_secs(1), Vec::new())));
-
-    let mut frame_counter: u64 = 0;
-    let on_frame = Arc::new(move |frame: &FrameView| {
-        frame_counter = frame_counter.wrapping_add(1);
-
-        // Detection every 4th frame, async-blocking on the WGC thread is fine
-        // because we already throttled to 30 Hz.
-        if detection_on.load(Ordering::Relaxed) && frame_counter % 4 == 0 {
-            if let Some(det) = detector_arc.lock().as_mut() {
-                if let Ok(boxes) = det.detect(&frame.bytes, frame.width, frame.height) {
-                    *last_detection.lock() = (Instant::now(), boxes);
-                }
-            }
-        }
-
-        // Build region list = user regions ∪ recent detections.
-        let mut regions: Vec<NormalizedRegion> = regions_arc.current();
-        let last = last_detection.lock();
-        if last.0.elapsed() < Duration::from_millis(800) {
-            for b in &last.1 {
-                if b.confidence < 0.5 { continue; }
-                regions.push(NormalizedRegion::new(
-                    b.x as f64 / frame.width as f64,
-                    b.y as f64 / frame.height as f64,
-                    b.width as f64 / frame.width as f64,
-                    b.height as f64 / frame.height as f64,
-                ));
-            }
-        }
-        drop(last);
-
-        // Inpaint.
-        let payloads: Vec<PatchPayload> = inpainter_arc
-            .lock()
-            .render(&frame.bytes, frame.width, frame.height, &regions)
-            .unwrap_or_default();
-
-        let _ = app.emit("patches-updated", &payloads);
-    }) as Arc<dyn Fn(&FrameView) + Send + Sync>;
-
-    let session = CaptureSession::start(HMONITOR(monitor_hmonitor as isize), on_frame)
-        .map_err(|e| e.to_string())?;
-    *state.capture.lock() = Some(session);
-    let _ = state.app.emit("capture-state", serde_json::json!({ "running": true }));
-    Ok(())
+fn start_capture(monitor_id: Option<String>, state: State<'_, AppState>) -> Result<(), String> {
+    actions::start_capture(&state, monitor_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(session) = state.capture.lock().take() {
-        session.stop();
-    }
-    let _ = state.app.emit("capture-state", serde_json::json!({ "running": false }));
-    let _ = state.app.emit("patches-updated", Vec::<PatchPayload>::new());
+    actions::stop_capture(&state);
+    actions::emit_capture_state(&state.app, false);
     Ok(())
+}
+
+/// Panic-disable: instantly stop covering and hide the overlay, and disable
+/// detection. Mirrors macOS Cmd+Shift+Opt+. Also wired to the hotkey + tray.
+#[tauri::command]
+fn panic_disable(state: State<'_, AppState>) -> Result<(), String> {
+    actions::panic_disable(&state);
+    Ok(())
+}
+
+/// DRM-safe capture-free PaintOver: cover the user's regions with opaque black
+/// on the native overlay WITHOUT capturing any pixels (for fully content-
+/// protected video). See `actions::paint_over_regions_only`.
+#[tauri::command]
+fn start_paint_over(state: State<'_, AppState>) -> Result<(), String> {
+    actions::paint_over_regions_only(&state).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -246,21 +231,38 @@ fn set_detection_enabled(enabled: bool, state: State<'_, AppState>) -> Result<()
     Ok(())
 }
 
+// ===== Region CRUD (keeps the worker snapshot in sync) =====
+
 #[tauri::command]
 fn list_regions(state: State<'_, AppState>) -> Vec<NormalizedRegion> {
     state.regions.current()
 }
 
+/// Returns the stored region (the frontend `ipc.ts` types `addRegion` as
+/// `invoke<NormalizedRegion>`).
 #[tauri::command]
-fn add_region(region: NormalizedRegion, state: State<'_, AppState>) -> Result<(), String> {
+fn add_region(
+    region: NormalizedRegion,
+    state: State<'_, AppState>,
+) -> Result<NormalizedRegion, String> {
+    let stored = region.clone();
     state.regions.add(region).map_err(|e| e.to_string())?;
+    state.refresh_region_snapshot();
     let _ = state.app.emit("regions-updated", state.regions.current());
-    Ok(())
+    Ok(stored)
 }
 
 #[tauri::command]
-fn replace_region(id: Uuid, region: NormalizedRegion, state: State<'_, AppState>) -> Result<(), String> {
-    state.regions.replace_id(id, region).map_err(|e| e.to_string())?;
+fn replace_region(
+    id: Uuid,
+    region: NormalizedRegion,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .regions
+        .replace_id(id, region)
+        .map_err(|e| e.to_string())?;
+    state.refresh_region_snapshot();
     let _ = state.app.emit("regions-updated", state.regions.current());
     Ok(())
 }
@@ -268,6 +270,7 @@ fn replace_region(id: Uuid, region: NormalizedRegion, state: State<'_, AppState>
 #[tauri::command]
 fn delete_region(id: Uuid, state: State<'_, AppState>) -> Result<(), String> {
     state.regions.remove(id).map_err(|e| e.to_string())?;
+    state.refresh_region_snapshot();
     let _ = state.app.emit("regions-updated", state.regions.current());
     Ok(())
 }
@@ -275,29 +278,18 @@ fn delete_region(id: Uuid, state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn clear_regions(state: State<'_, AppState>) -> Result<(), String> {
     state.regions.clear().map_err(|e| e.to_string())?;
+    state.refresh_region_snapshot();
     let _ = state.app.emit("regions-updated", state.regions.current());
     Ok(())
 }
 
+// ===== Labeling pipeline =====
+
 #[tauri::command]
 fn capture_screenshot_for_labeling(state: State<'_, AppState>) -> Result<Option<PathBuf>, String> {
-    let frame = match state.capture.lock().as_ref() {
-        Some(s) => s.latest_frame(),
-        None => return Ok(None),
-    };
-    let Some(frame) = frame else { return Ok(None); };
-    let _ = paths::ensure_directories();
-    let stem = paths::new_screenshot_stem();
-    let dst = paths::screenshots_dir().join(format!("{stem}.png"));
-    // Encode BGRA to RGBA → PNG.
-    let mut rgba = Vec::with_capacity(frame.bytes.len());
-    for c in frame.bytes.chunks_exact(4) {
-        rgba.extend_from_slice(&[c[2], c[1], c[0], c[3]]);
-    }
-    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(frame.width, frame.height, rgba)
-        .ok_or("invalid frame")?;
-    img.save(&dst).map_err(|e| e.to_string())?;
-    Ok(Some(dst))
+    // Read + encode the freshest captured frame. Shared with the tray/hotkey
+    // screenshot action so both produce identical PNGs.
+    screenshot::save_latest_frame(&state).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -312,34 +304,28 @@ fn list_screenshots() -> Vec<ScreenshotEntry> {
         .filter_map(|e| {
             let p = e.path();
             let ext = p.extension().and_then(|x| x.to_str())?;
-            if !ext.eq_ignore_ascii_case("png") { return None; }
+            if !ext.eq_ignore_ascii_case("png") {
+                return None;
+            }
             let stem = p.file_stem()?.to_string_lossy().into_owned();
             let label = paths::label_path_for(&p);
-            Some(ScreenshotEntry { path: p, stem, labeled: label.exists() })
+            Some(ScreenshotEntry {
+                path: p,
+                stem,
+                labeled: label.exists(),
+            })
         })
         .collect();
     out.sort_by(|a, b| a.stem.cmp(&b.stem));
     out
 }
 
-#[derive(Serialize)]
-struct ScreenshotData {
-    width: u32,
-    height: u32,
-    /// data:image/png;base64,...
-    png_data_url: String,
-}
-
+/// Return the raw PNG bytes for a screenshot. The frontend (`ipc.ts`) types this
+/// as `number[]`; serde serializes `Vec<u8>` to a JSON number array, which the
+/// labeling UI turns into a Blob/ObjectURL — no base64 data-url anymore.
 #[tauri::command]
-fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
-    Ok(ScreenshotData {
-        width: img.width(),
-        height: img.height(),
-        png_data_url: format!("data:image/png;base64,{}", STANDARD.encode(&bytes)),
-    })
+fn load_screenshot(path: PathBuf) -> Result<Vec<u8>, String> {
+    std::fs::read(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -349,7 +335,9 @@ fn save_label(path: PathBuf, doc: LabelDocument) -> Result<(), String> {
 
 #[tauri::command]
 fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
-    if !path.exists() { return Ok(None); }
+    if !path.exists() {
+        return Ok(None);
+    }
     LabelDocument::load(&path).map(Some).map_err(|e| e.to_string())
 }
 
@@ -360,8 +348,15 @@ fn discard_screenshot(path: PathBuf) -> Result<(), String> {
     std::fs::rename(&path, &dst).map_err(|e| e.to_string())
 }
 
+// ===== Training =====
+
 #[tauri::command]
-fn start_training(epochs: u32, batch: u32, imgsz: u32, state: State<'_, AppState>) -> Result<(), String> {
+fn start_training(
+    epochs: u32,
+    batch: u32,
+    imgsz: u32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let job = training::TrainingJob::start(state.app.clone(), epochs, batch, imgsz)
         .map_err(|e| e.to_string())?;
     *state.training.lock() = Some(job);
@@ -376,16 +371,20 @@ fn cancel_training(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// ===== Window lifecycle (names match the frontend `ipc.ts`) =====
+
 #[tauri::command]
-fn window_show(label: String, app: AppHandle) -> Result<(), String> {
-    app.get_webview_window(&label)
-        .ok_or_else(|| format!("no window {label}"))?
-        .show()
-        .map_err(|e| e.to_string())
+fn show_window(label: String, app: AppHandle) -> Result<(), String> {
+    let w = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("no window {label}"))?;
+    w.show().map_err(|e| e.to_string())?;
+    let _ = w.set_focus();
+    Ok(())
 }
 
 #[tauri::command]
-fn window_hide(label: String, app: AppHandle) -> Result<(), String> {
+fn hide_window(label: String, app: AppHandle) -> Result<(), String> {
     app.get_webview_window(&label)
         .ok_or_else(|| format!("no window {label}"))?
         .hide()

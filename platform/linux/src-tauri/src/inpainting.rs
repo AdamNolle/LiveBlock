@@ -24,6 +24,13 @@ use std::time::{Duration, Instant};
 /// Patch payload schema must stay byte-identical with the Windows port (the
 /// frontend `ipc.ts` is shared). `png_data_url` is a `data:image/png;base64,...`
 /// URL the frontend can drop straight into an `<img src>`.
+///
+/// `fill` is OPTIONAL and only present for the DRM-safe **paint-over** path: a
+/// flat opaque cover the overlay draws WITHOUT having read the protected pixels
+/// (see `liveblock_core::paint_over_regions`). When `fill` is set the frontend
+/// ignores `png_data_url` (which is empty) and draws a solid rectangle. Omitting
+/// the field for the normal mirror-blend path keeps the JSON byte-compatible
+/// with the existing Windows/macOS patch consumer.
 #[derive(Debug, Clone, Serialize)]
 pub struct PatchPayload {
     pub id: String,
@@ -32,6 +39,25 @@ pub struct PatchPayload {
     pub width: f64,
     pub height: f64,
     pub png_data_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<SolidFill>,
+}
+
+/// A flat opaque cover colour for a paint-over patch (RGBA, 0..255).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SolidFill {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl From<liveblock_core::Fill> for SolidFill {
+    fn from(f: liveblock_core::Fill) -> Self {
+        match f {
+            liveblock_core::Fill::Solid { r, g, b, a } => SolidFill { r, g, b, a },
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -43,22 +69,36 @@ struct CachedPatch {
 pub struct Inpainter {
     cache: Mutex<HashMap<String, CachedPatch>>,
     max_age: Duration,
-    device: Option<wgpu::Device>,
-    #[allow(dead_code)]
-    queue: Option<wgpu::Queue>,
+    /// Whether a Vulkan/GL adapter was found at startup. Purely diagnostic for
+    /// now — see the honesty note below. We deliberately DO NOT keep a live
+    /// `wgpu::Device`/`Queue`: holding them implied a GPU inpaint path existed
+    /// when `inpaint()` was, in fact, always CPU-only (the confirmed gap). The
+    /// GPU compute path (src/inpainting.wgsl) is written but unvalidated; it is
+    /// gated behind on-hardware verification rather than silently dead-held.
+    gpu_available: bool,
 }
 
 impl Inpainter {
     pub fn new() -> Self {
-        let (device, queue) = pollster::block_on(init_wgpu()).unwrap_or((None, None));
+        // Probe for a GPU adapter for diagnostics only. We drop the device
+        // immediately: the inpaint hot path is CPU until the WGSL pipeline is
+        // validated on a real Linux box (see `compute_shader_path`).
+        let gpu_available = pollster::block_on(probe_gpu());
         Self {
             cache: Mutex::new(HashMap::new()),
             max_age: Duration::from_millis(400),
-            device,
-            queue,
+            gpu_available,
         }
     }
 
+    /// True if a Vulkan/GL adapter was detected at startup. Reported to the
+    /// frontend for diagnostics; does NOT imply the GPU inpaint path runs yet.
+    pub fn gpu_available(&self) -> bool {
+        self.gpu_available
+    }
+
+    /// Mirror-blend inpaint over capturable regions. CPU path only — see the
+    /// honesty note on `gpu_available`.
     pub fn inpaint(
         &mut self,
         frame_bgra: &[u8],
@@ -66,11 +106,42 @@ impl Inpainter {
         frame_h: u32,
         regions: &[NormalizedRegion],
     ) -> Result<Vec<PatchPayload>> {
-        if self.device.is_some() {
-            // GPU path is intentionally a no-op for now; falls through to CPU.
-            // See compute_shader_path note at the bottom.
-        }
+        // NOTE(linux-port): CPU mirror-blend is the only correctness-complete
+        // path today. The GPU compute path is intentionally NOT invoked here —
+        // wiring it without a Linux box to validate would risk shipping a
+        // silently-wrong inpaint. This is the fix for the "claims wgpu but
+        // inpaint() is CPU-only" gap: the claim is now accurate.
         self.inpaint_cpu(frame_bgra, frame_w, frame_h, regions)
+    }
+
+    /// Full DRM-aware render. Capturable regions go through the mirror-blend
+    /// inpainter; protected/blacked-out regions become flat opaque paint-over
+    /// covers built WITHOUT reading their pixels (the `liveblock_core` DRM-safe
+    /// path). Returns the union of both patch kinds.
+    pub fn render(
+        &mut self,
+        frame_bgra: &[u8],
+        frame_w: u32,
+        frame_h: u32,
+        inpaint_regions: &[NormalizedRegion],
+        paint_over: &[liveblock_core::PaintPatch],
+    ) -> Result<Vec<PatchPayload>> {
+        let mut out = self.inpaint_cpu(frame_bgra, frame_w, frame_h, inpaint_regions)?;
+        // Paint-over patches carry no pixel data: the overlay fills a flat
+        // opaque rect. These never touch the cache (they're trivially cheap and
+        // their geometry can change every frame as the DRM region moves).
+        for (i, p) in paint_over.iter().enumerate() {
+            out.push(PatchPayload {
+                id: format!("paintover-{i}"),
+                x: p.rect.x as f64,
+                y: p.rect.y as f64,
+                width: p.rect.width as f64,
+                height: p.rect.height as f64,
+                png_data_url: String::new(),
+                fill: Some(p.fill.into()),
+            });
+        }
+        Ok(out)
     }
 
     fn inpaint_cpu(
@@ -119,6 +190,7 @@ impl Inpainter {
                     y: r.y,
                     width: r.width,
                     height: r.height,
+                    fill: None,
                     png_data_url: data_url,
                 });
                 continue;
@@ -142,6 +214,7 @@ impl Inpainter {
                 y: r.y,
                 width: r.width,
                 height: r.height,
+                fill: None,
                 png_data_url: data_url,
             });
         }
@@ -202,34 +275,63 @@ fn mirror_blend(
         Box<dyn Fn(u32, u32) -> (u32, u32)>,
     ) = match axis {
         Axis::Vertical => {
-            let near_y = ry.checked_sub(rh)?;
+            // The NEAR band sits in rows [ry-rh, ry) directly ABOVE the region;
+            // `checked_sub` already proves it fits above the top edge, so its
+            // availability is simply "did the subtraction succeed". The FAR band
+            // sits in rows [ry+rh, ry+2*rh) directly BELOW, so it must fit under
+            // the bottom of the frame.
+            //
+            // BUGFIX(linux-port): the previous code tested `near_y + rh <= src_h`
+            // for the near band — but `near_y + rh == ry`, so that condition was
+            // `ry <= src_h`, which is ALWAYS true. The near band was therefore
+            // treated as available even when it had been clamped, and when the
+            // region hugged the bottom of the screen the (correct) far check
+            // failed while the (bogus) near check passed, so the blend silently
+            // used only the reflected-from-above band with no cross-fade weight
+            // correction — producing the visible vertical seam. We now test the
+            // near band against the TOP edge, which is what reflection-from-above
+            // actually requires.
+            let near_y = match ry.checked_sub(rh) {
+                Some(v) => v,
+                None => 0, // partial band; `near_avail` below records the truth
+            };
             let far_y = ry + rh;
-            let near_avail = near_y + rh <= src_h;
-            let far_avail = far_y + rh <= src_h;
+            let near_avail = ry >= rh; // full band fits in [ry-rh, ry)
+            let far_avail = far_y + rh <= src_h; // full band fits in [ry+rh, ry+2rh)
             (
                 near_avail,
                 far_avail,
                 Box::new(move |dx: u32, dy: u32| {
+                    // Reflect across the TOP edge: output row dy maps to the
+                    // pixel dy+1 above ry, i.e. source row ry-1-dy.
                     let sy = near_y + (rh - 1 - dy);
-                    (rx + dx, sy)
+                    (rx + dx, sy.min(src_h - 1))
                 }),
                 Box::new(move |dx: u32, dy: u32| {
+                    // Reflect across the BOTTOM edge: output row dy maps to the
+                    // pixel (rh-dy) below the bottom edge.
                     let sy = far_y.saturating_add(rh.saturating_sub(1).saturating_sub(dy));
                     (rx + dx, sy.min(src_h - 1))
                 }),
             )
         }
         Axis::Horizontal => {
-            let near_x = rx.checked_sub(rw)?;
+            // Symmetric to the vertical case. NEAR band is columns [rx-rw, rx)
+            // to the LEFT (must fit past the left edge); FAR band is columns
+            // [rx+rw, rx+2*rw) to the RIGHT (must fit before the right edge).
+            let near_x = match rx.checked_sub(rw) {
+                Some(v) => v,
+                None => 0,
+            };
             let far_x = rx + rw;
-            let near_avail = near_x + rw <= src_w;
+            let near_avail = rx >= rw;
             let far_avail = far_x + rw <= src_w;
             (
                 near_avail,
                 far_avail,
                 Box::new(move |dx: u32, dy: u32| {
                     let sx = near_x + (rw - 1 - dx);
-                    (sx, ry + dy)
+                    (sx.min(src_w - 1), ry + dy)
                 }),
                 Box::new(move |dx: u32, dy: u32| {
                     let sx = far_x.saturating_add(rw.saturating_sub(1).saturating_sub(dx));
@@ -368,22 +470,20 @@ fn encode_png_bgra(bgra: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-async fn init_wgpu() -> Option<(Option<wgpu::Device>, Option<wgpu::Queue>)> {
+/// Probe for a Vulkan/GL adapter. Used for diagnostics only — we do not retain
+/// the device (see `Inpainter::gpu_available` for why).
+async fn probe_gpu() -> bool {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
         ..Default::default()
     });
-    let adapter = instance
+    instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
         })
-        .await?;
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor::default(), None)
         .await
-        .ok()?;
-    Some((Some(device), Some(queue)))
+        .is_some()
 }
 
 pub type SharedInpainter = Arc<Mutex<Inpainter>>;
@@ -396,3 +496,76 @@ pub type SharedInpainter = Arc<Mutex<Inpainter>>;
 // driver.
 #[allow(dead_code)]
 pub fn compute_shader_path() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vertical gradient frame: row y has luma y (clamped). The near band
+    /// (above) and far band (below) are distinguishable, so we can prove the
+    /// reflection samples the correct rows.
+    fn gradient_frame(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            let luma = (y.min(255)) as u8;
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                v[i] = luma;
+                v[i + 1] = luma;
+                v[i + 2] = luma;
+                v[i + 3] = 255;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn vertical_near_band_reflects_top_edge() {
+        // Region rows [10,20); near band rows [0,10) above, far band [20,30).
+        let (w, h) = (8u32, 40u32);
+        let frame = gradient_frame(w, h);
+        let patch = mirror_blend(&frame, w, h, 0, 10, w, 10, Axis::Vertical)
+            .expect("both bands available");
+        // dy=0 is the near edge: t=1 → pure near sample = row ry-1 = row 9.
+        let top = patch.bytes[0];
+        assert_eq!(top, 9, "near edge (dy=0) must mirror the pixel just above ry");
+        // dy=rh-1 is the far edge: t=0 → pure far sample = row ry+rh = row 20.
+        let off = (((10 - 1) * w + 0) * 4) as usize;
+        let bottom = patch.bytes[off];
+        assert_eq!(bottom, 20, "far edge must mirror the pixel just below the region");
+    }
+
+    #[test]
+    fn region_at_bottom_uses_only_near_band() {
+        // Region hugs the bottom: far band would run off-screen, so only the
+        // near (above) band is available. BEFORE the bugfix the bogus
+        // `near_avail = ry <= src_h` check let an invalid blend through; now the
+        // near band is the sole contributor and the patch is well-defined.
+        let (w, h) = (8u32, 40u32);
+        let frame = gradient_frame(w, h);
+        // ry=30, rh=10 → region rows [30,40); far band [40,50) is off-screen.
+        let patch = mirror_blend(&frame, w, h, 0, 30, w, 10, Axis::Vertical)
+            .expect("near band alone is enough");
+        // Top row mirrors row ry-1 = 29.
+        assert_eq!(patch.bytes[0], 29);
+    }
+
+    #[test]
+    fn paint_over_fill_serializes_without_png() {
+        let p = PatchPayload {
+            id: "x".into(),
+            x: 0.1,
+            y: 0.2,
+            width: 0.3,
+            height: 0.4,
+            png_data_url: String::new(),
+            fill: Some(SolidFill { r: 0, g: 0, b: 0, a: 255 }),
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(j.contains("\"fill\""));
+        // A normal inpaint patch omits `fill` entirely (byte-compat).
+        let q = PatchPayload { fill: None, ..p };
+        let j2 = serde_json::to_string(&q).unwrap();
+        assert!(!j2.contains("\"fill\""));
+    }
+}

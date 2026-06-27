@@ -4,6 +4,8 @@
 //! expects.
 
 #[cfg(windows)]
+pub mod actions;
+#[cfg(windows)]
 pub mod capture;
 pub mod detection;
 #[cfg(windows)]
@@ -13,7 +15,11 @@ pub mod labels;
 #[cfg(windows)]
 pub mod overlay;
 pub mod paths;
+#[cfg(windows)]
+pub mod pipeline;
 pub mod regions;
+#[cfg(windows)]
+pub mod screenshot;
 #[cfg(windows)]
 pub mod state;
 pub mod training;

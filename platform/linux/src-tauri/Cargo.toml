@@ -27,9 +27,22 @@ tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
 # Shared core (data types + JSON format identical to macOS / Windows).
+# liveblock-core gives us the canonical pipeline glue: Tracker re-exports,
+# decide_verdict / build_remove_mask_from_tracks (the "never erase identity"
+# policy) and the DRM-safe paint_over_regions / region_is_protected_black path.
+liveblock-core = { path = "../../../core/crates/liveblock-core" }
+liveblock-tracker = { path = "../../../core/crates/liveblock-tracker" }
 liveblock-regions = { path = "../../../core/crates/liveblock-regions" }
 liveblock-labels = { path = "../../../core/crates/liveblock-labels" }
 liveblock-detection = { path = "../../../core/crates/liveblock-detection" }
+
+# Capture/overlay traits in this crate are async — the same async-trait the
+# shared core uses. (Confirmed missing: the capture dispatcher used
+# `#[async_trait::async_trait]` without declaring the dependency.)
+async-trait = "0.1"
+libc = "0.2"
+# Stream combinators for the ashpd GlobalShortcuts activation signal.
+futures-util = "0.3"
 
 tauri = { version = "2.0", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2.0"

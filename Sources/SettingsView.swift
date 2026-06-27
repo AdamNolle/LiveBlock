@@ -6,8 +6,12 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var controller: AppController
     @State private var section: Section = .blocking
-    @AppStorage("minConfidence") private var minConfidenceStored: Double = 0.84
-    @State private var minConfidence: Double = 0.84
+    // Unified with VisionProcessor's default and the MLDetectorView slider
+    // range (0.5...0.99) via AppController.defaultMinConfidence. Previously this
+    // defaulted to 0.84 while VisionProcessor sat at 0.35 and nothing reconciled
+    // them at launch — the confidence-desync bug.
+    @AppStorage("minConfidence") private var minConfidenceStored: Double = AppController.defaultMinConfidence
+    @State private var minConfidence: Double = AppController.defaultMinConfidence
 
     @AppStorage("pauseOnFullscreen") private var pauseOnFullscreen: Bool = true
 

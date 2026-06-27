@@ -62,7 +62,9 @@ impl TrainingJob {
 
         thread::spawn(move || {
             let r = BufReader::new(stdout);
-            for line in r.lines().flatten() {
+            // `map_while(Result::ok)` stops on the first read error instead of
+            // looping forever on a repeated Err (clippy::lines_filter_map_ok).
+            for line in r.lines().map_while(Result::ok) {
                 let _ = app_out.emit("training-log", &line);
                 if let Some(p) = parse_ultralytics_epoch(&line) {
                     let _ = app_out.emit("training-progress", &p);
@@ -71,7 +73,7 @@ impl TrainingJob {
         });
         thread::spawn(move || {
             let r = BufReader::new(stderr);
-            for line in r.lines().flatten() {
+            for line in r.lines().map_while(Result::ok) {
                 let _ = app_err.emit("training-log", &format!("[err] {line}"));
             }
         });

@@ -234,17 +234,82 @@ compiled model. Run `./run.sh --clean`.
 
 ```
 tools/
-  setup_env.sh             # create venv + install deps
-  requirements.txt         # ultralytics + coremltools + friends
-  train_logos.py           # ultralytics fine-tune wrapper
-  export_to_coreml.py      # .pt → .mlpackage with int8 + NMS
-  export_labels.py         # in-app labels → YOLO dataset
-  auto.sh                  # hands-off train+rebuild+notify
-  _unattended_runner.sh    # internal worker
+  lb_paths.py              # cross-platform LiveBlock data-dir resolution (one source of truth)
+  setup_env.sh             # macOS/Linux: create venv + install deps
+  setup_env.ps1            # Windows: create venv + install deps (no coremltools)
+  requirements.txt         # macOS deps (ultralytics + coremltools + friends)
+  requirements-win.txt     # Windows/Linux deps (ONNX instead of coremltools; timm for gallery)
+  train_logos.py           # ultralytics fine-tune wrapper → CoreML (mac) + ONNX (all)
+  export_to_coreml.py      # .pt → .mlpackage (+ sibling .onnx) with int8 + NMS
+  export_onnx.py           # .pt → .onnx for ONNX Runtime (Windows/Linux/mac)
+  export_labels.py         # in-app labels → MULTI-CLASS YOLO dataset (+ data.yaml names)
+  build_gallery.py         # reference logos → DINOv2/CLIP embeddings (protected-mark gallery)
+  gallery_references_layout.md  # how to lay out reference logos for build_gallery.py
+  auto.sh                  # macOS + Linux hands-off train+install+notify
+  auto.ps1                 # Windows hands-off train+install+toast
+  _unattended_runner.sh    # internal worker (OS-aware: mac rebuild vs linux ONNX install)
   README.md                # this file
   .venv/                   # gitignored
   runs/                    # training outputs, gitignored
 ```
+
+### Multi-class labels (sponsor-vs-team/number)
+
+`export_labels.py` now reads each box's `class` (from the label JSON sidecars —
+see `liveblock_labels::LabelClass`) and emits a **multi-class** YOLO dataset:
+
+| JSON `class`        | YOLO id | name             | intent |
+|---------------------|---------|------------------|--------|
+| `ad` (or absent)    | 0       | `ad`             | remove |
+| `sponsor_remove`    | 1       | `sponsor_remove` | remove |
+| `team_keep`         | 2       | `team_keep`      | keep   |
+| `number_keep`       | 3       | `number_keep`    | keep   |
+
+Legacy single-class datasets (no `class` key) map to id 0 byte-identically.
+The KEEP classes are trained on purpose: the detector learns to localize team
+emblems / numbers so the on-device pipeline can **carve them out** of the remove
+mask (`build_remove_mask_from_tracks`) — identity is never erased. Pass
+`--binary` to collapse back to the legacy single `ad` class (drops keep boxes).
+
+### One training run → every platform
+
+`train_logos.py --install` exports **both** a CoreML `.mlpackage` (macOS Vision)
+and an `.onnx` (Windows ORT+DirectML, Linux ORT+CUDA/ROCm/CPU). The ONNX lands
+in the per-OS runtime models dir (hot-loaded by a running Tauri app) and the
+in-repo Tauri `resources/` (bundled on the next build). NMS is left to the Rust
+detector (`liveblock_detection::non_max_suppression`), so the ONNX is exported
+without the embedded NMS op.
+
+### Cross-platform data paths
+
+All tools resolve the LiveBlock dir per-OS via `lb_paths.py`, matching the native
+apps exactly:
+
+- macOS   → `~/Library/Application Support/LiveBlock`
+- Windows → `%APPDATA%\LiveBlock`
+- Linux   → `~/.local/share/LiveBlock` (or `$XDG_DATA_HOME/LiveBlock`)
+
+Run `python tools/lb_paths.py` to print the resolved paths on your box.
+
+### Protected-mark reference gallery
+
+`build_gallery.py` embeds team/league reference logos with DINOv2 (default) or
+CLIP and writes `gallery.json` (+ optional `.npy`) for
+`liveblock-detection::GalleryMatcher`, which computes `team_gallery_sim` on
+device. The model weights are a one-time prerequisite (`pip install timm` for
+DINOv2). See [`gallery_references_layout.md`](gallery_references_layout.md).
+
+### Hands-off training per OS
+
+```bash
+# macOS / Linux
+tools/auto.sh /path/to/data.yaml          # or omit to auto-export labels (mac)
+# Windows
+pwsh -File tools/auto.ps1                  # auto-exports labels, then trains
+pwsh -File tools/auto.ps1 path\to\data.yaml --epochs 30
+```
+
+`auto.ps1` and `auto.sh` share the same subcommands: `status`, `log`, `stop`.
 
 User-collected training data lives outside the repo, in your
 Application Support folder:

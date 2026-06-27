@@ -18,6 +18,11 @@ tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
 # Shared core (data types + JSON format identical to macOS / Linux).
+# `liveblock-core` brings the Tracker -> decide_verdict -> build_remove_mask_from_tracks
+# pipeline + the DRM-safe paint-over path; `liveblock-tracker` is re-exported by it
+# but we depend on it directly too for the concrete `Tracker`/`Observation` types.
+liveblock-core = { path = "../../../core/crates/liveblock-core" }
+liveblock-tracker = { path = "../../../core/crates/liveblock-tracker" }
 liveblock-regions = { path = "../../../core/crates/liveblock-regions" }
 liveblock-labels = { path = "../../../core/crates/liveblock-labels" }
 liveblock-detection = { path = "../../../core/crates/liveblock-detection" }
@@ -37,16 +42,28 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
-ndarray = "0.16"
-half = "2.4"
 arc-swap = "1.7"
 crossbeam-channel = "0.5"
 dirs = "5"
 
-# Pin ort to rc.4. DirectML EP is the Windows GPU path; CPU is the fallback.
-ort = { version = "2.0.0-rc.4", default-features = false, features = ["directml", "load-dynamic", "ndarray"] }
+# Pin ort EXACTLY to the version resolved in Cargo.lock (rc.12 — the rc this
+# tree was last locked against). rc.4 -> rc.12 changed the public API
+# (ort::session::Session, ort::ep execution providers, the no-Result inputs!
+# macro, and (&Shape, &[T]) tensor extraction); detection.rs is written to rc.12.
+#
+# We deliberately DO NOT enable the `ndarray` feature: it would pull ort's
+# ndarray 0.17 alongside any other ndarray in the tree. detection.rs feeds the
+# model a flat `(shape, Vec<f32>)` and reads outputs back as `(&Shape, &[f32])`,
+# so no ndarray bridge is needed. DirectML is the Windows GPU EP; CPU is the
+# fallback. `load-dynamic` downloads/loads onnxruntime.dll at runtime.
+#
+# `api-24` selects the ONNX Runtime 1.24 API surface (the level rc.12's `default`
+# feature pins). It MUST be enabled: with `default-features = false` + the EP
+# registration code that `load-dynamic` compiles, ort references API fields
+# (e.g. the VitisAI EP append) that only exist behind `api-18+`. Omitting it
+# breaks ort's own build.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "api-24", "directml", "load-dynamic"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

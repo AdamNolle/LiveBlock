@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Hands-off training: backgrounded, sleep-prevented, auto-rebuild, macOS notification.
+# Hands-off training: sleep-prevented, auto-export/install, native notification.
+# CROSS-PLATFORM: works on macOS (caffeinate + Xcode rebuild) and Linux
+# (systemd-inhibit + ONNX install). The actual workhorse is
+# tools/_unattended_runner.sh, which is itself OS-aware.
 #
 # Usage:
 #   tools/auto.sh path/to/data.yaml                       # default training
@@ -10,19 +13,27 @@
 #
 # What it does after you start it:
 #   1. Sets up tools/.venv if missing
-#   2. Trains under `caffeinate -i` so the Mac doesn't idle-sleep
-#   3. Auto-installs the resulting .mlpackage into Sources/
-#   4. Regenerates Xcode project + builds the app
-#   5. Sends a macOS notification on success or failure
+#   2. macOS: trains under `caffeinate -i` (no idle-sleep). Linux: under
+#      `systemd-inhibit` when available.
+#   3. Auto-installs the trained model (.mlpackage on macOS, .onnx everywhere)
+#   4. macOS: regenerates the Xcode project + builds. Linux: model is hot-loaded
+#      by the running ort app; no rebuild required.
+#   5. Sends a native notification on success or failure
 #
-# After you start it, close this terminal — the job keeps running.
+# Foreground vs background:
+#   - On macOS (interactive), the job self-backgrounds under caffeinate so you
+#     can close the terminal.
+#   - On Linux, the native app spawns this and reads our stdout live, so we run
+#     the pipeline in the FOREGROUND. Set LB_FOREGROUND=1 to force this anywhere.
+#
 # Notes:
-#   - Keep your laptop lid OPEN. caffeinate prevents idle-sleep, not lid-sleep.
+#   - macOS: keep your laptop lid OPEN. caffeinate prevents idle-sleep, not lid-sleep.
 #   - Best on AC power (training is GPU-heavy).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
+OS="$(uname -s)"   # Darwin | Linux
 LOG="$REPO/tools/runs/auto.log"
 PIDFILE="$REPO/tools/runs/auto.pid"
 
@@ -42,7 +53,9 @@ case "${1:-}" in
     status)
         if [[ -f "$PIDFILE" ]] && pid=$(cat "$PIDFILE") && kill -0 "$pid" 2>/dev/null; then
             echo "✓ Running (PID $pid). Log: $LOG"
-            echo "  Started: $(stat -f %SB "$PIDFILE")"
+            # `stat` flags differ (BSD/macOS vs GNU/Linux); try both, ignore failure.
+            started="$(stat -f %SB "$PIDFILE" 2>/dev/null || stat -c %y "$PIDFILE" 2>/dev/null || true)"
+            [[ -n "$started" ]] && echo "  Started: $started"
             echo "  Last lines:"
             tail -5 "$LOG" 2>/dev/null | sed 's/^/    /'
         else
@@ -85,8 +98,47 @@ if [[ ! -d tools/.venv ]]; then
     bash tools/setup_env.sh
 fi
 
-# Background-launch the inner runner with caffeinate so idle-sleep is prevented.
-nohup caffeinate -i bash "$REPO/tools/_unattended_runner.sh" "$REPO" "$DATA" "$@" \
+# Pick a sleep-inhibitor wrapper appropriate to the OS. Empty array == no wrapper.
+INHIBIT=()
+case "$OS" in
+    Darwin)
+        # caffeinate -i prevents idle-sleep while training.
+        INHIBIT=(caffeinate -i)
+        ;;
+    Linux)
+        # systemd-inhibit keeps the box awake on most desktops; optional.
+        if command -v systemd-inhibit >/dev/null 2>&1; then
+            INHIBIT=(systemd-inhibit --what=idle:sleep --why="LiveBlock training" --mode=block)
+        fi
+        ;;
+esac
+
+# Decide foreground vs background.
+#   - macOS interactive: self-background under caffeinate so the user can close
+#     the terminal.
+#   - Linux (native app spawns us and reads stdout) OR LB_FOREGROUND=1: run in
+#     the foreground so output streams to the caller.
+RUN_FOREGROUND=0
+if [[ -n "${LB_FOREGROUND:-}" ]]; then
+    RUN_FOREGROUND=1
+elif [[ "$OS" == "Linux" ]]; then
+    RUN_FOREGROUND=1
+fi
+
+if [[ "$RUN_FOREGROUND" -eq 1 ]]; then
+    echo "$$" > "$PIDFILE"
+    # tee so the live log file is populated while we also stream to our stdout
+    # (the native app captures our stdout/stderr directly).
+    # ${INHIBIT[@]+...} guard: safe expansion of a possibly-empty array under set -u.
+    ${INHIBIT[@]+"${INHIBIT[@]}"} bash "$REPO/tools/_unattended_runner.sh" "$REPO" "$DATA" "$@" 2>&1 \
+        | tee "$LOG"
+    rc="${PIPESTATUS[0]}"
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit "$rc"
+fi
+
+# macOS background path.
+nohup ${INHIBIT[@]+"${INHIBIT[@]}"} bash "$REPO/tools/_unattended_runner.sh" "$REPO" "$DATA" "$@" \
     >"$LOG" 2>&1 &
 
 PID=$!
@@ -105,7 +157,7 @@ Useful commands:
   tools/auto.sh stop      # cancel
 
 Mac stays awake via caffeinate. Close this terminal whenever — the job
-keeps running. macOS notification fires on success or failure.
+keeps running. A native notification fires on success or failure.
 
-Realistic timing: 30 min – 3 hrs depending on dataset size and Mac model.
+Realistic timing: 30 min – 3 hrs depending on dataset size and machine.
 EOF

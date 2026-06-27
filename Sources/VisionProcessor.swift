@@ -10,6 +10,37 @@ enum AdSource: String, Codable, Sendable {
     case detection
 }
 
+/// A detection cached BETWEEN detection runs, stored in resolution-independent
+/// normalized [0..1] coordinates with a **bottom-left** origin (CV space, the
+/// same convention `AdBoundingBox.rect` uses once converted to pixels).
+///
+/// Why normalized: the previous code cached `AdBoundingBox` rects in ABSOLUTE
+/// pixels and reused them across frames. If the captured buffer changed size
+/// mid-stream (display resolution / scale change, or a reconfigure after a
+/// monitor swap) those pixel rects mis-mapped onto the new frame. Caching
+/// normalized rects and converting per-frame from the CURRENT buffer size
+/// keeps cached detections correct across any resize.
+struct NormalizedDetection: Sendable {
+    /// Normalized rect in [0..1], bottom-left origin.
+    let normRect: CGRect
+    let confidence: Float
+    let label: String
+
+    /// Project this normalized detection onto a concrete pixel buffer size,
+    /// yielding a pixel-space `AdBoundingBox` (bottom-left origin) for the
+    /// inpaint pipeline.
+    func adBox(inPixelBufferSize size: CGSize) -> AdBoundingBox {
+        let pixelRect = CGRect(x: normRect.minX * size.width,
+                               y: normRect.minY * size.height,
+                               width: normRect.width * size.width,
+                               height: normRect.height * size.height)
+        return AdBoundingBox(rect: pixelRect,
+                             confidence: confidence,
+                             label: label,
+                             source: .detection)
+    }
+}
+
 struct AdBoundingBox: Sendable {
     let rect: CGRect          // pixel coords, bottom-left origin (CV space)
     let confidence: Float
@@ -41,7 +72,11 @@ final class VisionProcessor: @unchecked Sendable {
     private var realtimeRequest: VNCoreMLRequest?  // reused on the videoQueue
     private var labelingRequest: VNCoreMLRequest?  // reused on background labeling tasks
     private var loadFailed = false
-    private var _minimumConfidence: Float = 0.35
+    // Unified default (was 0.35). AppController pushes the persisted value
+    // (or AppController.defaultMinConfidence = 0.5) at launch via
+    // setMinimumConfidence, so this is just the pre-startup fallback and now
+    // matches the rest of the app instead of silently running 0.15 lower.
+    private var _minimumConfidence: Float = 0.5
 
     var minimumConfidence: Float {
         lock.lock(); defer { lock.unlock() }
@@ -54,7 +89,45 @@ final class VisionProcessor: @unchecked Sendable {
 
     /// Detects objects in `pixelBuffer` using the bundled YOLO model.
     /// Returns `[]` if the model cannot be loaded — never throws.
-    func detect(in pixelBuffer: CVPixelBuffer) -> [AdBoundingBox] {
+    ///
+    /// Boxes are returned in resolution-independent NORMALIZED [0..1]
+    /// coordinates (bottom-left origin) so the capture pipeline can cache them
+    /// across detection intervals and project them onto whatever the current
+    /// buffer size is, frame by frame.
+    ///
+    /// CLASS-ALLOWLIST SAFETY GATE: the shipped model is generic COCO
+    /// (person/car/dog/…), NOT an ad/sponsor detector. Auto-erasing every COCO
+    /// detection erased people and cars — the confirmed "class-blind erasure"
+    /// bug. We gate detections through `SponsorClassAllowlist`, which is
+    /// intentionally EMPTY until a real sponsor/logo model ships, so nothing
+    /// auto-erases. The raw observations are still surfaced for the live
+    /// detection log (`detectForDisplay`); only the auto-block path is gated.
+    func detect(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
+        return runDetection(in: pixelBuffer).filter {
+            SponsorClassAllowlist.allowsAutoBlock(label: $0.label)
+        }
+    }
+
+    /// Same inference as `detect(in:)` but WITHOUT the auto-block allowlist
+    /// gate. Used purely to populate the live detection log / ML detector UI so
+    /// the user can see what the model sees, without any of those detections
+    /// feeding the eraser. Never wire this into the inpaint path.
+    func detectForDisplay(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
+        return runDetection(in: pixelBuffer)
+    }
+
+    /// One inference pass, two views of the result:
+    ///   • `forErase` — allowlist-gated (currently empty), feeds the eraser.
+    ///   • `forDisplay` — ungated, feeds the live detection log only.
+    /// Use this on the hot capture path so we don't pay for inference twice.
+    func detectGatedAndDisplay(in pixelBuffer: CVPixelBuffer)
+        -> (forErase: [NormalizedDetection], forDisplay: [NormalizedDetection]) {
+        let all = runDetection(in: pixelBuffer)
+        let gated = all.filter { SponsorClassAllowlist.allowsAutoBlock(label: $0.label) }
+        return (forErase: gated, forDisplay: all)
+    }
+
+    private func runDetection(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
         guard let vnModel = ensureModel() else { return [] }
         let threshold = minimumConfidence  // snapshot under lock
 
@@ -76,22 +149,14 @@ final class VisionProcessor: @unchecked Sendable {
             return []
         }
 
-        let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
-        let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-
         let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
-        return observations.compactMap { obs -> AdBoundingBox? in
+        return observations.compactMap { obs -> NormalizedDetection? in
             guard let top = obs.labels.first, top.confidence >= threshold else { return nil }
-            // VNRecognizedObjectObservation.boundingBox is normalized [0..1] with origin bottom-left.
-            let bb = obs.boundingBox
-            let pixelRect = CGRect(x: bb.minX * width,
-                                   y: bb.minY * height,
-                                   width: bb.width * width,
-                                   height: bb.height * height)
-            return AdBoundingBox(rect: pixelRect,
-                                 confidence: top.confidence,
-                                 label: top.identifier,
-                                 source: .detection)
+            // VNRecognizedObjectObservation.boundingBox is already normalized
+            // [0..1] with bottom-left origin — cache it as-is, resolution-free.
+            return NormalizedDetection(normRect: obs.boundingBox,
+                                       confidence: top.confidence,
+                                       label: top.identifier)
         }
     }
 
@@ -118,7 +183,7 @@ final class VisionProcessor: @unchecked Sendable {
             labelingRequest = r
             return r
         }()
-        let proposalThreshold: Float = 0.20  // lower than the 0.35 realtime default
+        let proposalThreshold: Float = 0.20  // lower than the realtime default so the user can prune false positives
 
         let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up)
         do {

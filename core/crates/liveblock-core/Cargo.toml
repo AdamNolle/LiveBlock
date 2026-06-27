@@ -14,6 +14,7 @@ parking_lot = { workspace = true }
 liveblock-regions = { path = "../liveblock-regions" }
 liveblock-labels = { path = "../liveblock-labels" }
 liveblock-detection = { path = "../liveblock-detection" }
+liveblock-tracker = { path = "../liveblock-tracker" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

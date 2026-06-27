@@ -1,0 +1,21 @@
+# Windows / Linux training + export deps.
+# coremltools is macOS-only and intentionally absent here (CoreML export is a
+# no-op on these platforms; we ship ONNX instead).
+ultralytics>=8.3.0
+torch>=2.2
+torchvision>=0.17
+numpy>=1.26,<2.0
+pillow>=10.0
+pyyaml>=6.0
+huggingface_hub>=0.24
+
+# ONNX export + graph simplification + local validation for ORT consumers.
+onnx>=1.16
+onnxslim>=0.1.34
+onnxruntime>=1.18
+
+# Reference-gallery embedder backbones (build_gallery.py). Pick one path:
+#   DINOv2 (default): timm
+#   CLIP (optional):  open_clip_torch  (uncomment if you use --backbone clip)
+timm>=1.0.0
+# open_clip_torch>=2.24

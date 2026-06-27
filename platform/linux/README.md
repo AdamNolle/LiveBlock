@@ -7,21 +7,51 @@ Liquid Glass aesthetic.
 
 ## Status
 
-**Skeleton.** The crate compiles a runnable Tauri bundle, with stubbed but
-real-API capture / detection / inpaint paths. Display-server detection,
-overlay strategy selection, and the data layer (regions / labels) are
-fully implemented. The actual frame loops (PipeWire stream pumping, X11
-shm copy, wgpu compute dispatch) are flagged with `// TODO(linux-port):`
-and need on-Linux iteration.
+**Wired, pending on-hardware verification.** The full canonical pipeline is
+now implemented and routed through the shared core:
+
+```
+capture → detector (ort) → Tracker::update → decide_verdict (SAFE empty-allowlist
+stub) → build_remove_mask_from_tracks → DRM split → inpaint / paint_over → emit
+```
+
+- **Capture:** the PipeWire DMA-BUF/shm frame loop (`capture/wayland.rs`) and
+  the X11 XShm path (`capture/x11.rs`) are implemented for real (format
+  negotiation, stride-honoring copy, YUY2/NV12→BGRA conversion; SysV
+  `shmget`/`shmat` + `XShmAttach`/`XShmGetImage`).
+- **Runtime loop:** `runtime.rs` spawns the capture→detect→track→mask→paint
+  task on `start_capture` and emits `capture-state-changed` / `patches-updated`
+  / `regions-updated`.
+- **DRM:** `region_is_protected_black` routes HDCP black-outs to the capture-free
+  `paint_over_regions` opaque cover instead of smearing them through the blend.
+- **Overlay:** wlr-layer-shell (`LayerExact`), X11 override-redirect
+  (`LayerExact`), and GNOME (`FloatingDegraded`) are implemented.
+- **Hotkeys/tray:** ashpd GlobalShortcuts + XGrabKey are installed and the
+  receiver loop is wired; an app-indicator tray is registered.
+
+Code paths that touch live Wayland/X11/PipeWire are marked
+`VERIFY-ON-LINUX(linux-port)` — they are coded to the documented crate APIs but
+cannot be exercised on the Windows dev box. The CPU mirror-blend inpaint is the
+only correctness-complete inpaint path; the wgpu/WGSL compute path is written
+but gated behind on-hardware validation (we no longer falsely claim a live GPU
+inpaint — see `inpainting.rs`).
+
+### Classifier safety (important)
+
+The bundled detector is generic **COCO** YOLOv8n. To prevent the
+"erases people/cars" failure, the classifier gate in `runtime.rs` uses an
+**EMPTY allowlist**: no COCO class is ever auto-removed. Every track stays
+`Unsure`/`Keep`, so nothing is auto-erased until a real sponsor/team/number
+model is wired. **User-drawn regions still inpaint/paint as before.**
 
 ## Distribution-server matrix
 
-| Compositor | Capture | Overlay | Notes |
+| Compositor | Capture | Overlay (fidelity) | Notes |
 |---|---|---|---|
-| Sway / Hyprland / river / wlroots | Portal + PipeWire | wlr-layer-shell | Full feature parity |
-| KDE Plasma (Wayland) | Portal + PipeWire | wlr-layer-shell | KWin supports layer-shell since 5.27 |
-| GNOME / Mutter (Wayland) | Portal + PipeWire | **GNOME mode** | Visible movable window — no layer-shell |
-| X11 (any) | XComposite + XShm | override-redirect + xfixes | Best feature compatibility, going away |
+| Sway / Hyprland / river / wlroots | Portal + PipeWire | wlr-layer-shell (`LayerExact`) | Full feature parity |
+| KDE Plasma (Wayland) | Portal + PipeWire | wlr-layer-shell (`LayerExact`) | KWin supports layer-shell since 5.27 |
+| GNOME / Mutter (Wayland) | Portal + PipeWire | **GNOME mode** (`FloatingDegraded`) | Movable always-on-top window — Mutter refuses wlr-layer-shell |
+| X11 (any) | XComposite + XShm | override-redirect + xfixes (`LayerExact`) | Best feature compatibility, going away |
 
 Picked at runtime from `XDG_SESSION_TYPE` and `XDG_CURRENT_DESKTOP`.
 

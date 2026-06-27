@@ -1,0 +1,10 @@
+[package]
+name = "liveblock-inpainting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure-Rust CPU fills for LiveBlock (solid cover, edge-color, mirror-blend) — no GPU, no platform deps"
+
+[dependencies]
+liveblock-core = { path = "../liveblock-core" }

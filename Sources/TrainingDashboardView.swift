@@ -35,7 +35,25 @@ struct TrainingDashboardView: View {
     /// `tools/.venv` and offers a one-click install.
     @ViewBuilder
     private var preconditionCard: some View {
-        if !training.venvInstalled {
+        if !training.trainingRuntimeAvailable {
+            HStack(spacing: 10) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Theme.info)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Inference-only release build")
+                        .font(Theme.ui(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.ink1)
+                    Text("Release builds never download Python or training packages. Use the explicit source companion workflow to export candidates.")
+                        .font(Theme.ui(size: 12))
+                        .foregroundStyle(Theme.ink3)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .lbCard(Theme.infoSoft, radius: Theme.Radius.r4, stroke: Theme.info.opacity(0.35))
+        } else if !training.venvInstalled {
             HStack(spacing: 10) {
                 Image(systemName: "wrench.and.screwdriver.fill")
                     .font(.system(size: 16, weight: .semibold))
@@ -338,6 +356,7 @@ struct TrainingDashboardView: View {
     }
 
     private var trainNowDisabledReason: String? {
+        if !training.trainingRuntimeAvailable { return "Signed releases are inference-only; train from a source checkout." }
         if !training.venvInstalled { return "Install the training environment first." }
         if labeling.labeledCount < 20 { return "Label at least 20 screenshots first (currently \(labeling.labeledCount))." }
         return nil
@@ -355,8 +374,8 @@ struct TrainingDashboardView: View {
                          systemIcon: "play.fill", fullWidth: true) {
                     training.startTraining(epochs: epochsField, imgsz: imgszField, batch: batchField)
                 }
-                .disabled(labeling.labeledCount < 20 || !training.venvInstalled)
-                .opacity(labeling.labeledCount < 20 || !training.venvInstalled ? 0.5 : 1)
+                .disabled(labeling.labeledCount < 20 || !training.venvInstalled || !training.trainingRuntimeAvailable)
+                .opacity(labeling.labeledCount < 20 || !training.venvInstalled || !training.trainingRuntimeAvailable ? 0.5 : 1)
                 .help(trainNowDisabledReason ?? "Train a model on your labeled screenshots")
             }
             LBButton(title: "Label more", variant: .secondary, size: .lg,

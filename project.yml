@@ -22,6 +22,7 @@ targets:
         NSScreenCaptureUsageDescription: "LiveBlock uses ScreenCaptureKit to intercept and modify display frames."
         NSAccessibilityUsageDescription: "LiveBlock uses Accessibility access to register global hotkeys."
         NSPrincipalClass: NSApplication
+        LiveBlockTrainingRuntimeEnabled: "$(LIVEBLOCK_TRAINING_RUNTIME_ENABLED)"
         # Auto-load every .ttf/.otf in the bundle's Resources/ root. Bundling
         # Geist (UI), Geist Mono (numerals), and Bricolage Grotesque (display)
         # so Font.custom("Geist", ...) etc. resolve instead of silently falling
@@ -40,12 +41,14 @@ targets:
       configs:
         Debug:
           LIBRARY_SEARCH_PATHS: "$(SRCROOT)/core/target/universal/debug"
+          LIVEBLOCK_TRAINING_RUNTIME_ENABLED: YES
           # Hardened runtime blocks XCTest injection under a self-signed
           # codesigning identity. Off for local dev, on for Release.
           ENABLE_HARDENED_RUNTIME: NO
         Release:
           LIBRARY_SEARCH_PATHS: "$(SRCROOT)/core/target/universal/release"
           ENABLE_HARDENED_RUNTIME: YES
+          LIVEBLOCK_TRAINING_RUNTIME_ENABLED: NO
     preBuildScripts:
       - name: Build liveblock-bridge (universal)
         script: |

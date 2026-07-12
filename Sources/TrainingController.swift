@@ -2,9 +2,11 @@ import Foundation
 import AppKit
 import Combine
 
-/// Drives the export → train → install → rebuild pipeline as an in-app job.
+/// Drives the developer-only export → train → candidate pipeline.
 ///
-/// Spawns `tools/export_labels.py` followed by `tools/auto.sh`, streams stdout
+/// Signed release builds are inference-only and never bootstrap Python or pip.
+/// Debug/source builds spawn `tools/export_labels.py` and the candidate runner,
+/// stream stdout
 /// in real time, parses ultralytics' epoch lines into structured progress
 /// updates, and exposes everything as `@Published` state for the dashboard.
 @MainActor
@@ -36,6 +38,10 @@ final class TrainingController: ObservableObject {
     /// Most recent exported candidate. Candidates are never auto-installed;
     /// schema-5 verification must produce a passing report first.
     @Published private(set) var candidateModelPath: URL? = nil
+    /// Release binaries are inference-only. Training remains an explicit
+    /// source/developer workflow until a separately signed companion exists.
+    let trainingRuntimeAvailable: Bool
+
     /// Mirror of `tools/.venv` presence — drives the dashboard's
     /// "Install training environment" precondition card.
     @Published private(set) var venvInstalled: Bool = false
@@ -52,7 +58,18 @@ final class TrainingController: ObservableObject {
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
 
-    init() {
+    init(bundle: Bundle = .main) {
+        if let value = bundle.object(forInfoDictionaryKey: "LiveBlockTrainingRuntimeEnabled") as? String {
+            trainingRuntimeAvailable = ["YES", "true", "1"].contains(value)
+        } else if let value = bundle.object(forInfoDictionaryKey: "LiveBlockTrainingRuntimeEnabled") as? NSNumber {
+            trainingRuntimeAvailable = value.boolValue
+        } else {
+#if DEBUG
+            trainingRuntimeAvailable = true
+#else
+            trainingRuntimeAvailable = false
+#endif
+        }
         recheckVenv()
     }
 
@@ -64,7 +81,8 @@ final class TrainingController: ObservableObject {
     }
 
     func recheckVenv() {
-        venvInstalled = FileManager.default.fileExists(atPath: venvPython.path)
+        venvInstalled = trainingRuntimeAvailable
+            && FileManager.default.fileExists(atPath: venvPython.path)
     }
 
     var progressFraction: Double {
@@ -77,6 +95,10 @@ final class TrainingController: ObservableObject {
     // MARK: - Public actions
 
     func startTraining(epochs: Int = 50, imgsz: Int = 640, batch: Int = 8) {
+        guard trainingRuntimeAvailable else {
+            failWith("Training is unavailable in signed release builds; use the source companion workflow.")
+            return
+        }
         guard !isBusy else { return }
         Task { await runFullPipeline(epochs: epochs, imgsz: imgsz, batch: batch) }
     }
@@ -123,6 +145,10 @@ final class TrainingController: ObservableObject {
     /// Run `tools/setup_env.sh`. Streams output through the same logTail
     /// publisher the dashboard already shows.
     func installEnvironment() {
+        guard trainingRuntimeAvailable else {
+            failWith("Release builds never download or install a Python training environment.")
+            return
+        }
         guard !isInstallingEnvironment, !isBusy else { return }
         isInstallingEnvironment = true
         appendLog("=== Installing training environment \(Date()) ===")

@@ -2,8 +2,9 @@ name: Desktop CI
 
 on:
   pull_request:
+    branches: [main, feat/openvocab-detector]
   push:
-    branches: [main, feat/desktop-release-completion]
+    branches: [main, feat/openvocab-detector]
   workflow_dispatch:
 
 permissions:

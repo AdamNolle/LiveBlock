@@ -42,10 +42,12 @@ Current leads:
 | Advertising Panel Segmentation | Venue-board segmentation | Rejected until an explicit license is published |
 | SMVL/OpenLogo/LogoDet-3K | Useful technically | Rejected for production corpus due research-only or unclear image rights |
 
-The latest targeted broadcast-positive audit is preserved at
-`tools/datasets/sports-ads/broadcast-positive-source-audit.json`; it records
-license evidence and why scoreboards, channel marks, and raw panoramic match
-footage do not satisfy the positive-overlay requirement.
+The tracked targeted broadcast-positive audit is preserved at
+`tools/corpus/broadcast-positive-source-audit.json`; it records per-source
+license evidence, accepted frame timestamps and fingerprints, and why
+scoreboards, channel marks, raw panoramic match footage, and scene-only sponsor
+branding do not satisfy the positive-overlay requirement. Extracted pool frames
+remain local/ignored and still require attributable human review.
 
 Licensing research is technical due diligence, not legal advice. Trademark,
 publicity, event, and venue rights remain separate concerns.

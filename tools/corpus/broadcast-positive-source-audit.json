@@ -1,0 +1,84 @@
+{
+  "audited_at": "2026-07-12",
+  "requirement": "A positive group must be a clearly licensed sports broadcast frame containing a paid sponsor/ad mark inside a broadcast overlay; broadcaster watermarks, score-only graphics, venue scoreboards, ordinary screens, and raw match footage do not qualify.",
+  "accepted_positive_groups": [
+    {
+      "source": "https://commons.wikimedia.org/wiki/File:Gareth_Bale_WANTS_TO_BUY_Cardiff_City,_MLS_vs_Premier_League,_Retirement_%26_More_-_Portfolio_Players.webm",
+      "artist": "Front Office Sports",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "independent_group": "Front Office Sports / Portfolio Players / Gareth Bale",
+      "frame_timestamp_seconds": 37.0,
+      "visible_paid_sponsor": "E*TRADE from Morgan Stanley",
+      "qualification": "The sports-business broadcast title graphic explicitly says PRESENTED BY E*TRADE from Morgan Stanley. It is a paid sponsor lockup inside the broadcast graphic, not a watermark, venue board, jersey, or ordinary screen.",
+      "frame_sha256": "acfd956c25bbdc88135a517eb9d3dd45b5e489ba49c37f88fd86de3a06dfab99",
+      "source_video_sha256": "593f82d31aa0b4e7c0c3184efb1da76b987f33a3db05b31505850626441b53f0",
+      "annotation_status": "AI-assisted proposal pending attributable human review"
+    },
+    {
+      "source": "https://commons.wikimedia.org/wiki/File:From_MLB_GM_to_Women%E2%80%99s_Sports_Commissioner-_Kim_Ng%E2%80%99s_Next_Chapter.webm",
+      "artist": "Front Office Sports",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "independent_group": "Front Office Sports / Future of Sports / Kim Ng",
+      "frame_timestamp_seconds": 16.5,
+      "visible_paid_sponsor": "ADP",
+      "qualification": "The sports-business broadcast title graphic explicitly says PRESENTED BY ADP and displays the ADP mark. It is a paid sponsor lockup inside the broadcast graphic, not a watermark, venue board, jersey, or ordinary screen.",
+      "frame_sha256": "3050c4be8527f39686290ff4bf687e88723fa08a3f80f5312e68622a1ad86b14",
+      "source_video_sha256": "fb5e88c5ae357c190d702f37e9fb0fc121501580615c4d33be918de391134093",
+      "annotation_status": "AI-assisted proposal pending attributable human review"
+    }
+  ],
+  "rejected_or_quarantined_candidates": [
+    {
+      "source": "https://commons.wikimedia.org/wiki/File:Aaron_Rodgers_Jets_vs_Titans_SEPT2024.png",
+      "license": "CC BY 3.0",
+      "decision": "rejected_for_positive_slice",
+      "reason": "Licensed sports frame, but no paid sponsor mark inside a broadcast overlay."
+    },
+    {
+      "source": "https://commons.wikimedia.org/wiki/File:Reading_5-7_Arsenal_(scoreboard).png",
+      "license": "CC BY-SA",
+      "decision": "rejected_for_positive_slice",
+      "reason": "In-venue scoreboard rather than a broadcast overlay."
+    },
+    {
+      "source": "https://github.com/AtomScott/SoccerTrack-v2/blob/main/LICENSE-DATA",
+      "license": "CC BY 4.0 data license",
+      "decision": "rejected_for_positive_slice",
+      "reason": "Raw panoramic research footage rather than a sponsored broadcast graphic."
+    },
+    {
+      "source": "https://huggingface.co/datasets/SimulaMet-HOST/ExposureEngine",
+      "license": "underlying professional broadcast rights unresolved",
+      "decision": "quarantined",
+      "reason": "Relevant annotations do not establish redistribution rights for the underlying professional broadcast frames."
+    },
+    {
+      "source": "https://commons.wikimedia.org/wiki/File:British_Polo_Day_-_Mexico_2014.webm",
+      "license": "CC BY 3.0",
+      "decision": "rejected_for_positive_slice",
+      "reason": "Official sponsored event video with scene and venue branding, but no paid sponsor mark inside a broadcast overlay in the audited frames."
+    },
+    {
+      "source": "https://commons.wikimedia.org/wiki/File:British_Polo_Day_-_Singapore_2015.webm",
+      "license": "CC BY 3.0",
+      "decision": "rejected_for_positive_slice",
+      "reason": "Official sponsored event video with scene and venue branding, but no paid sponsor mark inside a broadcast overlay in the audited frames."
+    },
+    {
+      "source": "https://commons.wikimedia.org/wiki/File:British_Polo_Day_-_Great_Britain_2014.webm",
+      "license": "CC BY 3.0",
+      "decision": "rejected_for_positive_slice",
+      "reason": "Official sponsored event video with scene and venue branding, but no paid sponsor mark inside a broadcast overlay in the audited frames."
+    },
+    {
+      "source": "https://commons.wikimedia.org/wiki/File:CBC_Sports_-_How_Will_Coronavirus_Affect_The_Olympics_%26_Paralympics.webm",
+      "license": "CC BY 3.0",
+      "decision": "rejected_for_positive_slice",
+      "reason": "Sports-news graphics and licensed footage were present, but the audited frames did not contain a paid sponsor mark inside a broadcast overlay."
+    }
+  ],
+  "remaining_required_independent_groups": 0,
+  "human_review_required": true
+}

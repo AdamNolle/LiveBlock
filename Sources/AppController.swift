@@ -63,6 +63,9 @@ final class AppController: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private var autoCaptureTimer: Timer?
+    private var fullscreenMonitorTimer: Timer?
+    private var screenRestartTask: Task<Void, Never>?
+    private var screenRestartWasRunning = false
     private var workspaceObserver: NSObjectProtocol?
     private var didBecomeActiveObserver: NSObjectProtocol?
 
@@ -90,6 +93,11 @@ final class AppController: ObservableObject {
             .receive(on: RunLoop.main)
             .assign(to: &$detectionEnabled)
 
+        captureManager.$isRunning
+            .receive(on: RunLoop.main)
+            .sink { [weak self] running in self?.updateFullscreenMonitor(running: running) }
+            .store(in: &cancellables)
+
         regionCount = regionStore.current.count
         screenshotCount = labelingController.totalCount
 
@@ -100,6 +108,10 @@ final class AppController: ObservableObject {
         // Push the persisted fullscreen-pause preference into the capture
         // manager so the SCStream callback honors it.
         captureManager.pauseOnFullscreen = pauseOnFullscreenStored
+        let storedConfidence = UserDefaults.standard.object(forKey: "minConfidence") as? Double ?? 0.25
+        captureManager.setMinimumConfidence(Float(storedConfidence))
+        captureManager.setInpaintFillStyle(UserDefaults.standard.integer(forKey: "inpaintFillStyle"))
+        captureManager.setDisabledRegionIDs(Self.disabledRegionIDs())
 
         // Track which app is frontmost so we can pause for fullscreen video
         // and per-app exclusions without polling on every captured frame.
@@ -175,6 +187,8 @@ final class AppController: ObservableObject {
     }
 
     deinit {
+        fullscreenMonitorTimer?.invalidate()
+        screenRestartTask?.cancel()
         if let observer = didBecomeActiveObserver {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -197,13 +211,23 @@ final class AppController: ObservableObject {
         captureManager.frontmostIsFullscreen = Self.isFrontmostAppFullscreen(app)
     }
 
+    private func updateFullscreenMonitor(running: Bool) {
+        fullscreenMonitorTimer?.invalidate()
+        fullscreenMonitorTimer = nil
+        guard running else { return }
+        fullscreenMonitorTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let app = NSWorkspace.shared.frontmostApplication else { return }
+            Task { @MainActor [weak self] in self?.handleFrontmostAppChange(app) }
+        }
+    }
+
     /// Heuristic: walk Quartz Window Services for windows owned by `app`'s
     /// PID. If any of them spans the full screen frame and is on the active
     /// space, treat the app as fullscreen. Cheap and doesn't require
     /// extra entitlements.
     private static func isFrontmostAppFullscreen(_ app: NSRunningApplication) -> Bool {
-        guard let mainScreen = NSScreen.main else { return false }
-        let screenSize = mainScreen.frame.size
+        let screenSizes = NSScreen.screens.map(\.frame.size)
+        guard !screenSizes.isEmpty else { return false }
         let info = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
@@ -215,7 +239,7 @@ final class AppController: ObservableObject {
                   let w = bounds["Width"], let h = bounds["Height"]
             else { continue }
             // ±2 px slop for menu-bar inset and scaling rounding.
-            if abs(w - screenSize.width) <= 2 && abs(h - screenSize.height) <= 2 {
+            if screenSizes.contains(where: { abs(w - $0.width) <= 2 && abs(h - $0.height) <= 2 }) {
                 return true
             }
         }
@@ -231,9 +255,12 @@ final class AppController: ObservableObject {
 
     func toggleCapture() {
         if isRunning {
+            screenRestartWasRunning = false
+            screenRestartTask?.cancel()
             Task { await captureManager.stop() }
         } else {
             guard let screen = currentScreen() else { return }
+            alignOverlays(to: screen)
             Task { await captureManager.start(on: screen) }
         }
     }
@@ -291,17 +318,25 @@ final class AppController: ObservableObject {
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
             regionStore.clear()
+            UserDefaults.standard.removeObject(forKey: Self.disabledIdsKey)
+            captureManager.setDisabledRegionIDs([])
             refreshRegionCount()
         }
     }
 
     func clearRegions() {
         regionStore.clear()
+        UserDefaults.standard.removeObject(forKey: Self.disabledIdsKey)
+        captureManager.setDisabledRegionIDs([])
         refreshRegionCount()
     }
 
     func deleteRegion(id: UUID) {
         regionStore.remove(id: id)
+        var disabled = Self.disabledRegionIDs()
+        disabled.remove(id)
+        UserDefaults.standard.set(disabled.map(\.uuidString).sorted(), forKey: Self.disabledIdsKey)
+        captureManager.setDisabledRegionIDs(disabled)
         refreshRegionCount()
     }
 
@@ -322,21 +357,26 @@ final class AppController: ObservableObject {
 
     private static let disabledIdsKey = "disabledRegionIds"
 
+    private static func disabledRegionIDs() -> Set<UUID> {
+        Set((UserDefaults.standard.stringArray(forKey: disabledIdsKey) ?? []).compactMap(UUID.init(uuidString:)))
+    }
+
     func regionEnabled(id: UUID) -> Bool {
-        let disabled = UserDefaults.standard.stringArray(forKey: Self.disabledIdsKey) ?? []
-        return !disabled.contains(id.uuidString)
+        !Self.disabledRegionIDs().contains(id)
     }
 
     func setRegionEnabled(id: UUID, on: Bool) {
-        var disabled = Set(UserDefaults.standard.stringArray(forKey: Self.disabledIdsKey) ?? [])
-        if on { disabled.remove(id.uuidString) } else { disabled.insert(id.uuidString) }
-        UserDefaults.standard.set(Array(disabled), forKey: Self.disabledIdsKey)
-        // Trigger UI refresh
+        var disabled = Self.disabledRegionIDs()
+        if on { disabled.remove(id) } else { disabled.insert(id) }
+        UserDefaults.standard.set(disabled.map(\.uuidString).sorted(), forKey: Self.disabledIdsKey)
+        captureManager.setDisabledRegionIDs(disabled)
         objectWillChange.send()
     }
 
     func quit() {
         Task { @MainActor in
+            screenRestartWasRunning = false
+            screenRestartTask?.cancel()
             stopAutoCapture()
             if isRunning { await captureManager.stop() }
             NSApp.terminate(nil)
@@ -349,6 +389,8 @@ final class AppController: ObservableObject {
     /// LiveBlock out of their way without quitting.
     func panicDisable() {
         Task { @MainActor in
+            screenRestartWasRunning = false
+            screenRestartTask?.cancel()
             stopAutoCapture()
             if isRunning { await captureManager.stop() }
             renderLayer?.orderOut(nil)
@@ -370,7 +412,12 @@ final class AppController: ObservableObject {
                     NSLog("AppController: no screen to start capture on.")
                     return
                 }
+                alignOverlays(to: screen)
                 await captureManager.start(on: screen)
+                guard captureManager.isRunning else {
+                    NSLog("AppController: capture could not start; screenshot cancelled.")
+                    return
+                }
                 // Give SCStream one frame to land before we ask for it.
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
@@ -449,5 +496,27 @@ final class AppController: ObservableObject {
     func currentScreen() -> NSScreen? {
         if let panel = controlPanel, let screen = panel.screen { return screen }
         return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    func handleScreenConfigurationChange() {
+        screenRestartWasRunning = screenRestartWasRunning || isRunning
+        screenRestartTask?.cancel()
+        screenRestartTask = Task { @MainActor [weak self] in
+            // macOS emits bursts while displays settle. Debounce them so one
+            // stable configuration produces one serialized capture restart.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self, let screen = self.currentScreen() else { return }
+            self.alignOverlays(to: screen)
+            guard self.screenRestartWasRunning else { return }
+            if self.isRunning { await self.captureManager.stop() }
+            guard !Task.isCancelled else { return }
+            await self.captureManager.start(on: screen)
+            self.screenRestartWasRunning = false
+        }
+    }
+
+    private func alignOverlays(to screen: NSScreen) {
+        renderLayer?.align(to: screen)
+        regionEditor?.align(to: screen)
     }
 }

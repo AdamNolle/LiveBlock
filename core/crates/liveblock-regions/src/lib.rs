@@ -184,7 +184,10 @@ impl RegionStore {
             .iter()
             .map(|r| {
                 let mut m: BTreeMap<&'static str, serde_json::Value> = BTreeMap::new();
-                m.insert("id", serde_json::Value::String(r.id.to_string().to_uppercase()));
+                m.insert(
+                    "id",
+                    serde_json::Value::String(r.id.to_string().to_uppercase()),
+                );
                 m.insert("x", serde_json::json!(r.x));
                 m.insert("y", serde_json::json!(r.y));
                 m.insert("width", serde_json::json!(r.width));
@@ -194,7 +197,10 @@ impl RegionStore {
             .collect();
 
         let bytes = pretty_two_space(&serde_json::Value::Array(
-            array.into_iter().map(serde_json::Value::from_iter).collect(),
+            array
+                .into_iter()
+                .map(serde_json::Value::from_iter)
+                .collect(),
         ))?;
 
         // Atomic write via a unique tmp file (process+nanos suffix) so two
@@ -282,13 +288,7 @@ mod tests {
         let path = dir.path().join("regions.json");
         let store = RegionStore::open(&path).unwrap();
         store
-            .add(NormalizedRegion::with_id(
-                Uuid::nil(),
-                0.0,
-                0.0,
-                0.5,
-                0.5,
-            ))
+            .add(NormalizedRegion::with_id(Uuid::nil(), 0.0, 0.0, 0.5, 0.5))
             .unwrap();
 
         let on_disk = std::fs::read_to_string(&path).unwrap();
@@ -327,7 +327,9 @@ mod tests {
         store.add(r.clone()).unwrap();
         store.remove(r.id).unwrap();
         assert!(store.current().is_empty());
-        store.add(NormalizedRegion::new(0.0, 0.0, 0.1, 0.1)).unwrap();
+        store
+            .add(NormalizedRegion::new(0.0, 0.0, 0.1, 0.1))
+            .unwrap();
         store.clear().unwrap();
         assert!(store.current().is_empty());
     }

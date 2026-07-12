@@ -92,6 +92,12 @@ final class RegionStore: @unchecked Sendable {
         return regions
     }
 
+    func current(excluding disabledIDs: Set<UUID>) -> [NormalizedRegion] {
+        lock.lock(); defer { lock.unlock() }
+        guard !disabledIDs.isEmpty else { return regions }
+        return regions.filter { !disabledIDs.contains($0.id) }
+    }
+
     func add(_ region: NormalizedRegion) {
         lock.lock()
         defer { lock.unlock() }

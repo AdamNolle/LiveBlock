@@ -149,7 +149,10 @@ mod tests {
 
     #[test]
     fn score_filter_drops_low() {
-        let xs = vec![det(0, 0.9, 0.0, 0.0, 0.1, 0.1), det(0, 0.1, 0.0, 0.0, 0.1, 0.1)];
+        let xs = vec![
+            det(0, 0.9, 0.0, 0.0, 0.1, 0.1),
+            det(0, 0.1, 0.0, 0.0, 0.1, 0.1),
+        ];
         let out = filter_by_score(&xs, 0.5);
         assert_eq!(out.len(), 1);
         assert!((out[0].score - 0.9).abs() < 1e-6);
@@ -203,7 +206,15 @@ mod tests {
     fn pixel_rect_top_left_conversion() {
         let d = det(0, 1.0, 0.25, 0.5, 0.5, 0.25);
         let r = to_pixel_rect_top_left(&d, 100.0, 200.0);
-        assert_eq!(r, PixelRect { x: 25.0, y: 100.0, width: 50.0, height: 50.0 });
+        assert_eq!(
+            r,
+            PixelRect {
+                x: 25.0,
+                y: 100.0,
+                width: 50.0,
+                height: 50.0
+            }
+        );
     }
 
     #[test]
@@ -217,7 +228,12 @@ mod tests {
 
     #[test]
     fn flip_y_is_self_inverse() {
-        let r = PixelRect { x: 10.0, y: 20.0, width: 30.0, height: 40.0 };
+        let r = PixelRect {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+        };
         let flipped = flip_y(r, 200.0);
         let back = flip_y(flipped, 200.0);
         assert_eq!(back, r);

@@ -220,7 +220,7 @@ final class TrainingController: ObservableObject {
 
         let exportResult = await runProcessCapturingOutput(
             url: venvPython,
-            args: [exportScript.path]
+            args: [exportScript.path, "--include-empty", "--class-name", "Ad banner"]
         )
         guard exportResult.exitCode == 0 else {
             failWith("Export failed (exit \(exportResult.exitCode)). See log.")
@@ -259,15 +259,19 @@ final class TrainingController: ObservableObject {
         )
 
         if trainResult.exitCode == 0 {
-            // Copy the freshly trained model into Application Support so the
-            // running app picks it up without a relaunch.
-            installFreshlyTrainedModel()
-            // Tell VisionProcessor to drop its cached model — next inference
-            // will reload from the runtime dir we just populated.
-            onModelInstalled?()
-            lastSuccessAt = Date()
-            state = .finished(success: true, message: "Trained model installed. Detection updated.")
-            appendLog("=== Pipeline OK \(Date()) ===")
+            do {
+                // Copy the freshly trained model into Application Support so the
+                // running app picks it up without a relaunch.
+                try installFreshlyTrainedModel()
+                // Tell VisionProcessor to drop its cached model — next inference
+                // will reload from the runtime dir we just populated.
+                onModelInstalled?()
+                lastSuccessAt = Date()
+                state = .finished(success: true, message: "Trained model installed. Detection updated.")
+                appendLog("=== Pipeline OK \(Date()) ===")
+            } catch {
+                failWith("Training finished, but model installation failed: \(error.localizedDescription)")
+            }
         } else {
             failWith("Training pipeline failed (exit \(trainResult.exitCode)). See log.")
         }
@@ -275,30 +279,42 @@ final class TrainingController: ObservableObject {
 
     /// Copy the trained `.mlpackage` into Application Support so the running
     /// VisionProcessor finds it before falling back to the bundled model.
-    private func installFreshlyTrainedModel() {
+    private func installFreshlyTrainedModel() throws {
         let fm = FileManager.default
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support")
         let modelDir = support.appendingPathComponent("LiveBlock/models", isDirectory: true)
-        try? fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
 
         // The trainer writes new weights into `Sources/liveblock-detector.mlpackage`
         // in the repo. Copy that into the runtime dir so SCStream-driven
         // inference picks it up immediately.
         let src = repoRoot.appendingPathComponent("Sources/liveblock-detector.mlpackage")
         guard fm.fileExists(atPath: src.path) else {
-            appendLog("Hot-reload skipped: \(src.path) not found.")
-            return
+            throw NSError(domain: "TrainingController", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Trained model not found at \(src.path)"
+            ])
         }
         let dst = modelDir.appendingPathComponent("liveblock-detector.mlpackage")
-        try? fm.removeItem(at: dst)
-        do {
-            try fm.copyItem(at: src, to: dst)
-            appendLog("Hot-reloaded model into \(dst.path)")
-        } catch {
-            appendLog("Hot-reload copy failed: \(error.localizedDescription)")
+        let staged = modelDir.appendingPathComponent("liveblock-detector.staged-\(UUID().uuidString).mlpackage")
+        defer { try? fm.removeItem(at: staged) }
+        try fm.copyItem(at: src, to: staged)
+        guard fm.fileExists(atPath: staged.appendingPathComponent("Manifest.json").path) else {
+            throw NSError(domain: "TrainingController", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Staged CoreML package is missing Manifest.json"
+            ])
         }
+        if fm.fileExists(atPath: dst.path) {
+            _ = try fm.replaceItemAt(dst, withItemAt: staged)
+        } else {
+            try fm.moveItem(at: staged, to: dst)
+        }
+        let staleCompiled = modelDir.appendingPathComponent("liveblock-detector.mlmodelc")
+        if fm.fileExists(atPath: staleCompiled.path) {
+            try fm.removeItem(at: staleCompiled)
+        }
+        appendLog("Hot-reloaded model into \(dst.path)")
     }
 
     private func failWith(_ message: String) {

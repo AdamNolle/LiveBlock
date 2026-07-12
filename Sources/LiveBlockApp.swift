@@ -190,7 +190,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Theme.registerFonts()
-        let screen = NSScreen.main ?? NSScreen.screens.first!
+        guard let screen = controller.currentScreen() ?? NSScreen.main ?? NSScreen.screens.first else {
+            NSLog("LiveBlock: no display is available during launch.")
+            return
+        }
 
         // Render layer (always click-through)
         let renderLayer = RenderLayerWindow(
@@ -237,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: AnyView(MiniHUDView(controller: controller))
         )
         controller.miniHUDWindow = miniHUD
+        miniHUD.align(to: screen)
 
         // Show / hide HUD with capture state.
         controller.captureManager.$isRunning
@@ -250,6 +254,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.controller.handleScreenConfigurationChange() }
+            .store(in: &cancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.controller.handleActiveSpaceChange() }
             .store(in: &cancellables)
 
         // Build the onboarding window up-front so the menu bar's "Show

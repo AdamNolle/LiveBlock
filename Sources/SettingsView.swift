@@ -204,6 +204,7 @@ struct SettingsView: View {
     private var overviewPane: some View {
         VStack(alignment: .leading, spacing: 22) {
             heroRow
+            displayTargetCard
             kpiStrip
             fillTechnique
             behaviourSection
@@ -271,6 +272,44 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .lbCard(Theme.surface, radius: Theme.Radius.r4, stroke: Theme.line)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.r4, style: .continuous))
+    }
+
+    private var displayTargetCard: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "display.2")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Theme.info)
+                .frame(width: 34, height: 34)
+                .background(Theme.info.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.r2, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Protected display")
+                    .font(Theme.ui(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.ink1)
+                Text("LiveBlock protects one explicitly selected display and retains it across restarts.")
+                    .font(Theme.ui(size: 11))
+                    .foregroundStyle(Theme.ink3)
+            }
+            Spacer()
+            if let selected = controller.selectedDisplayID {
+                Picker("Protected display", selection: Binding(
+                    get: { selected },
+                    set: { controller.selectDisplay(id: $0) }
+                )) {
+                    ForEach(controller.availableDisplays) { display in
+                        Text(display.menuLabel).tag(display.id)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 330)
+            } else {
+                Text("No display available")
+                    .font(Theme.ui(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+            }
+        }
+        .padding(14)
+        .lbCard(Theme.surface, radius: Theme.Radius.r4, stroke: Theme.line)
     }
 
     private var counterCard: some View {

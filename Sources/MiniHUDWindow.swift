@@ -29,15 +29,17 @@ final class MiniHUDWindow: NSPanel {
         self.contentView = host
 
         // Default position: bottom-center of the main screen.
-        if let screen = NSScreen.main {
-            let f = screen.visibleFrame
-            let s = Self.idealSize(for: screen)
-            self.setFrame(NSRect(x: f.midX - s.width / 2,
-                                  y: f.minY + 24,
-                                  width: s.width,
-                                  height: s.height),
-                          display: true)
-        }
+        if let screen = NSScreen.main { align(to: screen) }
+    }
+
+    func align(to screen: NSScreen) {
+        let visible = screen.visibleFrame
+        let size = Self.idealSize(for: screen)
+        setFrame(NSRect(x: visible.midX - size.width / 2,
+                        y: visible.minY + 24,
+                        width: size.width,
+                        height: size.height),
+                 display: true)
     }
 
     /// Default 380×90; clamped down on small displays so the HUD never

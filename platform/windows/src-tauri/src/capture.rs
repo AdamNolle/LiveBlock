@@ -115,7 +115,7 @@ impl CaptureSession {
         let latest_clone = latest.clone();
         let last_emit_clone = last_emit.clone();
 
-        pool.FrameArrived(&TypedEventHandler::new(move |sender, _| {
+        pool.FrameArrived(&TypedEventHandler::new(move |sender: &Option<Direct3D11CaptureFramePool>, _: &Option<IInspectable>| {
             // SAFETY: closure runs on the WGC thread; D3D11 immediate context
             // is single-threaded — we only touch it here. If we ever switch
             // to multi-frame parallelism, switch to a deferred context.

@@ -1,8 +1,13 @@
 pub mod embeddings;
+pub mod model_manifest;
 pub mod settings;
 pub mod vocabulary;
 
 pub use embeddings::ClassEmbeddings;
+pub use model_manifest::{
+    artifact_sha256, install_verified_artifact, verifying_key_from_base64, ArtifactFormat,
+    ModelManifest, ModelManifestError, TrustedKeyring,
+};
 pub use settings::{ClassRule, CoordinatorConfig, DetectionSettings, SettingsStore};
 pub use vocabulary::{VocabClass, Vocabulary};
 
@@ -16,6 +21,12 @@ pub enum ConfigError {
     VocabVersion { settings: u32, vocab: u32 },
     #[error("embedding version mismatch: {emb} vs vocabulary {vocab}")]
     EmbeddingVersion { emb: u32, vocab: u32 },
+    #[error("unsupported {document} schema version {found}; current version is {current}")]
+    UnsupportedSchema {
+        document: &'static str,
+        found: u32,
+        current: u32,
+    },
 }
 
 /// 2-space, sorted-key pretty JSON identical to Swift JSONEncoder([.prettyPrinted,.sortedKeys]).

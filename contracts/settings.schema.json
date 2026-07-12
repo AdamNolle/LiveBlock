@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveblock.local/contracts/settings.schema.json",
+  "title": "LiveBlock Detection Settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "classes", "global", "vocabulary_version"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "vocabulary_version": { "type": "integer", "minimum": 1 },
+    "global": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detect_every", "iou_threshold", "score_threshold"],
+      "properties": {
+        "detect_every": { "type": "integer", "minimum": 1 },
+        "iou_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "score_threshold": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "classes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class_id", "enabled", "score_threshold"],
+        "properties": {
+          "class_id": { "type": "integer", "minimum": 0 },
+          "enabled": { "type": "boolean" },
+          "score_threshold": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  }
+}

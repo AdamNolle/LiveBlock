@@ -15,6 +15,18 @@ struct LabelingView: View {
 
             VStack(spacing: Theme.Spacing.m) {
                 header
+                if let error = labeling.currentLabelCompatibilityError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.trianglebadge.exclamationmark.fill")
+                            .foregroundStyle(Theme.warn)
+                        Text(error + " This item is read-only.")
+                            .font(Theme.ui(size: 12, weight: .medium))
+                            .foregroundStyle(Theme.ink2)
+                        Spacer()
+                    }
+                    .padding(10)
+                    .lbCard(Theme.warnSoft, radius: Theme.Radius.r3, stroke: Theme.warn.opacity(0.4))
+                }
                 if labeling.totalCount == 0 {
                     emptyState
                         .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -5,9 +5,9 @@
 //! targets use. Generated headers + Swift glue land in
 //! `core/crates/liveblock-bridge/generated/` after `cargo build`.
 //!
-//! Compatibility note: the underlying `RegionStore` writes JSON with sorted
-//! keys + 2-space pretty indentation, so files written by Swift's
-//! `RegionStore.swift` and by the bridge are byte-identical.
+//! Compatibility note: the underlying `RegionStore` owns the shared schema-1
+//! envelope and atomically migrates legacy arrays. Swift consumes snapshots
+//! through this bridge rather than maintaining a second on-disk encoder.
 
 // swift-bridge 0.1's generated glue performs same-type raw-pointer casts.
 // They are harmless and outside this crate's handwritten code.

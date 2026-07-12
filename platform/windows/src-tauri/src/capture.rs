@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windows::core::{ComInterface, IInspectable, Interface};
+use windows::core::{IInspectable, Interface};
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
@@ -60,7 +60,7 @@ pub struct CaptureSession {
 
 impl CaptureSession {
     pub fn start(monitor: HMONITOR, on_frame: FrameCallback) -> Result<Self> {
-        if monitor.0 == 0 {
+        if monitor.0.is_null() {
             return Err(anyhow!("invalid HMONITOR"));
         }
 

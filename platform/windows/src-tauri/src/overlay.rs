@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Equivalent macOS bits (NSWindow.collectionBehavior + .ignoresMouseEvents +
 /// .level + sharingType=.none) live in `Sources/RenderLayerWindow.swift`.
 pub fn make_render_overlay(hwnd: HWND) -> Result<()> {
-    if hwnd.0 == 0 {
+    if hwnd.0.is_null() {
         return Err(anyhow::anyhow!("null HWND"));
     }
     unsafe {
@@ -36,7 +36,7 @@ pub fn make_render_overlay(hwnd: HWND) -> Result<()> {
 
 /// Editor window: never steals focus from the captured app, but is clickable.
 pub fn make_editor(hwnd: HWND) -> Result<()> {
-    if hwnd.0 == 0 {
+    if hwnd.0.is_null() {
         return Err(anyhow::anyhow!("null HWND"));
     }
     unsafe {

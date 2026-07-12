@@ -46,6 +46,10 @@ final class AppController: ObservableObject {
     /// Drives the `pauseOnFullscreen` toggle and per-app rules pipeline gates.
     @Published private(set) var frontmostBundleID: String? = nil
     @Published private(set) var frontmostName: String? = nil
+    /// Explicit capture target. A CG display ID survives window movement and
+    /// is re-resolved against fresh NSScreen snapshots after topology changes.
+    @Published private(set) var availableDisplays: [DisplayDescriptor] = []
+    @Published private(set) var selectedDisplayID: CGDirectDisplayID? = nil
 
     /// Live permission state. Re-checked when LiveBlock becomes active
     /// (e.g. user returned from System Settings) so the UI never lies
@@ -68,6 +72,7 @@ final class AppController: ObservableObject {
     private var screenRestartWasRunning = false
     private var workspaceObserver: NSObjectProtocol?
     private var didBecomeActiveObserver: NSObjectProtocol?
+    private static let selectedDisplayIDKey = "selectedDisplayID"
 
     init() {
         self.regionStore = RegionStore()
@@ -98,6 +103,7 @@ final class AppController: ObservableObject {
             .sink { [weak self] running in self?.updateFullscreenMonitor(running: running) }
             .store(in: &cancellables)
 
+        refreshDisplayTargets()
         regionCount = regionStore.current.count
         screenshotCount = labelingController.totalCount
 
@@ -254,7 +260,7 @@ final class AppController: ObservableObject {
     // MARK: - Actions
 
     func toggleCapture() {
-        if isRunning {
+        if isRunning || captureManager.captureDesired {
             screenRestartWasRunning = false
             screenRestartTask?.cancel()
             Task { await captureManager.stop() }
@@ -262,6 +268,23 @@ final class AppController: ObservableObject {
             guard let screen = currentScreen() else { return }
             alignOverlays(to: screen)
             Task { await captureManager.start(on: screen) }
+        }
+    }
+
+    func selectDisplay(id: CGDirectDisplayID) {
+        guard availableDisplays.contains(where: { $0.id == id }) else { return }
+        let changed = selectedDisplayID != id
+        selectedDisplayID = id
+        UserDefaults.standard.set(Int(id), forKey: Self.selectedDisplayIDKey)
+        guard let screen = NSScreen.liveBlockScreen(id: id) else { return }
+        alignOverlays(to: screen)
+        guard changed, captureManager.captureDesired else { return }
+        screenRestartTask?.cancel()
+        screenRestartTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.captureManager.stop(preserveIntent: true)
+            guard !Task.isCancelled else { return }
+            await self.captureManager.start(on: screen)
         }
     }
 
@@ -378,7 +401,7 @@ final class AppController: ObservableObject {
             screenRestartWasRunning = false
             screenRestartTask?.cancel()
             stopAutoCapture()
-            if isRunning { await captureManager.stop() }
+            if isRunning || captureManager.captureDesired { await captureManager.stop() }
             NSApp.terminate(nil)
         }
     }
@@ -392,7 +415,9 @@ final class AppController: ObservableObject {
             screenRestartWasRunning = false
             screenRestartTask?.cancel()
             stopAutoCapture()
-            if isRunning { await captureManager.stop() }
+            // Always clear desired intent, including while system-suspended,
+            // so wake/unlock or a queued recovery can never resurrect capture.
+            await captureManager.stop()
             renderLayer?.orderOut(nil)
             if isEditorOpen { closeEditor() }
             showControlPanel()
@@ -494,21 +519,52 @@ final class AppController: ObservableObject {
     // MARK: - Helpers
 
     func currentScreen() -> NSScreen? {
-        if let panel = controlPanel, let screen = panel.screen { return screen }
-        return NSScreen.main ?? NSScreen.screens.first
+        if let selectedDisplayID,
+           let screen = NSScreen.liveBlockScreen(id: selectedDisplayID) {
+            return screen
+        }
+        refreshDisplayTargets()
+        guard let selectedDisplayID else { return nil }
+        return NSScreen.liveBlockScreen(id: selectedDisplayID)
+    }
+
+    func refreshDisplayTargets() {
+        let descriptors = NSScreen.liveBlockDescriptors()
+        let stored = UserDefaults.standard.object(forKey: Self.selectedDisplayIDKey) as? NSNumber
+        let preferred = selectedDisplayID ?? stored?.uint32Value
+        let resolved = DisplayTargetResolver.resolvedID(preferred: preferred,
+                                                        descriptors: descriptors)
+        availableDisplays = descriptors
+        selectedDisplayID = resolved
+        if let resolved {
+            UserDefaults.standard.set(Int(resolved), forKey: Self.selectedDisplayIDKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.selectedDisplayIDKey)
+        }
+    }
+
+    func handleActiveSpaceChange() {
+        guard captureManager.captureDesired, let screen = currentScreen() else { return }
+        alignOverlays(to: screen)
+        if isRunning, !isEditorOpen { renderLayer?.orderFrontRegardless() }
     }
 
     func handleScreenConfigurationChange() {
-        screenRestartWasRunning = screenRestartWasRunning || isRunning
+        screenRestartWasRunning = screenRestartWasRunning || captureManager.captureDesired
         screenRestartTask?.cancel()
         screenRestartTask = Task { @MainActor [weak self] in
             // macOS emits bursts while displays settle. Debounce them so one
             // stable configuration produces one serialized capture restart.
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled, let self, let screen = self.currentScreen() else { return }
+            guard !Task.isCancelled, let self else { return }
+            self.refreshDisplayTargets()
+            guard let screen = self.currentScreen() else {
+                self.screenRestartWasRunning = false
+                return
+            }
             self.alignOverlays(to: screen)
             guard self.screenRestartWasRunning else { return }
-            if self.isRunning { await self.captureManager.stop() }
+            if self.isRunning { await self.captureManager.stop(preserveIntent: true) }
             guard !Task.isCancelled else { return }
             await self.captureManager.start(on: screen)
             self.screenRestartWasRunning = false
@@ -518,5 +574,6 @@ final class AppController: ObservableObject {
     private func alignOverlays(to screen: NSScreen) {
         renderLayer?.align(to: screen)
         regionEditor?.align(to: screen)
+        miniHUDWindow?.align(to: screen)
     }
 }

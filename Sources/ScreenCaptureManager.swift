@@ -18,6 +18,21 @@ struct DetectionPreview: Identifiable, Sendable {
     let confidence: Float
 }
 
+enum SystemSuspensionReason: Hashable {
+    case systemSleep
+    case displaysAsleep
+    case sessionLocked
+}
+
+struct CaptureRetryPolicy {
+    static let delays: [TimeInterval] = [0.5, 1, 2, 4]
+
+    static func delay(forAttempt attempt: Int) -> TimeInterval? {
+        guard delays.indices.contains(attempt) else { return nil }
+        return delays[attempt]
+    }
+}
+
 enum PauseReason: Equatable {
     case none                       // running and unpaused — green
     case stopped                    // not running by user choice — neutral
@@ -33,6 +48,10 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
 
     // MARK: - Published state (read by SwiftUI)
     @Published private(set) var isRunning = false
+    /// User intent is separate from concrete stream state so system suspension
+    /// and bounded recovery never turn into an accidental permanent stop.
+    @Published private(set) var captureDesired = false
+    @Published private(set) var systemSuspensionReasons: Set<SystemSuspensionReason> = []
     @Published private(set) var currentPatches: [InpaintPatch] = []
     @Published private(set) var currentDetections: [DetectionPreview] = []
     @Published private(set) var lastDetectionLabels: [String] = []
@@ -79,9 +98,11 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
 
     // MARK: - Internals
     private var stream: SCStream?
-    private var targetScreen: NSScreen?
+    private var targetDisplayID: CGDirectDisplayID?
     private var lifecycleGeneration: UInt64 = 0
     private var isStarting = false
+    private var recoveryAttempt = 0
+    private var recoveryTask: Task<Void, Never>?
 
     nonisolated private let visionProcessor = VisionProcessor()
     nonisolated private let inpaintingEngine = InpaintingEngine()
@@ -122,11 +143,7 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     // Shared CIContext for PNG encoding (heavy to construct).
     nonisolated private let pngContext = CIContext(options: [.useSoftwareRenderer: false])
 
-    /// Tracks whether we paused capture because the system slept or the
-    /// screen locked. On wake/unlock we auto-resume only if the user had
-    /// capture running before sleep — otherwise we leave it as it was.
-    private var sleepResumeRequested: Bool = false
-    private var sleepObservers: [NSObjectProtocol] = []
+    private var lifecycleObservers: [NSObjectProtocol] = []
 
     init(regionStore: RegionStore) {
         self.regionStore = regionStore
@@ -135,64 +152,81 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     }
 
     deinit {
-        for obs in sleepObservers {
+        recoveryTask?.cancel()
+        for obs in lifecycleObservers {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
         }
     }
 
-    /// Pause capture on sleep / display lock, resume on wake / unlock.
-    /// Without this, capture runs through sleep, drains battery, and can
-    /// produce garbage frames if the display reconfigures while suspended.
+    /// Pause capture for sleep, display sleep, and session lock. Multiple
+    /// reasons can overlap; capture resumes once all clear and only when the
+    /// user still wants it running.
     private func installSleepObservers() {
         let nc = NSWorkspace.shared.notificationCenter
-        let pauseNames: [Notification.Name] = [
-            NSWorkspace.willSleepNotification,
-            NSWorkspace.screensDidSleepNotification
+        let pairs: [(Notification.Name, Notification.Name, SystemSuspensionReason)] = [
+            (NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification, .systemSleep),
+            (NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification, .displaysAsleep),
+            (NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.sessionDidBecomeActiveNotification, .sessionLocked)
         ]
-        let resumeNames: [Notification.Name] = [
-            NSWorkspace.didWakeNotification,
-            NSWorkspace.screensDidWakeNotification
-        ]
-        for name in pauseNames {
-            let obs = nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    guard let self, self.isRunning else { return }
-                    NSLog("ScreenCaptureManager: pausing for sleep/lock.")
-                    self.sleepResumeRequested = true
-                    await self.stop()
-                }
-            }
-            sleepObservers.append(obs)
+        for (pauseName, resumeName, reason) in pairs {
+            lifecycleObservers.append(nc.addObserver(forName: pauseName, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in await self?.suspend(for: reason) }
+            })
+            lifecycleObservers.append(nc.addObserver(forName: resumeName, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in await self?.resume(from: reason) }
+            })
         }
-        for name in resumeNames {
-            let obs = nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    guard let self, self.sleepResumeRequested else { return }
-                    self.sleepResumeRequested = false
-                    if let screen = self.targetScreen ?? NSScreen.main {
-                        NSLog("ScreenCaptureManager: resuming after wake.")
-                        await self.start(on: screen)
-                    }
-                }
-            }
-            sleepObservers.append(obs)
+    }
+
+    private func suspend(for reason: SystemSuspensionReason) async {
+        systemSuspensionReasons.insert(reason)
+        recoveryTask?.cancel()
+        guard isRunning || isStarting else { return }
+        NSLog("ScreenCaptureManager: suspending capture for \(reason).")
+        await stop(preserveIntent: true)
+    }
+
+    private func resume(from reason: SystemSuspensionReason) async {
+        systemSuspensionReasons.remove(reason)
+        guard systemSuspensionReasons.isEmpty, captureDesired else { return }
+        guard let screen = resolvedTargetScreen() else {
+            lastStartError = "The selected display is no longer available."
+            return
         }
+        NSLog("ScreenCaptureManager: resuming capture after \(reason).")
+        await startCapture(on: screen)
     }
 
     // MARK: - Lifecycle
 
     func start(on screen: NSScreen) async {
-        guard !isRunning, !isStarting, stream == nil else { return }
+        captureDesired = true
+        targetDisplayID = screen.liveBlockDisplayID
+        recoveryTask?.cancel()
+        recoveryAttempt = 0
+        await startCapture(on: screen)
+    }
+
+    private func startCapture(on screen: NSScreen) async {
+        guard captureDesired, systemSuspensionReasons.isEmpty,
+              !isRunning, !isStarting, stream == nil else { return }
+        guard let screenID = screen.liveBlockDisplayID,
+              targetDisplayID == nil || targetDisplayID == screenID else {
+            captureDesired = false
+            lastStartError = "The selected display no longer matches the capture target."
+            return
+        }
+        targetDisplayID = screenID
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
         isStarting = true
         defer {
             if lifecycleGeneration == generation { isStarting = false }
         }
-        targetScreen = screen
         // Pre-flight: if Screen Recording is denied, fail fast with a clear
         // message instead of a generic SCStream error.
         guard Permissions.screenRecordingGranted() else {
+            self.captureDesired = false
             self.lastStartError = "Screen Recording permission needed. Open System Settings → Privacy & Security → Screen Recording, enable LiveBlock, and try again."
             NSLog("ScreenCaptureManager: refusing to start — Screen Recording denied.")
             return
@@ -202,15 +236,21 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
                                                                                         onScreenWindowsOnly: true)
             guard lifecycleGeneration == generation else { return }
             guard let display = pickDisplay(for: screen, in: availableContent.displays) else {
+                self.captureDesired = false
                 self.lastStartError = "No display matched the target screen."
                 NSLog("ScreenCaptureManager: no display matched target screen.")
                 return
             }
 
-            // Use pixel dimensions, not points (S7).
-            let scale = screen.backingScaleFactor
-            let pixelWidth = Int(screen.frame.width * scale)
-            let pixelHeight = Int(screen.frame.height * scale)
+            // Use authoritative CG display pixels. Scaled/mirrored modes can
+            // diverge from pointFrame × backingScaleFactor through rounding.
+            let pixelWidth = CGDisplayPixelsWide(display.displayID)
+            let pixelHeight = CGDisplayPixelsHigh(display.displayID)
+            guard pixelWidth > 0, pixelHeight > 0 else {
+                self.captureDesired = false
+                self.lastStartError = "The selected display reported invalid pixel dimensions."
+                return
+            }
 
             let filter = SCContentFilter(display: display,
                                          excludingApplications: [],
@@ -236,6 +276,7 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
 
             self.stream = newStream
             self.isRunning = true
+            self.recoveryAttempt = 0
             self.lastStartError = nil
             NSLog("ScreenCaptureManager: capture started (\(pixelWidth)x\(pixelHeight)).")
         } catch {
@@ -243,23 +284,26 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
             guard lifecycleGeneration == generation else { return }
             self.lastStartError = error.localizedDescription
             NSLog("ScreenCaptureManager: failed to start capture: \(error.localizedDescription)")
+            if captureDesired, Permissions.screenRecordingGranted(), resolvedTargetScreen() != nil {
+                scheduleRecovery()
+            } else {
+                captureDesired = false
+            }
         }
     }
 
-    func stop() async {
+    func stop(preserveIntent: Bool = false) async {
+        if !preserveIntent {
+            captureDesired = false
+            recoveryAttempt = 0
+        }
+        recoveryTask?.cancel()
         lifecycleGeneration &+= 1
         isStarting = false
         let streamToStop = stream
         stream = nil
         activeStreamIdentity.clear()
-        detectionCache.clear()
-        blockEventTracker.reset()
-        renderStateTracker.reset()
-        isRunning = false
-        currentPatches = []
-        currentDetections = []
-        lastDetectionLabels = []
-        lastStartError = nil
+        resetStreamState(clearError: true)
         guard let streamToStop else { return }
         do {
             try await streamToStop.stopCapture()
@@ -445,9 +489,53 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
             self.stream = nil
             self.activeStreamIdentity.clear(ifMatching: stream)
             self.lifecycleGeneration &+= 1
-            self.isRunning = false
-            self.currentPatches = []
-            self.currentDetections = []
+            self.resetStreamState(clearError: false)
+            self.lastStartError = "Capture interrupted: \(error.localizedDescription)"
+            self.scheduleRecovery()
+        }
+    }
+
+    private func resetStreamState(clearError: Bool) {
+        detectionCache.clear()
+        blockEventTracker.reset()
+        renderStateTracker.reset()
+        isRunning = false
+        currentPatches = []
+        currentDetections = []
+        lastDetectionLabels = []
+        framesPerSecond = 0
+        renderMilliseconds = 0
+        if clearError { lastStartError = nil }
+    }
+
+    private func resolvedTargetScreen() -> NSScreen? {
+        if let targetDisplayID, let screen = NSScreen.liveBlockScreen(id: targetDisplayID) {
+            return screen
+        }
+        let descriptors = NSScreen.liveBlockDescriptors()
+        guard let fallbackID = DisplayTargetResolver.resolvedID(preferred: targetDisplayID,
+                                                                 descriptors: descriptors) else {
+            return nil
+        }
+        targetDisplayID = fallbackID
+        return NSScreen.liveBlockScreen(id: fallbackID)
+    }
+
+    private func scheduleRecovery() {
+        guard captureDesired, systemSuspensionReasons.isEmpty else { return }
+        guard let delay = CaptureRetryPolicy.delay(forAttempt: recoveryAttempt) else {
+            captureDesired = false
+            return
+        }
+        recoveryAttempt += 1
+        recoveryTask?.cancel()
+        recoveryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self, self.captureDesired,
+                  self.systemSuspensionReasons.isEmpty,
+                  let screen = self.resolvedTargetScreen() else { return }
+            await self.startCapture(on: screen)
+            if !self.isRunning, self.captureDesired { self.scheduleRecovery() }
         }
     }
 
@@ -481,11 +569,8 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
 
     // MARK: - Display selection (S8)
     nonisolated private func pickDisplay(for screen: NSScreen, in displays: [SCDisplay]) -> SCDisplay? {
-        let targetID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
-        if let targetID, let match = displays.first(where: { $0.displayID == targetID }) {
-            return match
-        }
-        return displays.first
+        guard let targetID = screen.liveBlockDisplayID else { return nil }
+        return displays.first(where: { $0.displayID == targetID })
     }
 }
 

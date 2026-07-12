@@ -11,16 +11,20 @@ import Foundation
 @MainActor
 final class PerAppRulesStore: ObservableObject {
     private static let key = "perAppExcludedBundleIDs"
+    private let defaults: UserDefaults
+    private let storageKey: String
 
     @Published var excludedBundleIDs: Set<String> {
         didSet {
-            UserDefaults.standard.set(Array(excludedBundleIDs).sorted(),
-                                      forKey: Self.key)
+            defaults.set(Array(excludedBundleIDs).sorted(), forKey: storageKey)
         }
     }
 
-    init() {
-        let stored = UserDefaults.standard.stringArray(forKey: Self.key) ?? []
+    init(defaults: UserDefaults = .standard,
+         storageKey: String = PerAppRulesStore.key) {
+        self.defaults = defaults
+        self.storageKey = storageKey
+        let stored = defaults.stringArray(forKey: storageKey) ?? []
         self.excludedBundleIDs = Set(stored)
     }
 

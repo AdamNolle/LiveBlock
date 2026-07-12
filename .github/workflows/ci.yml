@@ -66,6 +66,8 @@ jobs:
           workspaces: core
       - name: Install XcodeGen
         run: brew install xcodegen
+      - name: Generate bridge inputs
+        run: LB_BRIDGE_HOST_ONLY=1 tools/build_bridge.sh
       - name: Generate, test Debug, and compile Release
         run: |
           xcodegen generate

@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Central observable state for the whole app.
 ///
@@ -208,6 +209,27 @@ final class AppController: ObservableObject {
         let ax = Permissions.accessibilityGranted()
         if sr != screenRecordingGranted { screenRecordingGranted = sr }
         if ax != accessibilityGranted { accessibilityGranted = ax }
+    }
+
+    /// Save a privacy-minimized support snapshot. The report contains no
+    /// pixels, regions, process names, window titles, user paths, or labels.
+    func exportDiagnostics() {
+        refreshPermissions()
+        let panel = NSSavePanel()
+        panel.title = "Export LiveBlock Diagnostics"
+        panel.nameFieldStringValue = "liveblock-diagnostics.json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try DiagnosticsReport.capture(from: self).write(to: url)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Could not export diagnostics"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
     }
 
     private func handleFrontmostAppChange(_ app: NSRunningApplication) {

@@ -15,7 +15,7 @@ mod tray;
 mod training;
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -200,13 +200,13 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
     let last_detection: Arc<Mutex<(Instant, Vec<DetBox>)>> =
         Arc::new(Mutex::new((Instant::now() - Duration::from_secs(1), Vec::new())));
 
-    let mut frame_counter: u64 = 0;
+    let frame_counter = AtomicU64::new(0);
     let on_frame = Arc::new(move |frame: &FrameView| {
-        frame_counter = frame_counter.wrapping_add(1);
+        let frame_number = frame_counter.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
 
         // Detection every 4th frame, async-blocking on the WGC thread is fine
         // because we already throttled to 30 Hz.
-        if detection_on.load(Ordering::Relaxed) && frame_counter % 4 == 0 {
+        if detection_on.load(Ordering::Relaxed) && frame_number % 4 == 0 {
             if let Some(det) = detector_arc.lock().as_mut() {
                 if let Ok(boxes) = det.detect(&frame.bytes, frame.width, frame.height) {
                     *last_detection.lock() = (Instant::now(), boxes);

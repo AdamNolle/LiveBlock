@@ -18,6 +18,7 @@ mod session;
 mod state;
 mod training;
 
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;

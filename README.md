@@ -173,7 +173,12 @@ Windows and Linux mirror the same shortcuts with `Ctrl` instead of `⌘`.
 - Render layer is a click-through overlay that paints only the inpainted
   patches.
 
-## Train your own detector
+## Train your own detector (source workflow)
+
+Production desktop packages are inference-only and never bootstrap Python or
+pip. Training is available from an explicit source/Debug checkout; see
+[`docs/TRAINING_RUNTIME.md`](docs/TRAINING_RUNTIME.md) for the distribution and
+security policy.
 
 The bundled open-vocabulary model targets logos, ad banners, and sponsored
 content without a fixed brand list. Detection quality still varies by layout,
@@ -183,7 +188,7 @@ size, and contrast. To personalize it for the ads you actually see:
 2. While browsing normally, press ⌘⇧S each time you see an ad.
 3. Open the Label window and drag a rectangle around each ad. Yellow
    proposals from the bundled model help — accept or reject with one click.
-4. Open the Training Dashboard, click Train Now.
+4. In a source/Debug build, open the Training Dashboard and click Train Now.
 5. A macOS notification fires when training completes. The export remains a
    candidate until a complete schema-5 promotion report passes; the app never
    auto-installs unverified weights.

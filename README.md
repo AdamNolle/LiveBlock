@@ -75,9 +75,11 @@ Requires macOS 26 (Tahoe). Older releases are not supported.
 4. Press **⌘⇧B** to open the Region Editor. The render layer hides automatically
    while the editor is open — drag a rectangle around something you want
    blocked. Press **Esc** when done.
-5. Capture is now blocking that region with a mirror-blend inpaint. The
-   bundled detector is a generic YOLOv8n COCO model — for real ad detection
-   you'll need to train your own (`tools/README.md`).
+5. Capture is now blocking that region with the selected fill style. The
+   bundled detector is an experimental three-concept YOLO-World export for
+   logos, ad banners, and sponsored content. It generalizes beyond fixed brand
+   classes, but it is not a guarantee that every ad will be found; use manual
+   regions and the labeling/training loop for misses.
 
 #### When permissions get stuck
 
@@ -173,9 +175,9 @@ Windows and Linux mirror the same shortcuts with `Ctrl` instead of `⌘`.
 
 ## Train your own detector
 
-The bundled YOLOv8n is a generic COCO model — useful for development, not
-for production ad blocking. To get a model that recognizes the ads you
-actually see:
+The bundled open-vocabulary model targets logos, ad banners, and sponsored
+content without a fixed brand list. Detection quality still varies by layout,
+size, and contrast. To personalize it for the ads you actually see:
 
 1. Click Start, grant Screen Recording on first run.
 2. While browsing normally, press ⌘⇧S each time you see an ad.
@@ -211,14 +213,14 @@ LiveBlock/
 |----------------------|-------------------------------------------------------|
 | macOS app            | Capture, region editor, labeling, training dashboard, ML detector tuning. Native macOS 26 Liquid Glass UI. Linked against the Rust core via swift-bridge. |
 | Rust core            | Five crates (regions, labels, detection, bridge, core). 33 unit tests. JSON byte-compatible across all platforms. |
-| Windows port         | Real D3D11 + DirectML pipeline. Depends on shared core types. Compiles on Windows. |
-| Linux port           | Wayland + X11 dispatch with capture skeleton, ported YOLOv8 head decoder + CPU mirror-blend inpainter. Compiles on Linux; GPU inpainter still TODO. |
-| Bundled detector     | Generic YOLOv8n (COCO classes). Train your own with `tools/auto.sh`. |
+| Windows port         | Experimental scaffold. WGC/DirectML code exists, but the locked dependency graph and callback integration are not yet release-verified. |
+| Linux port           | Experimental scaffold. Capture, global hotkeys, and click-through overlays still contain platform TODOs and are not functional end to end. |
+| Bundled detector     | Experimental YOLO-World model for Logo / Ad banner / Sponsored; fixture-based precision/recall validation is still required. |
 | Code signing         | Stable self-signed identity via `tools/setup_codesign_identity.sh`. Developer ID + notarization is a separate task. |
 
 ## Roadmap
 
-- Replace the bundled COCO weights with a fine-tuned ad/logo detector.
+- Build and gate a representative detector evaluation corpus with per-class precision/recall targets.
 - LaMa generative inpainting via Metal Performance Shaders for textured backgrounds.
 - Wrap the Windows/Linux pipelines in the shared `Capture` / `Detector` /
   `Inpainter` traits from `liveblock-core`.

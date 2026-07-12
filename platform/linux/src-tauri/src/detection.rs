@@ -12,8 +12,7 @@ use liveblock_detection::{
     DetectorProcessingContract,
 };
 use ndarray::Array4;
-use ort::session::{Session, SessionBuilder};
-use ort::value::Value;
+use ort::{Session, SessionBuilder, Value};
 use std::path::Path;
 
 pub const MODEL_FILE_NAME: &str = "liveblock-detector.onnx";

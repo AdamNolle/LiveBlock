@@ -110,7 +110,7 @@ fn apply_window_styles(app: &AppHandle) {
     use windows::Win32::Foundation::HWND;
     if let Some(w) = app.get_webview_window("render") {
         if let Ok(h) = w.hwnd() {
-            let hwnd = HWND(h.0 as isize);
+            let hwnd = HWND(h.0 as *mut _);
             if let Err(e) = overlay::make_render_overlay(hwnd) {
                 tracing::error!("make_render_overlay: {e}");
             }
@@ -118,7 +118,7 @@ fn apply_window_styles(app: &AppHandle) {
     }
     if let Some(w) = app.get_webview_window("editor") {
         if let Ok(h) = w.hwnd() {
-            let hwnd = HWND(h.0 as isize);
+            let hwnd = HWND(h.0 as *mut _);
             if let Err(e) = overlay::make_editor(hwnd) {
                 tracing::error!("make_editor: {e}");
             }
@@ -170,7 +170,7 @@ fn list_monitors() -> Vec<MonitorInfo> {
         .into_iter()
         .enumerate()
         .map(|(index, (handle, name))| MonitorInfo {
-            id: handle.0.to_string(),
+            id: (handle.0 as usize).to_string(),
             name,
             is_primary: index == 0,
         })
@@ -190,7 +190,7 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
     use windows::Win32::Graphics::Gdi::HMONITOR;
 
     let monitor_hmonitor = monitor_id
-        .parse::<isize>()
+        .parse::<usize>()
         .map_err(|_| "invalid monitor id".to_string())?;
     let app = state.app.clone();
     let regions_arc = state.regions.clone();
@@ -239,7 +239,7 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
         let _ = app.emit("patches-updated", &payloads);
     }) as Arc<dyn Fn(&FrameView) + Send + Sync>;
 
-    let session = CaptureSession::start(HMONITOR(monitor_hmonitor), on_frame)
+    let session = CaptureSession::start(HMONITOR(monitor_hmonitor as *mut _), on_frame)
         .map_err(|e| e.to_string())?;
     *state.capture.lock() = Some(session);
     let _ = state.app.emit("capture-state-changed", true);

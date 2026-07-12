@@ -12,7 +12,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassExW,
-    TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_HOTKEY, WNDCLASSEXW,
+    TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WM_HOTKEY, WNDCLASSEXW,
     WS_OVERLAPPED,
 };
 

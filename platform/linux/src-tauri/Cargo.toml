@@ -49,13 +49,15 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
-ndarray = "0.16"
+ndarray = "=0.15.6"
 arc-swap = "1.7"
 crossbeam-channel = "0.5"
 dirs = "5"
 
 # ONNX Runtime — Linux gets multiple EPs as cargo features.
-ort = { version = "2.0.0-rc.4", default-features = false, features = ["load-dynamic", "ndarray"] }
+ort = { version = "=2.0.0-rc.4", default-features = false, features = ["load-dynamic", "ndarray"] }
+# ort's prerelease dependency range otherwise drifts to an incompatible ort-sys.
+ort-sys = "=2.0.0-rc.4"
 
 # Wayland portal client (xdg-desktop-portal) — for screencast + global shortcuts.
 ashpd = { version = "0.9", features = ["tokio"] }

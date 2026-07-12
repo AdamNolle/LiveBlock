@@ -21,7 +21,7 @@ mod training;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::labels::{LabelDocument, ScreenshotEntry};
@@ -30,30 +30,42 @@ use crate::session::detect_session;
 use crate::state::AppState;
 
 #[tauri::command]
-fn get_session_info() -> serde_json::Value {
-    serde_json::json!({
-        "session": match detect_session() {
-            session::SessionType::Wayland => "wayland",
-            session::SessionType::X11 => "x11",
-            session::SessionType::Unknown => "unknown",
+fn get_capabilities() -> Result<liveblock_config::DesktopCapabilityProfile, String> {
+    use liveblock_config::{DesktopCapabilityProfile, DesktopPlatform};
+    let platform = match detect_session() {
+        session::SessionType::X11 => DesktopPlatform::LinuxX11,
+        session::SessionType::Wayland => match session::detect_compositor() {
+            session::WaylandCompositor::Kwin => DesktopPlatform::LinuxKdeWayland,
+            session::WaylandCompositor::Wlroots => DesktopPlatform::LinuxWlrootsWayland,
+            session::WaylandCompositor::Gnome => DesktopPlatform::LinuxGnomeWayland,
+            session::WaylandCompositor::Unknown => {
+                return Err("unsupported or unknown Wayland compositor".into())
+            }
         },
-        "compositor": format!("{:?}", session::detect_compositor()),
-        "supports_layer_shell": session::supports_layer_shell(session::detect_compositor()),
-        "overlay_strategy": format!("{:?}", overlay::pick_strategy()),
-    })
+        session::SessionType::Unknown => return Err("unknown desktop session".into()),
+    };
+    let profile = DesktopCapabilityProfile::linux(platform);
+    profile.validate().map_err(str::to_string)?;
+    Ok(profile)
 }
 
 // ---------- Capture / detection lifecycle ----------
 
 #[tauri::command]
-fn start_capture(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+fn start_capture(
+    _monitor_id: String,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
     state.capture_running.store(true, Ordering::SeqCst);
+    let _ = app.emit("capture-state-changed", true);
     Ok(())
 }
 
 #[tauri::command]
-fn stop_capture(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+fn stop_capture(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.capture_running.store(false, Ordering::SeqCst);
+    let _ = app.emit("capture-state-changed", false);
     Ok(())
 }
 
@@ -71,7 +83,7 @@ fn list_monitors() -> Vec<serde_json::Value> {
     vec![serde_json::json!({
         "id": "primary",
         "name": "Primary display",
-        "is_primary": true,
+        "isPrimary": true,
     })]
 }
 
@@ -155,9 +167,24 @@ fn list_screenshots() -> Vec<ScreenshotEntry> {
     out
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotData {
+    width: u32,
+    height: u32,
+    png_data_url: String,
+}
+
 #[tauri::command]
-fn load_screenshot(path: PathBuf) -> Result<Vec<u8>, String> {
-    std::fs::read(&path).map_err(|e| e.to_string())
+fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let image = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+    Ok(ScreenshotData {
+        width: image.width(),
+        height: image.height(),
+        png_data_url: format!("data:image/png;base64,{}", STANDARD.encode(bytes)),
+    })
 }
 
 #[tauri::command]
@@ -184,11 +211,10 @@ fn discard_screenshot(path: PathBuf) -> Result<(), String> {
 
 #[tauri::command]
 fn start_training(_epochs: u32, _batch: u32, _imgsz: u32) -> Result<(), String> {
-    // Training driver lives in the Python pipeline at tools/train_logos.py.
-    // The Rust side dispatches and pipes progress through stdout; the
-    // training module owns the lifecycle. Stub for now — Linux wires this
-    // identically to Windows once the training module ships.
-    Ok(())
+    if !liveblock_config::developer_training_runtime_available() {
+        return Err("release builds are inference-only; use the source training workflow".into());
+    }
+    Err("Linux source training dispatch is not implemented".into())
 }
 
 #[tauri::command]
@@ -252,7 +278,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_session_info,
+            get_capabilities,
             start_capture,
             stop_capture,
             set_detection_enabled,

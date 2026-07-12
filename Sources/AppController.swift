@@ -76,6 +76,9 @@ final class AppController: ObservableObject {
     private static let selectedDisplayIDKey = "selectedDisplayID"
 
     init() {
+        if !DesktopContracts.validateMacOS() {
+            NSLog("AppController: shared desktop behavior/capability contract validation failed")
+        }
         self.regionStore = RegionStore()
         self.captureManager = ScreenCaptureManager(regionStore: regionStore)
         self.labelingController = LabelingController()

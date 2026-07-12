@@ -26,7 +26,13 @@ export interface PatchPayload {
 export interface MonitorInfo {
   id: string;
   name: string;
-  is_primary: boolean;
+  isPrimary: boolean;
+}
+
+export interface ScreenshotData {
+  width: number;
+  height: number;
+  pngDataUrl: string;
 }
 
 export interface ScreenshotEntry {
@@ -44,6 +50,7 @@ export interface LabelBox {
 }
 
 export interface LabelDocument {
+  schemaVersion: 1;
   image: string;
   imageWidth: number;
   imageHeight: number;
@@ -52,9 +59,27 @@ export interface LabelDocument {
   labeledAt: string;
 }
 
+export interface DesktopCapabilityProfile {
+  contractVersion: number;
+  platform: string;
+  supportMode: "full" | "limited";
+  captureBackend: string;
+  inferenceBackends: string[];
+  overlayBackend: string;
+  clickThroughOverlay: boolean;
+  captureExclusion: boolean;
+  globalHotkeys: boolean;
+  localFrameProcessing: boolean;
+  telemetryEnabled: boolean;
+  productionTrainingRuntime: boolean;
+  releaseReady: boolean;
+  limitations: string[];
+}
+
 export const lb = {
   // Capture / detection lifecycle.
-  startCapture: () => invoke<void>("start_capture"),
+  getCapabilities: () => invoke<DesktopCapabilityProfile>("get_capabilities"),
+  startCapture: (monitorId: string) => invoke<void>("start_capture", { monitorId }),
   stopCapture: () => invoke<void>("stop_capture"),
   setDetectionEnabled: (enabled: boolean) =>
     invoke<void>("set_detection_enabled", { enabled }),
@@ -73,7 +98,7 @@ export const lb = {
   captureScreenshotForLabeling: () =>
     invoke<string | null>("capture_screenshot_for_labeling").catch(() => null),
   listScreenshots: () => invoke<ScreenshotEntry[]>("list_screenshots"),
-  loadScreenshot: (path: string) => invoke<number[]>("load_screenshot", { path }),
+  loadScreenshot: (path: string) => invoke<ScreenshotData>("load_screenshot", { path }),
   saveLabel: (path: string, doc: LabelDocument) =>
     invoke<void>("save_label", { path, doc }),
   loadLabel: (path: string) =>

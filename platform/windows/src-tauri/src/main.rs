@@ -79,6 +79,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_capabilities,
             start_capture,
             stop_capture,
             set_detection_enabled,
@@ -97,8 +98,8 @@ fn main() {
             start_training,
             cancel_training,
             quit,
-            window_show,
-            window_hide,
+            show_window,
+            hide_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -157,25 +158,40 @@ fn try_load_default_detector(app: &AppHandle) {
 // ===== Tauri commands =====
 
 #[tauri::command]
+fn get_capabilities() -> Result<liveblock_config::DesktopCapabilityProfile, String> {
+    let profile = liveblock_config::DesktopCapabilityProfile::windows();
+    profile.validate().map_err(str::to_string)?;
+    Ok(profile)
+}
+
+#[tauri::command]
 fn list_monitors() -> Vec<MonitorInfo> {
     enumerate_monitors()
         .into_iter()
         .enumerate()
-        .map(|(i, (h, name))| MonitorInfo { index: i as u32, hmonitor: h.0 as i64, name })
+        .map(|(index, (handle, name))| MonitorInfo {
+            id: handle.0.to_string(),
+            name,
+            is_primary: index == 0,
+        })
         .collect()
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MonitorInfo {
-    index: u32,
-    hmonitor: i64,
+    id: String,
     name: String,
+    is_primary: bool,
 }
 
 #[tauri::command]
-fn start_capture(monitor_hmonitor: i64, state: State<'_, AppState>) -> Result<(), String> {
+fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), String> {
     use windows::Win32::Graphics::Gdi::HMONITOR;
 
+    let monitor_hmonitor = monitor_id
+        .parse::<isize>()
+        .map_err(|_| "invalid monitor id".to_string())?;
     let app = state.app.clone();
     let regions_arc = state.regions.clone();
     let inpainter_arc = state.inpainter.clone();
@@ -223,10 +239,10 @@ fn start_capture(monitor_hmonitor: i64, state: State<'_, AppState>) -> Result<()
         let _ = app.emit("patches-updated", &payloads);
     }) as Arc<dyn Fn(&FrameView) + Send + Sync>;
 
-    let session = CaptureSession::start(HMONITOR(monitor_hmonitor as isize), on_frame)
+    let session = CaptureSession::start(HMONITOR(monitor_hmonitor), on_frame)
         .map_err(|e| e.to_string())?;
     *state.capture.lock() = Some(session);
-    let _ = state.app.emit("capture-state", serde_json::json!({ "running": true }));
+    let _ = state.app.emit("capture-state-changed", true);
     Ok(())
 }
 
@@ -235,7 +251,7 @@ fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(session) = state.capture.lock().take() {
         session.stop();
     }
-    let _ = state.app.emit("capture-state", serde_json::json!({ "running": false }));
+    let _ = state.app.emit("capture-state-changed", false);
     let _ = state.app.emit("patches-updated", Vec::<PatchPayload>::new());
     Ok(())
 }
@@ -252,10 +268,10 @@ fn list_regions(state: State<'_, AppState>) -> Vec<NormalizedRegion> {
 }
 
 #[tauri::command]
-fn add_region(region: NormalizedRegion, state: State<'_, AppState>) -> Result<(), String> {
-    state.regions.add(region).map_err(|e| e.to_string())?;
+fn add_region(region: NormalizedRegion, state: State<'_, AppState>) -> Result<NormalizedRegion, String> {
+    state.regions.add(region.clone()).map_err(|e| e.to_string())?;
     let _ = state.app.emit("regions-updated", state.regions.current());
-    Ok(())
+    Ok(region)
 }
 
 #[tauri::command]
@@ -323,6 +339,7 @@ fn list_screenshots() -> Vec<ScreenshotEntry> {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ScreenshotData {
     width: u32,
     height: u32,
@@ -362,6 +379,9 @@ fn discard_screenshot(path: PathBuf) -> Result<(), String> {
 
 #[tauri::command]
 fn start_training(epochs: u32, batch: u32, imgsz: u32, state: State<'_, AppState>) -> Result<(), String> {
+    if !liveblock_config::developer_training_runtime_available() {
+        return Err("release builds are inference-only; use the source training workflow".into());
+    }
     let job = training::TrainingJob::start(state.app.clone(), epochs, batch, imgsz)
         .map_err(|e| e.to_string())?;
     *state.training.lock() = Some(job);
@@ -377,7 +397,7 @@ fn cancel_training(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn window_show(label: String, app: AppHandle) -> Result<(), String> {
+fn show_window(label: String, app: AppHandle) -> Result<(), String> {
     app.get_webview_window(&label)
         .ok_or_else(|| format!("no window {label}"))?
         .show()
@@ -385,7 +405,7 @@ fn window_show(label: String, app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn window_hide(label: String, app: AppHandle) -> Result<(), String> {
+fn hide_window(label: String, app: AppHandle) -> Result<(), String> {
     app.get_webview_window(&label)
         .ok_or_else(|| format!("no window {label}"))?
         .hide()

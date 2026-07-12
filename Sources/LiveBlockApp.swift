@@ -247,6 +247,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.controller.handleScreenConfigurationChange() }
+            .store(in: &cancellables)
+
         // Build the onboarding window up-front so the menu bar's "Show
         // onboarding tour" can re-show it later. It is created hidden;
         // first-launch is what calls showOnboarding().

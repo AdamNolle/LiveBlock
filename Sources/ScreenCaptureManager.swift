@@ -11,6 +11,13 @@ import UniformTypeIdentifiers
 /// Why the capture pipeline isn't actively blocking right now.
 /// Surfaced in the Control Panel banner and Mini HUD so the user can
 /// always see at a glance whether something's wrong vs deliberately paused.
+struct DetectionPreview: Identifiable, Sendable {
+    let id = UUID()
+    let normalizedRect: CGRect
+    let label: String
+    let confidence: Float
+}
+
 enum PauseReason: Equatable {
     case none                       // running and unpaused — green
     case stopped                    // not running by user choice — neutral
@@ -27,9 +34,14 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     // MARK: - Published state (read by SwiftUI)
     @Published private(set) var isRunning = false
     @Published private(set) var currentPatches: [InpaintPatch] = []
+    @Published private(set) var currentDetections: [DetectionPreview] = []
     @Published private(set) var lastDetectionLabels: [String] = []
     @Published private(set) var framesPerSecond: Double = 0
+    @Published private(set) var renderMilliseconds: Double = 0
+    @Published private(set) var droppedRenderFrames: Int = 0
+    @Published private(set) var reusedStaticFrames: Int = 0
     @Published private(set) var patchesProduced: Int = 0
+    @Published private(set) var blockedEvents: Int = 0
     /// Per-region blocking-event counter, keyed by region UUID.
     @Published private(set) var blocksByRegion: [UUID: Int] = [:]
     /// Last error from `start()`, if any. Cleared on successful start or
@@ -40,7 +52,10 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     /// Detection on by default so a fresh user sees something happen — they
     /// can flip it off in Settings if they only want manual regions.
     @Published var detectionEnabled = true {
-        didSet { detectionEnabledStorage.set(detectionEnabled) }
+        didSet {
+            detectionEnabledStorage.set(detectionEnabled)
+            if !detectionEnabled { detectionCache.clear() }
+        }
     }
 
     /// Set by AppController from the @AppStorage("pauseOnFullscreen") toggle.
@@ -65,18 +80,29 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     // MARK: - Internals
     private var stream: SCStream?
     private var targetScreen: NSScreen?
+    private var lifecycleGeneration: UInt64 = 0
+    private var isStarting = false
 
     nonisolated private let visionProcessor = VisionProcessor()
     nonisolated private let inpaintingEngine = InpaintingEngine()
+    nonisolated private let activeStreamIdentity = AtomicObjectIdentity()
 
     nonisolated private let videoQueue = DispatchQueue(label: "com.liveblock.videoQueue", qos: .userInteractive)
+    nonisolated private let detectionQueue = DispatchQueue(label: "com.liveblock.detectionQueue", qos: .userInitiated)
+    nonisolated private let renderQueue = DispatchQueue(label: "com.liveblock.renderQueue", qos: .userInteractive)
 
     // Atomically swappable booleans (read by nonisolated frame callback)
     nonisolated private let detectionEnabledStorage = AtomicBool(true)
+    nonisolated private let detectionInFlight = AtomicBool(false)
+    nonisolated private let renderInFlight = AtomicBool(false)
     nonisolated private let pauseOnFullscreenStorage = AtomicBool(true)
     nonisolated private let frontmostFullscreenStorage = AtomicBool(false)
     nonisolated private let frontmostExcludedStorage = AtomicBool(false)
+    nonisolated private let disabledRegionIDsStorage = AtomicUUIDSet()
+    nonisolated private let inpaintFillStyleStorage = AtomicInt(InpaintFillStyle.smart.rawValue)
     nonisolated private let fpsCounter = FPSCounter()
+    nonisolated private let renderStateTracker = RenderStateTracker()
+    nonisolated private let reusedStaticFrameCounter = AtomicCounter()
 
     // Frame counter — drives the "detect every Nth frame" cadence.
     nonisolated private let frameCounter = AtomicCounter()
@@ -84,6 +110,7 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
 
     // Detection results cached between detection runs.
     nonisolated private let detectionCache = DetectionCache()
+    nonisolated private let blockEventTracker = BlockEventTracker()
 
     // Throttle main-actor patch updates.
     nonisolated private let lastEmitClock = AtomicTime()
@@ -155,7 +182,13 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     // MARK: - Lifecycle
 
     func start(on screen: NSScreen) async {
-        guard !isRunning else { return }
+        guard !isRunning, !isStarting, stream == nil else { return }
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
+        isStarting = true
+        defer {
+            if lifecycleGeneration == generation { isStarting = false }
+        }
         targetScreen = screen
         // Pre-flight: if Screen Recording is denied, fail fast with a clear
         // message instead of a generic SCStream error.
@@ -167,6 +200,7 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
         do {
             let availableContent = try await SCShareableContent.excludingDesktopWindows(false,
                                                                                         onScreenWindowsOnly: true)
+            guard lifecycleGeneration == generation else { return }
             guard let display = pickDisplay(for: screen, in: availableContent.displays) else {
                 self.lastStartError = "No display matched the target screen."
                 NSLog("ScreenCaptureManager: no display matched target screen.")
@@ -192,43 +226,74 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
 
             let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
             try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
+            activeStreamIdentity.set(newStream, generation: generation)
             try await newStream.startCapture()
+            guard lifecycleGeneration == generation else {
+                activeStreamIdentity.clear(ifMatching: newStream)
+                try? await newStream.stopCapture()
+                return
+            }
 
             self.stream = newStream
             self.isRunning = true
             self.lastStartError = nil
             NSLog("ScreenCaptureManager: capture started (\(pixelWidth)x\(pixelHeight)).")
         } catch {
+            activeStreamIdentity.clear(ifGeneration: generation)
+            guard lifecycleGeneration == generation else { return }
             self.lastStartError = error.localizedDescription
             NSLog("ScreenCaptureManager: failed to start capture: \(error.localizedDescription)")
         }
     }
 
     func stop() async {
-        guard let stream else {
-            isRunning = false
-            return
-        }
+        lifecycleGeneration &+= 1
+        isStarting = false
+        let streamToStop = stream
+        stream = nil
+        activeStreamIdentity.clear()
+        detectionCache.clear()
+        blockEventTracker.reset()
+        renderStateTracker.reset()
+        isRunning = false
+        currentPatches = []
+        currentDetections = []
+        lastDetectionLabels = []
+        lastStartError = nil
+        guard let streamToStop else { return }
         do {
-            try await stream.stopCapture()
+            try await streamToStop.stopCapture()
         } catch {
             NSLog("ScreenCaptureManager: stop failed: \(error.localizedDescription)")
         }
-        self.stream = nil
-        self.isRunning = false
-        self.currentPatches = []
-        self.lastDetectionLabels = []
-        self.lastStartError = nil
     }
 
     func setMinimumConfidence(_ value: Float) {
         visionProcessor.updateMinimumConfidence(value)
     }
 
+    func detectorRules() -> [DetectorClassRule] {
+        visionProcessor.detectorRules()
+    }
+
+    @discardableResult
+    func setDetectorClassEnabled(id: UInt32, enabled: Bool) -> Bool {
+        visionProcessor.setDetectorClassEnabled(id: id, enabled: enabled)
+    }
+
+    func setDisabledRegionIDs(_ ids: Set<UUID>) {
+        disabledRegionIDsStorage.store(ids)
+    }
+
+    func setInpaintFillStyle(_ rawValue: Int) {
+        inpaintFillStyleStorage.set(InpaintFillStyle(rawValue: rawValue)?.rawValue ?? InpaintFillStyle.smart.rawValue)
+    }
+
     /// Drop the cached CoreML model so the very next detection call reloads
     /// from disk. Used by TrainingController after a successful install so
     /// the running app picks up the freshly trained model without relaunch.
     nonisolated func reloadDetectionModel() {
+        detectionCache.clear()
         visionProcessor.reloadModel()
     }
 
@@ -237,6 +302,7 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
                             didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                             of type: SCStreamOutputType) {
         guard type == .screen,
+              activeStreamIdentity.matches(stream),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         // Resolve any pending screenshot request synchronously here so the
@@ -249,6 +315,7 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
 
         let frameIdx = frameCounter.increment()
         let fps = fpsCounter.tick()
+        let frameIsIdle = Self.frameStatus(sampleBuffer) == .idle
 
         // Pause hooks: skip detection + inpaint when the frontmost app is
         // fullscreen (and the user opted in) or when it's on the per-app
@@ -258,15 +325,30 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
         let pausedForFullscreen = pauseOnFullscreenStorage.get() && frontmostFullscreenStorage.get()
         let pausedForApp = frontmostExcludedStorage.get()
         let paused = pausedForFullscreen || pausedForApp
+        if paused { detectionCache.clear() }
 
         // Detection: only every Nth frame, only when enabled, only when not paused.
-        if !paused, detectionEnabledStorage.get(), frameIdx % detectionInterval == 0 {
-            let detected = visionProcessor.detect(in: pixelBuffer)
-            detectionCache.store(detected)
+        if !paused,
+           !frameIsIdle,
+           detectionEnabledStorage.get(),
+           frameIdx % detectionInterval == 0,
+           !detectionInFlight.get() {
+            // Keep CoreML off ScreenCaptureKit's callback queue. Retaining the
+            // CVPixelBuffer in this closure safely extends its lifetime; the
+            // single-flight gate drops work instead of building inference lag.
+            detectionInFlight.set(true)
+            let retainedBuffer = SendablePixelBuffer(pixelBuffer)
+            let cacheGeneration = detectionCache.generation()
+            detectionQueue.async { [visionProcessor, detectionCache, detectionInFlight] in
+                let detected = visionProcessor.detect(in: retainedBuffer.value)
+                detectionCache.store(detected, ifGeneration: cacheGeneration)
+                detectionInFlight.set(false)
+            }
         }
 
         // Build the active set of regions for this frame.
-        let userRegions = paused ? [] : regionStore.current
+        let disabledRegionIDs = disabledRegionIDsStorage.load()
+        let userRegions = paused ? [] : regionStore.current(excluding: disabledRegionIDs)
         let userBoxes = userRegions.map { region -> AdBoundingBox in
             AdBoundingBox(rect: region.cvRect(inPixelBufferSize: bufferSize),
                           confidence: 1.0,
@@ -278,38 +360,94 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
             ? detectionCache.load()
             : []
         let allBoxes = userBoxes + detectedBoxes
+        let style = InpaintFillStyle(rawValue: inpaintFillStyleStorage.get()) ?? .smart
 
-        // Inpaint every frame regardless — boxes may have moved or disappeared.
-        let patches = inpaintingEngine.inpaintPatches(frame: pixelBuffer, regions: allBoxes)
-
-        // Per-region blocking-event count. Increment once per active user region.
-        var perRegion: [UUID: Int] = [:]
-        for box in userBoxes {
-            if let id = box.regionID { perRegion[id, default: 0] += 1 }
+        // ScreenCaptureKit marks duplicate frames as idle. Reuse the existing
+        // overlay when both pixels and the region/style configuration are
+        // unchanged, avoiding Core Image work on static desktops. A changed
+        // region configuration always renders once, even on an idle frame.
+        guard renderStateTracker.shouldRender(boxes: allBoxes,
+                                              styleRawValue: style.rawValue,
+                                              frameIsIdle: frameIsIdle) else {
+            _ = reusedStaticFrameCounter.increment()
+            return
         }
 
-        // Throttle SwiftUI updates to ≤30Hz.
+        // Rendering into CGImages is the expensive operation. Admit at most
+        // 30 renders/sec and never queue behind a slow render: stale work is
+        // dropped while ScreenCaptureKit's callback stays responsive at 60 Hz.
         guard lastEmitClock.shouldEmit(minInterval: minEmitInterval) else { return }
+        guard renderInFlight.trySetTrue() else {
+            Task { @MainActor [weak self] in self?.droppedRenderFrames &+= 1 }
+            return
+        }
 
-        let labels = detectedBoxes.map { "\($0.label) (\(Int($0.confidence * 100))%)" }
-        let patchCount = patches.count
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.currentPatches = patches
-            self.lastDetectionLabels = labels
-            self.framesPerSecond = fps
-            self.patchesProduced &+= patchCount
-            for (id, n) in perRegion {
-                self.blocksByRegion[id, default: 0] += n
+        let retainedBuffer = SendablePixelBuffer(pixelBuffer)
+        let retainedStream = SendableSCStream(stream)
+        renderQueue.async { [inpaintingEngine, renderInFlight, blockEventTracker, activeStreamIdentity, renderStateTracker] in
+            let started = CACurrentMediaTime()
+            defer { renderInFlight.set(false) }
+            guard activeStreamIdentity.matches(retainedStream.value) else { return }
+
+            let patches = inpaintingEngine.inpaintPatches(frame: retainedBuffer.value,
+                                                           regions: allBoxes,
+                                                           style: style)
+            renderStateTracker.markRendered(boxes: allBoxes, styleRawValue: style.rawValue)
+            let eventDelta = blockEventTracker.update(userBoxes: userBoxes,
+                                                      detectedBoxes: detectedBoxes)
+            let detections = detectedBoxes.compactMap { box -> DetectionPreview? in
+                let rect = box.rect.intersection(CGRect(origin: .zero, size: bufferSize))
+                guard !rect.isNull, rect.width > 0, rect.height > 0 else { return nil }
+                return DetectionPreview(
+                    normalizedRect: CGRect(x: rect.minX / bufferWidth,
+                                           y: (bufferHeight - rect.maxY) / bufferHeight,
+                                           width: rect.width / bufferWidth,
+                                           height: rect.height / bufferHeight),
+                    label: box.label,
+                    confidence: box.confidence
+                )
+            }
+            let labels = detections.map { "\($0.label) (\(Int($0.confidence * 100))%)" }
+            let patchCount = patches.count
+            let renderMS = (CACurrentMediaTime() - started) * 1_000
+
+            Task { @MainActor [weak self] in
+                guard let self, self.activeStreamIdentity.matches(retainedStream.value), self.isRunning else { return }
+                self.currentPatches = patches
+                self.currentDetections = detections
+                self.lastDetectionLabels = labels
+                self.framesPerSecond = fps
+                self.renderMilliseconds = renderMS
+                self.reusedStaticFrames = self.reusedStaticFrameCounter.get()
+                self.patchesProduced &+= patchCount
+                self.blockedEvents &+= eventDelta.total
+                for id in eventDelta.newUserRegionIDs {
+                    self.blocksByRegion[id, default: 0] += 1
+                }
             }
         }
+    }
+
+    nonisolated private static func frameStatus(_ sampleBuffer: CMSampleBuffer) -> SCFrameStatus? {
+        guard let attachmentArray = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer,
+            createIfNecessary: false
+        ) as? [[SCStreamFrameInfo: Any]],
+        let attachments = attachmentArray.first,
+        let rawValue = attachments[.status] as? Int else { return nil }
+        return SCFrameStatus(rawValue: rawValue)
     }
 
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
         NSLog("ScreenCaptureManager: stream stopped with error: \(error.localizedDescription)")
         Task { @MainActor [weak self] in
-            self?.isRunning = false
-            self?.currentPatches = []
+            guard let self, self.stream === stream else { return }
+            self.stream = nil
+            self.activeStreamIdentity.clear(ifMatching: stream)
+            self.lifecycleGeneration &+= 1
+            self.isRunning = false
+            self.currentPatches = []
+            self.currentDetections = []
         }
     }
 
@@ -319,7 +457,7 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     /// callback to obtain a CGImage that's detached from the SCStream buffer
     /// pool, then PNG-encodes on a background queue.
     nonisolated func saveLatestFrameForLabeling() async -> URL? {
-        guard let cgImage = await latestBufferStorage.requestSnapshot() else { return nil }
+        guard let cgImage = await latestBufferStorage.requestSnapshot(timeout: 2.0) else { return nil }
         return await withCheckedContinuation { (cont: CheckedContinuation<URL?, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 TrainingPaths.ensureDirectories()
@@ -351,7 +489,49 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     }
 }
 
-// MARK: - Lock-free atomics (small enough to be sound under NSLock)
+// MARK: - Thread-safe hot-path helpers
+
+/// CVPixelBuffer is reference-counted and safe to retain for read-only Vision
+/// inference, but CoreVideo has not annotated the legacy type as Sendable.
+final class SendablePixelBuffer: @unchecked Sendable {
+    let value: CVPixelBuffer
+    init(_ value: CVPixelBuffer) { self.value = value }
+}
+
+final class SendableSCStream: @unchecked Sendable {
+    let value: SCStream
+    init(_ value: SCStream) { self.value = value }
+}
+
+final class AtomicObjectIdentity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var identity: ObjectIdentifier?
+    private var generation: UInt64 = 0
+
+    func set(_ object: AnyObject, generation: UInt64) {
+        lock.lock()
+        identity = ObjectIdentifier(object)
+        self.generation = generation
+        lock.unlock()
+    }
+    func matches(_ object: AnyObject) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return identity == ObjectIdentifier(object)
+    }
+    func clear() {
+        lock.lock(); identity = nil; generation = 0; lock.unlock()
+    }
+    func clear(ifGeneration expected: UInt64) {
+        lock.lock()
+        if generation == expected { identity = nil; generation = 0 }
+        lock.unlock()
+    }
+    func clear(ifMatching object: AnyObject) {
+        lock.lock()
+        if identity == ObjectIdentifier(object) { identity = nil; generation = 0 }
+        lock.unlock()
+    }
+}
 
 final class AtomicBool: @unchecked Sendable {
     private let lock = NSLock()
@@ -359,6 +539,20 @@ final class AtomicBool: @unchecked Sendable {
     init(_ initial: Bool) { self.value = initial }
     func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
     func set(_ newValue: Bool) { lock.lock(); value = newValue; lock.unlock() }
+    func trySetTrue() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !value else { return false }
+        value = true
+        return true
+    }
+}
+
+final class AtomicInt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Int
+    init(_ initial: Int) { value = initial }
+    func get() -> Int { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ newValue: Int) { lock.lock(); value = newValue; lock.unlock() }
 }
 
 final class AtomicCounter: @unchecked Sendable {
@@ -367,6 +561,10 @@ final class AtomicCounter: @unchecked Sendable {
     func increment() -> Int {
         lock.lock(); defer { lock.unlock() }
         value &+= 1
+        return value
+    }
+    func get() -> Int {
+        lock.lock(); defer { lock.unlock() }
         return value
     }
 }
@@ -385,15 +583,143 @@ final class AtomicTime: @unchecked Sendable {
     }
 }
 
+/// Tracks the region/style configuration represented by the current overlay.
+/// Idle frames can reuse it; configuration changes still force one render.
+final class RenderStateTracker: @unchecked Sendable {
+    private struct RegionKey: Equatable {
+        let x: CGFloat
+        let y: CGFloat
+        let width: CGFloat
+        let height: CGFloat
+        let confidence: Float
+        let label: String
+        let source: String
+        let regionID: UUID?
+    }
+
+    private struct Configuration: Equatable {
+        let regions: [RegionKey]
+        let styleRawValue: Int
+    }
+
+    private let lock = NSLock()
+    private var lastRendered: Configuration?
+
+    func shouldRender(boxes: [AdBoundingBox], styleRawValue: Int, frameIsIdle: Bool) -> Bool {
+        let configuration = Self.configuration(boxes: boxes, styleRawValue: styleRawValue)
+        lock.lock(); defer { lock.unlock() }
+        guard configuration == lastRendered else { return true }
+        return !frameIsIdle && !boxes.isEmpty
+    }
+
+    func markRendered(boxes: [AdBoundingBox], styleRawValue: Int) {
+        let configuration = Self.configuration(boxes: boxes, styleRawValue: styleRawValue)
+        lock.lock()
+        lastRendered = configuration
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        lastRendered = nil
+        lock.unlock()
+    }
+
+    private static func configuration(boxes: [AdBoundingBox], styleRawValue: Int) -> Configuration {
+        Configuration(regions: boxes.map {
+            RegionKey(x: $0.rect.origin.x,
+                      y: $0.rect.origin.y,
+                      width: $0.rect.width,
+                      height: $0.rect.height,
+                      confidence: $0.confidence,
+                      label: $0.label,
+                      source: $0.source.rawValue,
+                      regionID: $0.regionID)
+        }, styleRawValue: styleRawValue)
+    }
+}
+
 final class DetectionCache: @unchecked Sendable {
     private let lock = NSLock()
     private var boxes: [AdBoundingBox] = []
-    func store(_ newBoxes: [AdBoundingBox]) {
-        lock.lock(); boxes = newBoxes; lock.unlock()
+    private var cacheGeneration: UInt64 = 0
+
+    func generation() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return cacheGeneration
+    }
+    func store(_ newBoxes: [AdBoundingBox], ifGeneration expected: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        guard cacheGeneration == expected else { return }
+        boxes = newBoxes
     }
     func load() -> [AdBoundingBox] {
         lock.lock(); defer { lock.unlock() }
         return boxes
+    }
+    func clear() {
+        lock.lock()
+        boxes = []
+        cacheGeneration &+= 1
+        lock.unlock()
+    }
+}
+
+struct BlockEventDelta: Sendable {
+    let total: Int
+    let newUserRegionIDs: Set<UUID>
+}
+
+/// Counts appearances, not rendered frames. A static region increments once;
+/// it becomes a new event only after disappearing and appearing again.
+final class BlockEventTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeUserIDs: Set<UUID> = []
+    private var activeDetections: [AdBoundingBox] = []
+
+    func update(userBoxes: [AdBoundingBox], detectedBoxes: [AdBoundingBox]) -> BlockEventDelta {
+        lock.lock(); defer { lock.unlock() }
+        let userIDs = Set(userBoxes.compactMap(\.regionID))
+        let newUserIDs = userIDs.subtracting(activeUserIDs)
+
+        let newDetectionCount = detectedBoxes.reduce(into: 0) { count, box in
+            let alreadyActive = activeDetections.contains {
+                $0.label == box.label && Self.iou($0.rect, box.rect) >= 0.5
+            }
+            if !alreadyActive { count += 1 }
+        }
+
+        activeUserIDs = userIDs
+        activeDetections = detectedBoxes
+        return BlockEventDelta(total: newUserIDs.count + newDetectionCount,
+                               newUserRegionIDs: newUserIDs)
+    }
+
+    func reset() {
+        lock.lock()
+        activeUserIDs = []
+        activeDetections = []
+        lock.unlock()
+    }
+
+    private static func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let intersection = a.intersection(b)
+        guard !intersection.isNull, !intersection.isEmpty else { return 0 }
+        let intersectionArea = intersection.width * intersection.height
+        let unionArea = a.width * a.height + b.width * b.height - intersectionArea
+        return unionArea > 0 ? intersectionArea / unionArea : 0
+    }
+}
+
+final class AtomicUUIDSet: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Set<UUID> = []
+    func store(_ newValue: Set<UUID>) {
+        lock.lock(); value = newValue; lock.unlock()
+    }
+    func load() -> Set<UUID> {
+        lock.lock(); defer { lock.unlock() }
+        return value
     }
 }
 
@@ -422,13 +748,23 @@ final class FPSCounter: @unchecked Sendable {
 /// and resolves the continuation. After delivery, no buffer is held.
 final class LatestBufferStorage: @unchecked Sendable {
     private let lock = NSLock()
-    private var pendingContinuations: [CheckedContinuation<CGImage?, Never>] = []
+    private var pendingContinuations: [UUID: CheckedContinuation<CGImage?, Never>] = [:]
 
-    func requestSnapshot() async -> CGImage? {
-        await withCheckedContinuation { cont in
+    func requestSnapshot(timeout: TimeInterval) async -> CGImage? {
+        let requestID = UUID()
+        return await withCheckedContinuation { cont in
             lock.lock()
-            pendingContinuations.append(cont)
+            pendingContinuations[requestID] = cont
             lock.unlock()
+
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + max(0.1, timeout)) { [weak self] in
+                guard let self else { return }
+                let timedOut: CheckedContinuation<CGImage?, Never>? = {
+                    self.lock.lock(); defer { self.lock.unlock() }
+                    return self.pendingContinuations.removeValue(forKey: requestID)
+                }()
+                timedOut?.resume(returning: nil)
+            }
         }
     }
 
@@ -437,7 +773,7 @@ final class LatestBufferStorage: @unchecked Sendable {
     func ingest(_ pixelBuffer: CVPixelBuffer, context: CIContext) {
         let conts: [CheckedContinuation<CGImage?, Never>] = {
             lock.lock(); defer { lock.unlock() }
-            let c = pendingContinuations
+            let c = Array(pendingContinuations.values)
             pendingContinuations.removeAll()
             return c
         }()

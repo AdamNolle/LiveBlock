@@ -4,6 +4,13 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import QuartzCore
 
+enum InpaintFillStyle: Int, Sendable {
+    case smart = 0
+    case blur = 1
+    case averageColor = 2
+    case solidBlack = 3
+}
+
 struct InpaintPatch: Sendable, Equatable {
     /// Rect in [0..1] coords with origin top-left — ready to position in a SwiftUI overlay.
     let normalizedRect: CGRect
@@ -47,7 +54,9 @@ final class InpaintingEngine: @unchecked Sendable {
     }
 
     /// Produce one patch per region. Empty input -> empty output.
-    func inpaintPatches(frame: CVPixelBuffer, regions: [AdBoundingBox]) -> [InpaintPatch] {
+    func inpaintPatches(frame: CVPixelBuffer,
+                        regions: [AdBoundingBox],
+                        style: InpaintFillStyle = .smart) -> [InpaintPatch] {
         guard !regions.isEmpty else { return [] }
 
         let ciImage = CIImage(cvPixelBuffer: frame)
@@ -66,7 +75,7 @@ final class InpaintingEngine: @unchecked Sendable {
             // Re-render every frame: cache by rect-only would return stale fills
             // when content scrolls / video plays behind a static region. The
             // ScreenCaptureManager throttle (≤30 Hz) bounds how often this runs.
-            guard let image = renderFill(image: ciImage, rect: clamped, frameExtent: extent) else {
+            guard let image = renderFill(image: ciImage, rect: clamped, frameExtent: extent, style: style) else {
                 continue
             }
 
@@ -82,7 +91,27 @@ final class InpaintingEngine: @unchecked Sendable {
 
     // MARK: - Fill rendering
 
-    private func renderFill(image: CIImage, rect: CGRect, frameExtent: CGRect) -> CGImage? {
+    private func renderFill(image: CIImage,
+                            rect: CGRect,
+                            frameExtent: CGRect,
+                            style: InpaintFillStyle) -> CGImage? {
+        switch style {
+        case .solidBlack:
+            return renderSolidPatch(color: CGColor(gray: 0, alpha: 1), size: rect.size)
+        case .averageColor:
+            let color = averageBorderColor(in: image, around: rect, frameExtent: frameExtent)
+            return renderSolidPatch(color: color, size: rect.size)
+        case .blur:
+            let blurred = image
+                .cropped(to: rect)
+                .clampedToExtent()
+                .applyingGaussianBlur(sigma: max(8, min(rect.width, rect.height) * 0.08))
+                .cropped(to: rect)
+            return context.createCGImage(blurred, from: rect)
+        case .smart:
+            break
+        }
+
         let aspect = rect.width / max(rect.height, 1)
         let preferVertical = aspect >= 1.0  // wider than tall → blend top↔bottom
 

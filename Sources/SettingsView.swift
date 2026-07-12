@@ -421,6 +421,7 @@ struct SettingsView: View {
         let active = fillStyle == idx
         return Button {
             withAnimation(.easeOut(duration: 0.12)) { fillStyle = idx }
+            controller.captureManager.setInpaintFillStyle(idx)
         } label: {
             VStack(alignment: .leading, spacing: 0) {
                 RoundedRectangle(cornerRadius: Theme.Radius.r2, style: .continuous)

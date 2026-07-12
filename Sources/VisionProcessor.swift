@@ -32,8 +32,8 @@ struct AdBoundingBox: Sendable {
 /// `liveblock-detector.mlpackage`.
 ///
 /// The bundled model is the open-vocabulary detector baked by
-/// `tools/build_openvocab.py` from YOLO-World-v2 — 9 concept prompts flattened
-/// from `tools/vocab/liveblock-vocab.json` (Logo / Ad banner / Sponsored),
+/// `tools/build_openvocab.py` from YOLO-World-v2 — one primary prompt for each
+/// class in `tools/vocab/liveblock-vocab.json` (Logo / Ad banner / Sponsored),
 /// exported NMS-baked to CoreML. No training data: the vocabulary is text, and
 /// it generalises to unseen brands. Per-class enable flags + score thresholds
 /// are read from the shared `liveblock-config` store via `DetectionVocabulary`.
@@ -141,6 +141,17 @@ final class VisionProcessor: @unchecked Sendable {
         _minimumConfidence = max(0, min(1, value))
     }
 
+    func detectorRules() -> [DetectorClassRule] {
+        lock.lock(); defer { lock.unlock() }
+        return ensureVocabularyLocked().rules
+    }
+
+    @discardableResult
+    func setDetectorClassEnabled(id: UInt32, enabled: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ensureVocabularyLocked().setClassEnabled(id: id, enabled: enabled)
+    }
+
     /// Detect against a PNG on disk. Returns proposals as `LabelBox` (normalized,
     /// top-left origin) suitable for the labeling UI. Lower confidence threshold
     /// than realtime detection so the user can prune false positives quickly.
@@ -202,6 +213,8 @@ final class VisionProcessor: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         model = nil
+        realtimeRequest = nil
+        labelingRequest = nil
         loadFailed = false
         NSLog("VisionProcessor: model cache cleared; will reload on next inference.")
     }
@@ -232,12 +245,17 @@ final class VisionProcessor: @unchecked Sendable {
         configuration.computeUnits = .all
 
         let runtimeDir = runtimeModelDirectory
-        for ext in ["mlmodelc", "mlpackage"] {
-            let url = runtimeDir.appendingPathComponent("liveblock-detector.\(ext)")
-            if FileManager.default.fileExists(atPath: url.path) {
-                NSLog("VisionProcessor: loading model from runtime dir \(url.path)")
-                return try MLModel(contentsOf: url, configuration: configuration)
+        let runtimeCandidates = ["mlmodelc", "mlpackage"]
+            .map { runtimeDir.appendingPathComponent("liveblock-detector.\($0)") }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+            .sorted {
+                let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhs > rhs
             }
+        if let url = runtimeCandidates.first {
+            NSLog("VisionProcessor: loading newest runtime model \(url.path)")
+            return try MLModel(contentsOf: url, configuration: configuration)
         }
 
         let bundle = Bundle.main

@@ -71,12 +71,20 @@ final class DetectionVocabulary: @unchecked Sendable {
     /// - Returns `nil` when the label maps to a *known, disabled* class — the
     ///   caller must drop the detection.
     /// - Returns the class's effective threshold when the class is enabled.
-    /// - Returns `globalFallback` for labels not present in the vocabulary (e.g.
-    ///   a transitional COCO model whose names aren't vocab classes), so
-    ///   detection keeps working during the model swap.
+    /// - Returns `nil` for labels not present in a non-empty vocabulary. This is
+    ///   fail-closed: malformed models must never turn arbitrary object classes
+    ///   into regions that get wiped from the user's screen.
     func effectiveThreshold(forLabel label: String, globalFallback: Float) -> Float? {
         lock.lock(); defer { lock.unlock() }
-        guard let rule = rulesByName[label] else { return globalFallback }
-        return rule.enabled ? rule.threshold : nil
+        guard !rulesByName.isEmpty else { return nil }
+        guard let rule = rulesByName[label] else { return nil }
+        return rule.enabled ? max(globalFallback, rule.threshold) : nil
+    }
+
+    @discardableResult
+    func setClassEnabled(id: UInt32, enabled: Bool) -> Bool {
+        guard handle.set_class_enabled(id, enabled) else { return false }
+        reloadRules()
+        return true
     }
 }

@@ -116,9 +116,7 @@ impl SettingsStore {
         let settings = match fs::read(&path) {
             Ok(bytes) if bytes.is_empty() => DetectionSettings::default(),
             Ok(bytes) => serde_json::from_slice::<DetectionSettings>(&bytes)?,
-            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
-                DetectionSettings::default()
-            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => DetectionSettings::default(),
             Err(e) => return Err(ConfigError::Io(e.to_string())),
         };
         Ok(Self {
@@ -202,7 +200,8 @@ impl SettingsStore {
         let tmp = path.with_file_name(format!("{stem}.{pid}.{nanos}.tmp"));
         {
             let mut f = fs::File::create(&tmp).map_err(|e| ConfigError::Io(e.to_string()))?;
-            f.write_all(&bytes).map_err(|e| ConfigError::Io(e.to_string()))?;
+            f.write_all(&bytes)
+                .map_err(|e| ConfigError::Io(e.to_string()))?;
             f.sync_all().map_err(|e| ConfigError::Io(e.to_string()))?;
         }
         fs::rename(&tmp, path).map_err(|e| ConfigError::Io(e.to_string()))?;

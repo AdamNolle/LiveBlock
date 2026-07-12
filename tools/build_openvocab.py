@@ -26,17 +26,33 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_VOCAB = REPO_ROOT / "tools" / "vocab" / "liveblock-vocab.json"
 
 
-def load_vocab(path: str) -> list[str]:
-    """Load a Vocabulary JSON file and flatten every class's prompts in order.
+def load_vocab(path: str) -> tuple[list[str], dict[int, str]]:
+    """Load a Vocabulary JSON file → ``(primary_prompts, id→name)``.
 
-    The returned flat prompt list is what ``YOLOWorld.set_classes`` consumes.
-    Order is preserved: classes in file order, prompts in per-class order.
+    ONE prompt per class (``prompts[0]``, the strongest), so ``set_classes``
+    yields a model whose class **index == the vocab class id**. The display
+    label is the class ``name`` (applied after ``set_classes``), because the
+    shared config / Swift / Windows / Linux layers all key on the class name —
+    keeping the model's labels and the vocabulary in lock-step. Classes are
+    sorted by id so index alignment is guaranteed.
     """
     data = json.loads(Path(path).read_text())
-    prompts: list[str] = []
-    for c in data["classes"]:
-        prompts.extend(c["prompts"])
-    return prompts
+    classes = sorted(data.get("classes", []), key=lambda c: c["id"])
+    if not classes:
+        raise ValueError("vocabulary must contain at least one class")
+    ids = [c.get("id") for c in classes]
+    if ids != list(range(len(classes))):
+        raise ValueError("vocabulary class ids must be unique, contiguous, and zero-based")
+    if any(not isinstance(c.get("name"), str) or not c["name"].strip() for c in classes):
+        raise ValueError("every vocabulary class needs a non-empty name")
+    if len({c["name"] for c in classes}) != len(classes):
+        raise ValueError("vocabulary class names must be unique")
+    if any(not c.get("prompts") or not isinstance(c["prompts"][0], str)
+           or not c["prompts"][0].strip() for c in classes):
+        raise ValueError("every vocabulary class needs a non-empty primary prompt")
+    prompts = [c["prompts"][0] for c in classes]
+    names = {c["id"]: c["name"] for c in classes}
+    return prompts, names
 
 
 def build(base: str = "yolov8s-worldv2.pt",
@@ -49,9 +65,12 @@ def build(base: str = "yolov8s-worldv2.pt",
     """
     from ultralytics import YOLOWorld  # type: ignore
 
-    prompts = load_vocab(vocab_path)
+    prompts, names = load_vocab(vocab_path)
     model = YOLOWorld(base)
-    model.set_classes(prompts)      # bakes CLIP text embeddings into the head
+    model.set_classes(prompts)      # bakes CLIP text embeddings (from strong prompts)
+    # Fail loudly if this Ultralytics version cannot set display labels. Runtime
+    # filtering is name-keyed; silently saving prompt/COCO labels is unsafe.
+    model.model.names = names       # display label = vocab class name (Logo/Ad banner/Sponsored)
     model.save(out)
     return Path(out)
 

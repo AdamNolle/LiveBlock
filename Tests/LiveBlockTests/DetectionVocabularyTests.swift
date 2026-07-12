@@ -21,9 +21,18 @@ final class DetectionVocabularyTests: XCTestCase {
         // Enabled class -> its own effective threshold.
         XCTAssertEqual(try XCTUnwrap(vocab.effectiveThreshold(forLabel: "Ad banner", globalFallback: 0.35)),
                        0.6, accuracy: 1e-6)
-        // Unknown label -> global fallback (keeps a transitional model working).
-        XCTAssertEqual(try XCTUnwrap(vocab.effectiveThreshold(forLabel: "person", globalFallback: 0.35)),
-                       0.35, accuracy: 1e-6)
+        // Unknown labels fail closed when a vocabulary is present. A malformed
+        // 80-class model must not wipe arbitrary COCO objects from the screen.
+        XCTAssertNil(vocab.effectiveThreshold(forLabel: "person", globalFallback: 0.35))
+
+        // The global control can make a class stricter than its persisted floor.
+        XCTAssertEqual(try XCTUnwrap(vocab.effectiveThreshold(forLabel: "Ad banner", globalFallback: 0.75)),
+                       0.75, accuracy: 1e-6)
+    }
+
+    func testEmptyVocabularyDisablesAutomaticDetection() {
+        let vocab = DetectionVocabulary(detectorClassesJSON: "[]")
+        XCTAssertNil(vocab.effectiveThreshold(forLabel: "ad", globalFallback: 0.4))
     }
 
     /// End-to-end through the Rust bridge: seed the vocabulary, disable a class

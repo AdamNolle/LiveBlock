@@ -33,11 +33,9 @@ struct MiniHUDView: View {
         return isPausedActive ? Theme.warn : Theme.accent
     }
 
-    /// Per-frame processing time derived from the live capture rate.
+    /// Actual patch-render duration, independent of the capture cadence.
     private var frameMS: String {
-        let fps = controller.captureManager.framesPerSecond
-        guard fps > 0 else { return "0.0" }
-        return String(format: "%.1f", 1000 / fps)
+        String(format: "%.1f", controller.captureManager.renderMilliseconds)
     }
 
     // Pill fill: translucent dark blur (design rgba(15,16,22,0.92)).
@@ -76,12 +74,12 @@ struct MiniHUDView: View {
 
             // ── pause / resume ──────────────────────────────────────
             LBButton(
-                title: isBlocking ? "Pause" : "Resume",
+                title: isBlocking ? "Pause" : (controller.isRunning ? "Stop" : "Resume"),
                 variant: .ghost,
                 size: .sm,
-                systemIcon: isBlocking ? "pause.fill" : "play.fill"
+                systemIcon: isBlocking ? "pause.fill" : (controller.isRunning ? "stop.fill" : "play.fill")
             ) { controller.toggleCapture() }
-            .help(isBlocking ? "Pause blocking" : "Resume blocking")
+            .help(isBlocking ? "Pause blocking" : (controller.isRunning ? "Stop blocking" : "Resume blocking"))
         }
         .frame(height: 36)
         .padding(.horizontal, 4)

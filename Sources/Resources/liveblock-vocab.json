@@ -1,7 +1,7 @@
 {
   "classes": [
-    { "id": 0, "name": "Logo", "prompts": ["logo", "brand logo", "company logo"] },
-    { "id": 1, "name": "Ad banner", "prompts": ["advertisement", "banner advertisement", "advertising banner"] },
+    { "id": 0, "name": "Logo", "prompts": ["brand logo", "logo", "company logo"] },
+    { "id": 1, "name": "Ad banner", "prompts": ["advertising banner", "banner advertisement", "advertisement"] },
     { "id": 2, "name": "Sponsored", "prompts": ["sponsored content", "sponsored post", "promotional banner"] }
   ],
   "version": 1

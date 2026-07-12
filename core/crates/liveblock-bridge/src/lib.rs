@@ -9,6 +9,10 @@
 //! keys + 2-space pretty indentation, so files written by Swift's
 //! `RegionStore.swift` and by the bridge are byte-identical.
 
+// swift-bridge 0.1's generated glue performs same-type raw-pointer casts.
+// They are harmless and outside this crate's handwritten code.
+#![allow(clippy::unnecessary_cast)]
+
 use liveblock_config::{SettingsStore, Vocabulary};
 use liveblock_regions::{NormalizedRegion, RegionStore};
 use std::path::PathBuf;
@@ -144,7 +148,12 @@ impl RegionStoreHandle {
                 m
             })
             .collect();
-        let value = serde_json::Value::Array(array.into_iter().map(serde_json::Value::from_iter).collect());
+        let value = serde_json::Value::Array(
+            array
+                .into_iter()
+                .map(serde_json::Value::from_iter)
+                .collect(),
+        );
         let mut buf = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(b"  ");
         let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
@@ -252,7 +261,10 @@ impl VocabularyHandle {
     fn set_class_threshold(&self, class_id: u32, threshold: f32) -> bool {
         let guard = self.inner.lock().expect("vocabulary mutex poisoned");
         let store = &guard.1;
-        if store.set_class_threshold(class_id, Some(threshold)).is_err() {
+        if store
+            .set_class_threshold(class_id, Some(threshold))
+            .is_err()
+        {
             return false;
         }
         store.persist().is_ok()
@@ -265,7 +277,8 @@ impl VocabularyHandle {
 }
 
 fn vocabulary_open(path: String) -> VocabularyHandle {
-    let store = SettingsStore::open(PathBuf::from(path)).unwrap_or_else(|_| SettingsStore::in_memory());
+    let store =
+        SettingsStore::open(PathBuf::from(path)).unwrap_or_else(|_| SettingsStore::in_memory());
     VocabularyHandle {
         inner: Mutex::new((
             Vocabulary {

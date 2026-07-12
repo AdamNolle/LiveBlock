@@ -51,7 +51,9 @@ mod tests {
         let json = v.to_json();
         // sorted keys: classes < version; class keys: id < name < prompts
         assert!(json.starts_with("{\n  \"classes\": [\n"));
-        assert!(json.contains("\n      \"id\": 0,\n      \"name\": \"Logo\",\n      \"prompts\": ["));
+        assert!(
+            json.contains("\n      \"id\": 0,\n      \"name\": \"Logo\",\n      \"prompts\": [")
+        );
         assert!(json.trim_end().ends_with("\"version\": 1\n}"));
         // round-trips
         let back = Vocabulary::from_json(&json).unwrap();

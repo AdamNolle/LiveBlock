@@ -129,7 +129,7 @@ struct ControlPanelView: View {
                 .padding(.bottom, 4)
 
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("\(cm.patchesProduced)")
+                Text("\(cm.blockedEvents)")
                     .font(Theme.mono(size: 52, weight: .semibold))
                     .tracking(-52 * 0.04)
                     .foregroundStyle(Theme.ink1)
@@ -156,7 +156,7 @@ struct ControlPanelView: View {
     @ViewBuilder
     private var heroBadge: some View {
         let _ = liveTick
-        if controller.isRunning, case .none = activePause {
+        if controller.isRunning, activePause == nil {
             LBPill(text: "\(Int(cm.framesPerSecond.rounded())) fps", tone: .success, size: .sm)
         } else {
             LBPill(text: "Idle", tone: .neutral, size: .sm)
@@ -174,8 +174,9 @@ struct ControlPanelView: View {
 
     private var quickStats: some View {
         let _ = liveTick
-        let fps = cm.framesPerSecond
-        let frameCost = fps > 0.001 ? String(format: "%.1f ms", 1000.0 / fps) : "—"
+        let frameCost = cm.renderMilliseconds > 0.001
+            ? String(format: "%.1f ms", cm.renderMilliseconds)
+            : "—"
         return HStack(spacing: 8) {
             quickTile(label: "Regions", value: "\(controller.regionCount)", tone: Theme.success)
             quickTile(label: "Live now", value: "\(cm.currentPatches.count)", tone: Theme.info)

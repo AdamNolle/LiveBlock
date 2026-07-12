@@ -60,7 +60,7 @@ ort = { version = "=2.0.0-rc.4", default-features = false, features = ["load-dyn
 ort-sys = "=2.0.0-rc.4"
 
 # Wayland portal client (xdg-desktop-portal) — for screencast + global shortcuts.
-ashpd = { version = "0.9", features = ["tokio"] }
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
 zbus = "4"
 pipewire = "0.8"
 

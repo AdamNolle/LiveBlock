@@ -58,9 +58,17 @@ tools/runs/
 tools/datasets/
 tools/wandb/
 
-# Local model backups
+# Local model backups and experimental training weights
 *.mlpackage.bak/
 *.pt.bak
+/weights/
+/*.pt
+
+# Local coding-agent state (never product source)
+/.pi-subagents/
+/.ralph/
+/.serena/
+/AGENTS.md
 
 # Rust (when core/ exists)
 core/target/

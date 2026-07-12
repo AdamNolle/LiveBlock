@@ -33,6 +33,9 @@ final class TrainingController: ObservableObject {
     @Published private(set) var lastSuccessAt: Date? = nil
     @Published private(set) var lastError: String? = nil
     @Published private(set) var datasetPath: URL? = nil
+    /// Most recent exported candidate. Candidates are never auto-installed;
+    /// schema-5 verification must produce a passing report first.
+    @Published private(set) var candidateModelPath: URL? = nil
     /// Mirror of `tools/.venv` presence — drives the dashboard's
     /// "Install training environment" precondition card.
     @Published private(set) var venvInstalled: Bool = false
@@ -206,7 +209,8 @@ final class TrainingController: ObservableObject {
     }
 
     private func runFullPipeline(epochs: Int, imgsz: Int, batch: Int) async {
-        appendLog("=== Training pipeline started \(Date()) ===")
+        let pipelineStartedAt = Date()
+        appendLog("=== Training pipeline started \(pipelineStartedAt) ===")
 
         guard FileManager.default.fileExists(atPath: venvPython.path) else {
             failWith("tools/.venv missing — run `tools/setup_env.sh` first.")
@@ -254,67 +258,86 @@ final class TrainingController: ObservableObject {
                    dataYaml.path,
                    "--epochs", String(epochs),
                    "--imgsz", String(imgsz),
-                   "--batch", String(batch),
-                   "--install"]
+                   "--batch", String(batch)]
         )
 
         if trainResult.exitCode == 0 {
-            do {
-                // Copy the freshly trained model into Application Support so the
-                // running app picks it up without a relaunch.
-                try installFreshlyTrainedModel()
-                // Tell VisionProcessor to drop its cached model — next inference
-                // will reload from the runtime dir we just populated.
-                onModelInstalled?()
-                lastSuccessAt = Date()
-                state = .finished(success: true, message: "Trained model installed. Detection updated.")
-                appendLog("=== Pipeline OK \(Date()) ===")
-            } catch {
-                failWith("Training finished, but model installation failed: \(error.localizedDescription)")
+            guard let candidate = newestCoreMLCandidate(modifiedAfter: pipelineStartedAt) else {
+                failWith("Training finished, but no exported CoreML candidate was found.")
+                return
             }
+            candidateModelPath = candidate
+            lastSuccessAt = Date()
+            state = .finished(
+                success: true,
+                message: "Candidate exported. It was not installed; schema-5 verification is required."
+            )
+            appendLog("Candidate only (not installed): \(candidate.path)")
+            appendLog("=== Pipeline OK \(Date()) ===")
         } else {
             failWith("Training pipeline failed (exit \(trainResult.exitCode)). See log.")
         }
     }
 
-    /// Copy the trained `.mlpackage` into Application Support so the running
-    /// VisionProcessor finds it before falling back to the bundled model.
-    private func installFreshlyTrainedModel() throws {
-        let fm = FileManager.default
-        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+    /// Install only through the fingerprint-bound verifier. A report picker can
+    /// call this after an external/human-reviewed schema-5 run succeeds.
+    func installVerifiedModel(reportURL: URL) {
+        guard !isBusy else { return }
+        state = .installing
+        Task {
+            let installer = repoRoot.appendingPathComponent("tools/install_verified_model.py")
+            let destination = runtimeModelDestination()
+            do {
+                try FileManager.default.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+            } catch {
+                failWith("Could not create the runtime model directory: \(error.localizedDescription)")
+                return
+            }
+            let result = await runProcessCapturingOutput(
+                url: venvPython,
+                args: [installer.path, "--report", reportURL.path,
+                       "--destination", destination.path]
+            )
+            if result.exitCode == 0 {
+                onModelInstalled?()
+                state = .finished(success: true,
+                                  message: "Verified model installed atomically.")
+                appendLog("Verified model installed: \(destination.path)")
+            } else {
+                failWith("Verified installation failed (exit \(result.exitCode)).")
+            }
+        }
+    }
+
+    private func runtimeModelDestination() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support")
-        let modelDir = support.appendingPathComponent("LiveBlock/models", isDirectory: true)
-        try fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        return support.appendingPathComponent("LiveBlock/models/liveblock-detector.mlpackage")
+    }
 
-        // The trainer writes new weights into `Sources/liveblock-detector.mlpackage`
-        // in the repo. Copy that into the runtime dir so SCStream-driven
-        // inference picks it up immediately.
-        let src = repoRoot.appendingPathComponent("Sources/liveblock-detector.mlpackage")
-        guard fm.fileExists(atPath: src.path) else {
-            throw NSError(domain: "TrainingController", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "Trained model not found at \(src.path)"
-            ])
+    private func newestCoreMLCandidate(modifiedAfter cutoff: Date) -> URL? {
+        let runs = repoRoot.appendingPathComponent("tools/runs", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: runs,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+        var candidates: [(URL, Date)] = []
+        for case let url as URL in enumerator where url.pathExtension == "mlpackage" {
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
+            if values?.isDirectory == true,
+               let modified = values?.contentModificationDate,
+               modified >= cutoff.addingTimeInterval(-1) {
+                candidates.append((url, modified))
+                enumerator.skipDescendants()
+            }
         }
-        let dst = modelDir.appendingPathComponent("liveblock-detector.mlpackage")
-        let staged = modelDir.appendingPathComponent("liveblock-detector.staged-\(UUID().uuidString).mlpackage")
-        defer { try? fm.removeItem(at: staged) }
-        try fm.copyItem(at: src, to: staged)
-        guard fm.fileExists(atPath: staged.appendingPathComponent("Manifest.json").path) else {
-            throw NSError(domain: "TrainingController", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "Staged CoreML package is missing Manifest.json"
-            ])
-        }
-        if fm.fileExists(atPath: dst.path) {
-            _ = try fm.replaceItemAt(dst, withItemAt: staged)
-        } else {
-            try fm.moveItem(at: staged, to: dst)
-        }
-        let staleCompiled = modelDir.appendingPathComponent("liveblock-detector.mlmodelc")
-        if fm.fileExists(atPath: staleCompiled.path) {
-            try fm.removeItem(at: staleCompiled)
-        }
-        appendLog("Hot-reloaded model into \(dst.path)")
+        return candidates.max(by: { $0.1 < $1.1 })?.0
     }
 
     private func failWith(_ message: String) {

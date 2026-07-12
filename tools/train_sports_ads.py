@@ -2,15 +2,14 @@
 """Reproducible small-object training profile for sports sponsorship ads.
 
 This profile emphasizes tiny, rotated, perspective-skewed logos found on
-jerseys, helmets, race-car liveries, and venue boards. It never installs a model
-unless --install is explicitly supplied; promotion still requires eval gates.
+jerseys, helmets, race-car liveries, and venue boards. It exports candidates
+only; installation requires a complete passing schema-5 promotion report.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import platform
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,8 +40,10 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--name", default=None)
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--install", action="store_true")
+    parser.add_argument("--install", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.install:
+        parser.error("direct installation is disabled; run verify_promotion.py and install_verified_model.py")
 
     from ultralytics import YOLO
     import torch
@@ -105,12 +106,7 @@ def main() -> int:
         raise SystemExit(f"training completed without weights in {run_dir / 'weights'}")
     print(f"candidate weights: {weights}")
 
-    if args.install:
-        export = ROOT / "tools" / "export_to_coreml.py"
-        subprocess.run([
-            sys.executable, str(export), "--weights", str(weights),
-            "--imgsz", str(args.imgsz), "--install",
-        ], check=True)
+    print(f"Candidate only (not installed): {weights}")
     return 0
 
 

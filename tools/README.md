@@ -99,18 +99,23 @@ The fastest way to a working logo detector. You skip training entirely.
      "Logos" / "Brand Detection" — most projects let you download YOLOv8
      weights directly.
 2. Save the file somewhere local (e.g. `~/Downloads/logos-yolov8n.pt`).
-3. Convert + install:
+3. Export a candidate:
    ```bash
    tools/.venv/bin/python tools/export_to_coreml.py \
-       ~/Downloads/logos-yolov8n.pt --install
+       ~/Downloads/logos-yolov8n.pt
    ```
-4. Rebuild:
+4. Evaluate it with `tools/verify_promotion.py`. Only a complete passing
+   schema-5 report may be installed:
    ```bash
+   tools/.venv/bin/python tools/install_verified_model.py \
+       --report tools/runs/promotion-gate-current.json \
+       --destination Sources/liveblock-detector.mlpackage
    ./run.sh --clean
    ```
 
-The app now uses the new model. Toggle Detection in the menu bar to see it
-fire. Check Console.app for "VisionProcessor: loaded yolov8n CoreML model."
+Community weights are untrusted candidates until their license, taxonomy,
+quality, preservation behavior, parity, latency, and artifact fingerprints all
+pass the same promotion policy as locally trained weights.
 
 ---
 
@@ -158,12 +163,12 @@ tools/.venv/bin/python tools/train_logos.py \
     --data path/to/data.yaml \
     --epochs 50 \
     --imgsz 640 \
-    --device auto \
-    --install
+    --device auto
 ```
 
 `--device auto` picks `mps` on Apple Silicon, `cuda` on Nvidia, else `cpu`.
-`--install` automatically replaces the bundled model on success.
+Training exports a candidate only. Verify and install it using the schema-5
+commands above; direct `--install` paths fail closed.
 
 What you'll see while training:
 - Epoch progress with mAP@50, mAP@50-95, train loss, val loss.

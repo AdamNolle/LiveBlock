@@ -22,3 +22,6 @@ thiserror = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 parking_lot = "0.12"
 async-trait = "0.1"
+base64 = "0.22"
+ed25519-dalek = "2"
+sha2 = "0.10"

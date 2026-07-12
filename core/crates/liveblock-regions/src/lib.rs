@@ -1,8 +1,8 @@
 //! Normalized regions for LiveBlock.
 //!
-//! Pure-Rust port of `Sources/RegionStore.swift`. The on-disk JSON format is
-//! byte-compatible with the Swift version: pretty-printed with 2-space
-//! indentation and sorted keys, so existing user data on macOS keeps working.
+//! Pure-Rust port of `Sources/RegionStore.swift`. Schema 1 wraps regions in a
+//! versioned envelope. Legacy unversioned arrays are migrated atomically;
+//! unknown future versions fail closed instead of being treated as empty data.
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,8 @@ pub enum RegionError {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("unsupported regions schema version {found}; current version is {current}")]
+    UnsupportedSchema { found: u32, current: u32 },
 }
 
 /// A rectangle in normalized [0..1] coordinates with origin at top-left.
@@ -73,11 +75,20 @@ impl NormalizedRegion {
     }
 }
 
+pub const REGIONS_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegionDocument {
+    schema_version: u32,
+    regions: Vec<NormalizedRegion>,
+}
+
 /// Thread-safe persistent store of user-drawn regions.
 ///
-/// On disk the regions are written as a JSON array, pretty-printed with 2-space
-/// indentation and sorted keys, matching `JSONEncoder.outputFormatting =
-/// [.prettyPrinted, .sortedKeys]` in the Swift implementation.
+/// Schema 1 is `{ "regions": [...], "schemaVersion": 1 }`, pretty-printed
+/// with sorted keys. The legacy top-level array is accepted once and rewritten
+/// atomically to schema 1.
 #[derive(Debug)]
 pub struct RegionStore {
     inner: Mutex<Vec<NormalizedRegion>>,
@@ -98,22 +109,39 @@ impl RegionStore {
     /// empty.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, RegionError> {
         let path = path.as_ref().to_path_buf();
-        let regions = match fs::read(&path) {
-            Ok(bytes) if bytes.is_empty() => Vec::new(),
+        let (regions, migrate_legacy) = match fs::read(&path) {
+            Ok(bytes) if bytes.is_empty() => (Vec::new(), false),
             Ok(bytes) => {
-                // Surface parse errors instead of silently nuking user data.
-                // If the file is malformed (truncated mid-write, manual edit,
-                // version skew), the caller decides whether to back up or abort.
-                serde_json::from_slice::<Vec<NormalizedRegion>>(&bytes)
-                    .map_err(RegionError::Json)?
+                // Parse as Value first so an unknown envelope cannot fall
+                // through to a legacy shape or silently erase user data.
+                let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                if value.is_array() {
+                    (
+                        serde_json::from_value::<Vec<NormalizedRegion>>(value)?,
+                        true,
+                    )
+                } else {
+                    let document: RegionDocument = serde_json::from_value(value)?;
+                    if document.schema_version != REGIONS_SCHEMA_VERSION {
+                        return Err(RegionError::UnsupportedSchema {
+                            found: document.schema_version,
+                            current: REGIONS_SCHEMA_VERSION,
+                        });
+                    }
+                    (document.regions, false)
+                }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
             Err(e) => return Err(RegionError::Io(e)),
         };
-        Ok(Self {
-            inner: Mutex::new(regions),
+        let store = Self {
+            inner: Mutex::new(regions.clone()),
             path: Some(path),
-        })
+        };
+        if migrate_legacy {
+            store.persist(&regions)?;
+        }
+        Ok(store)
     }
 
     /// Snapshot of the current regions.
@@ -196,12 +224,18 @@ impl RegionStore {
             })
             .collect();
 
-        let bytes = pretty_two_space(&serde_json::Value::Array(
-            array
-                .into_iter()
-                .map(serde_json::Value::from_iter)
-                .collect(),
-        ))?;
+        let mut document: BTreeMap<&'static str, serde_json::Value> = BTreeMap::new();
+        document.insert(
+            "regions",
+            serde_json::Value::Array(
+                array
+                    .into_iter()
+                    .map(serde_json::Value::from_iter)
+                    .collect(),
+            ),
+        );
+        document.insert("schemaVersion", serde_json::json!(REGIONS_SCHEMA_VERSION));
+        let bytes = pretty_two_space(&serde_json::Value::from_iter(document))?;
 
         // Atomic write via a unique tmp file (process+nanos suffix) so two
         // writers can't clobber each other's tmp. The tmp lives in the same
@@ -240,6 +274,17 @@ fn pretty_two_space(value: &serde_json::Value) -> Result<Vec<u8>, RegionError> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn published_schema_matches_runtime_version() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../contracts/regions.schema.json"))
+                .unwrap();
+        assert_eq!(
+            schema["properties"]["schemaVersion"]["const"],
+            REGIONS_SCHEMA_VERSION
+        );
+    }
 
     #[test]
     fn clamps_out_of_range_inputs() {
@@ -299,8 +344,39 @@ mod tests {
         let x_pos = on_disk.find("\"x\"").unwrap();
         let y_pos = on_disk.find("\"y\"").unwrap();
         assert!(h_pos < id_pos && id_pos < w_pos && w_pos < x_pos && x_pos < y_pos);
-        // 2-space indent
-        assert!(on_disk.contains("\n    \"height\""));
+        // 2-space indent at each envelope/array/object level.
+        assert!(on_disk.contains("\n      \"height\""));
+        assert!(on_disk.contains("\n  \"schemaVersion\": 1"));
+    }
+
+    #[test]
+    fn legacy_array_is_migrated_to_schema_one() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("regions.json");
+        std::fs::write(
+            &path,
+            r#"[{"id":"00000000-0000-0000-0000-000000000000","x":0.1,"y":0.2,"width":0.3,"height":0.4}]"#,
+        )
+        .unwrap();
+        let store = RegionStore::open(&path).unwrap();
+        assert_eq!(store.current().len(), 1);
+        let migrated = std::fs::read_to_string(path).unwrap();
+        assert!(migrated.contains("\"schemaVersion\": 1"));
+        assert!(migrated.contains("\"regions\""));
+    }
+
+    #[test]
+    fn future_schema_is_rejected_without_rewrite() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("regions.json");
+        let original = r#"{"schemaVersion":99,"regions":[]}"#;
+        std::fs::write(&path, original).unwrap();
+        let error = RegionStore::open(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            RegionError::UnsupportedSchema { found: 99, .. }
+        ));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]

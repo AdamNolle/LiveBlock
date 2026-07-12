@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
 
+pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
+
+fn current_settings_schema() -> u32 {
+    SETTINGS_SCHEMA_VERSION
+}
+
 /// Global detector tuning. Defined here (not in `liveblock-core`) so the leaf
 /// `liveblock-config` crate has no upward dependency on core; `liveblock-core`
 /// re-exports this type to avoid a `core <-> config` cycle.
@@ -62,6 +68,8 @@ pub struct ClassRule {
 pub struct DetectionSettings {
     pub classes: Vec<ClassRule>,
     pub global: CoordinatorConfig,
+    #[serde(rename = "schemaVersion", default = "current_settings_schema")]
+    pub schema_version: u32,
     pub vocabulary_version: u32,
 }
 
@@ -70,6 +78,7 @@ impl Default for DetectionSettings {
         Self {
             global: CoordinatorConfig::default(),
             classes: Vec::new(),
+            schema_version: SETTINGS_SCHEMA_VERSION,
             vocabulary_version: 1,
         }
     }
@@ -113,16 +122,34 @@ impl SettingsStore {
     /// silently discarding user data.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let path = path.as_ref().to_path_buf();
-        let settings = match fs::read(&path) {
-            Ok(bytes) if bytes.is_empty() => DetectionSettings::default(),
-            Ok(bytes) => serde_json::from_slice::<DetectionSettings>(&bytes)?,
-            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => DetectionSettings::default(),
+        let (settings, migrate_legacy) = match fs::read(&path) {
+            Ok(bytes) if bytes.is_empty() => (DetectionSettings::default(), false),
+            Ok(bytes) => {
+                let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                let had_schema = value.get("schemaVersion").is_some();
+                let settings: DetectionSettings = serde_json::from_value(value)?;
+                if settings.schema_version != SETTINGS_SCHEMA_VERSION {
+                    return Err(ConfigError::UnsupportedSchema {
+                        document: "settings",
+                        found: settings.schema_version,
+                        current: SETTINGS_SCHEMA_VERSION,
+                    });
+                }
+                (settings, !had_schema)
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (DetectionSettings::default(), false)
+            }
             Err(e) => return Err(ConfigError::Io(e.to_string())),
         };
-        Ok(Self {
+        let store = Self {
             inner: Mutex::new(settings),
             path: Some(path),
-        })
+        };
+        if migrate_legacy {
+            store.persist()?;
+        }
+        Ok(store)
     }
 
     /// Snapshot of the current settings.
@@ -213,6 +240,17 @@ impl SettingsStore {
 mod tests {
     use super::*;
     #[test]
+    fn published_schema_matches_runtime_version() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../contracts/settings.schema.json"))
+                .unwrap();
+        assert_eq!(
+            schema["properties"]["schemaVersion"]["const"],
+            SETTINGS_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
     fn effective_threshold_prefers_class_override() {
         let s = DetectionSettings {
             global: CoordinatorConfig {
@@ -232,6 +270,7 @@ mod tests {
                     score_threshold: None,
                 },
             ],
+            schema_version: SETTINGS_SCHEMA_VERSION,
             vocabulary_version: 1,
         };
         assert_eq!(s.effective_threshold(1), 0.6);
@@ -248,6 +287,36 @@ mod tests {
         store.persist().unwrap();
         let json = std::fs::read_to_string(&path).unwrap();
         assert!(json.contains("\"score_threshold\": 0.7"));
+        assert!(json.contains("\"schemaVersion\": 1"));
         assert!(json.starts_with("{\n  \"classes\":")); // sorted, 2-space
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_settings_are_migrated_and_future_versions_rejected() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("lbcfg-schema-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("detection-settings.json");
+        let legacy = r#"{"classes":[],"global":{"detect_every":4,"iou_threshold":0.45,"score_threshold":0.25},"vocabulary_version":1}"#;
+        std::fs::write(&path, legacy).unwrap();
+        let store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.current().schema_version, SETTINGS_SCHEMA_VERSION);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"schemaVersion\": 1"));
+
+        let future = r#"{"classes":[],"global":{"detect_every":4,"iou_threshold":0.45,"score_threshold":0.25},"schemaVersion":99,"vocabulary_version":1}"#;
+        std::fs::write(&path, future).unwrap();
+        let error = SettingsStore::open(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::UnsupportedSchema { found: 99, .. }
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), future);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

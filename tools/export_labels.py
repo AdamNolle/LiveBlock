@@ -29,6 +29,17 @@ from typing import List, Tuple
 
 HOME = Path.home()
 DEFAULT_ROOT = HOME / "Library" / "Application Support" / "LiveBlock" / "training"
+LABEL_SCHEMA_VERSION = 1
+
+
+def validate_label_document(label_doc: dict) -> None:
+    version = label_doc.get("schemaVersion", 1)  # legacy sidecars are version 0→1
+    if type(version) is not int or version != LABEL_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported label schema {version}; expected {LABEL_SCHEMA_VERSION}"
+        )
+    if not isinstance(label_doc.get("boxes"), list):
+        raise ValueError("label document boxes must be an array")
 
 
 def discover(root: Path) -> List[Tuple[Path, Path]]:
@@ -47,6 +58,7 @@ def discover(root: Path) -> List[Tuple[Path, Path]]:
 
 def to_yolo_lines(label_doc: dict, *, class_id: int = 0) -> List[str]:
     """Convert in-app label JSON to YOLO format lines."""
+    validate_label_document(label_doc)
     lines = []
     for box in label_doc.get("boxes", []):
         # YOLO uses center coords, normalized [0..1].
@@ -90,6 +102,10 @@ def main() -> int:
         except json.JSONDecodeError as e:
             print(f"Warning: couldn't parse {json_path}: {e}", file=sys.stderr)
             continue
+        try:
+            validate_label_document(doc)
+        except ValueError as e:
+            sys.exit(f"Refusing incompatible label document {json_path}: {e}")
         if not doc.get("boxes") and not args.include_empty:
             skipped_empty += 1
             continue

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveblock.local/contracts/regions.schema.json",
+  "title": "LiveBlock Regions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "regions"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "x", "y", "width", "height"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "x": { "type": "number", "minimum": 0, "maximum": 1 },
+          "y": { "type": "number", "minimum": 0, "maximum": 1 },
+          "width": { "type": "number", "minimum": 0, "maximum": 1 },
+          "height": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  }
+}

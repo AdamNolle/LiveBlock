@@ -15,7 +15,9 @@
 
 use super::{CaptureSource, FrameView};
 use anyhow::{anyhow, Context, Result};
-use ashpd::desktop::screencast::{CursorMode, PersistMode, Screencast, SourceType};
+use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
+use ashpd::desktop::PersistMode;
+use ashpd::WindowIdentifier;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,7 +52,7 @@ impl WaylandCapture {
             .context("select_sources")?;
 
         let response = proxy
-            .start(&session, None)
+            .start(&session, &WindowIdentifier::default())
             .await
             .context("start")?
             .response()

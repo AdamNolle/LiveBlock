@@ -81,7 +81,19 @@
       import { lb } from "./ipc.ts";
 
       document.getElementById("logo").appendChild(logo({ size: 32, radius: 8 }));
-      document.getElementById("powerToggle").appendChild(toggle({ value: false, accent: "success", onChange: (on) => on ? lb.startCapture() : lb.stopCapture() }));
+      let selectedMonitorId = null;
+      document.getElementById("powerToggle").appendChild(toggle({
+        value: false,
+        accent: "success",
+        onChange: async (on) => {
+          if (on) {
+            if (!selectedMonitorId) throw new Error("No capture monitor is available");
+            await lb.startCapture(selectedMonitorId);
+          } else {
+            await lb.stopCapture();
+          }
+        },
+      }));
       document.getElementById("appToggle").appendChild(toggle({ value: true, accent: "block" }));
 
       document.getElementById("blockBtn").addEventListener("click", () => lb.showWindow("editor"));
@@ -91,6 +103,10 @@
       // Refresh stats periodically
       async function refresh() {
         try {
+          if (!selectedMonitorId) {
+            const monitors = await lb.listMonitors();
+            selectedMonitorId = monitors.find((monitor) => monitor.isPrimary)?.id ?? monitors[0]?.id ?? null;
+          }
           const regions = await lb.listRegions();
           document.getElementById("statRegions").textContent = String(regions.length);
           document.getElementById("status").textContent = `Active · ${regions.length} region${regions.length === 1 ? "" : "s"}`;

@@ -59,6 +59,11 @@ mod ffi {
     }
 
     extern "Rust" {
+        fn macos_capabilities_json() -> String;
+        fn desktop_behavior_contract_json() -> String;
+    }
+
+    extern "Rust" {
         type VocabularyHandle;
 
         #[swift_bridge(init)]
@@ -76,6 +81,22 @@ mod ffi {
 
         fn to_json(self: &VocabularyHandle) -> String;
     }
+}
+
+fn macos_capabilities_json() -> String {
+    let profile = liveblock_config::DesktopCapabilityProfile::macos();
+    if profile.validate().is_err() {
+        return String::new();
+    }
+    serde_json::to_string(&profile).unwrap_or_default()
+}
+
+fn desktop_behavior_contract_json() -> String {
+    let contract = liveblock_config::DesktopBehaviorContract::default();
+    if contract.validate().is_err() {
+        return String::new();
+    }
+    serde_json::to_string(&contract).unwrap_or_default()
 }
 
 pub struct RegionStoreHandle {
@@ -293,6 +314,19 @@ fn vocabulary_open(path: String) -> VocabularyHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_contracts_bridge_as_valid_json() {
+        let capabilities: serde_json::Value =
+            serde_json::from_str(&macos_capabilities_json()).unwrap();
+        assert_eq!(capabilities["platform"], "macos");
+        assert_eq!(capabilities["localFrameProcessing"], true);
+        assert_eq!(capabilities["releaseReady"], false);
+        let behavior: serde_json::Value =
+            serde_json::from_str(&desktop_behavior_contract_json()).unwrap();
+        assert_eq!(behavior["runtimeClasses"][0], "Logo");
+        assert_eq!(behavior["panicClearsCaptureIntent"], true);
+    }
 
     #[test]
     fn add_then_count() {

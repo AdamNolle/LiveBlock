@@ -1,8 +1,14 @@
+pub mod desktop_contract;
 pub mod embeddings;
 pub mod model_manifest;
 pub mod settings;
 pub mod vocabulary;
 
+pub use desktop_contract::{
+    developer_training_runtime_available, DesktopAction, DesktopBehaviorContract,
+    DesktopCapabilityProfile, DesktopPlatform, HotkeyContract, SupportMode,
+    DESKTOP_CONTRACT_VERSION,
+};
 pub use embeddings::ClassEmbeddings;
 pub use model_manifest::{
     artifact_sha256, install_verified_artifact, verifying_key_from_base64, ArtifactFormat,

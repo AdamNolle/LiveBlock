@@ -230,6 +230,7 @@ LiveBlock/
 ## Documentation
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — system design and migration phases.
+- [`docs/DESKTOP_RELEASE_MATRIX.md`](docs/DESKTOP_RELEASE_MATRIX.md) — supported desktop tiers and measurable release gates.
 - [`ASSESSMENT.md`](ASSESSMENT.md) — standing audit and prioritized roadmap.
 - [`AI.md`](AI.md) — guide for AI agents working on this codebase.
 - [`tools/README.md`](tools/README.md) — training-pipeline walkthrough.

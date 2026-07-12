@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TrainingDashboardView: View {
     @ObservedObject var controller: AppController
@@ -305,6 +306,9 @@ struct TrainingDashboardView: View {
                 stepper("Img sz", value: $imgszField, range: 320...1280, step: 32)
             }
             actionRow
+            if let candidate = training.candidateModelPath {
+                verifiedCandidateRow(candidate)
+            }
             if case .training(let p) = training.state {
                 progressRow(progress: p)
             }
@@ -360,6 +364,39 @@ struct TrainingDashboardView: View {
                 controller.showLabelingWindow()
             }
         }
+    }
+
+    private func verifiedCandidateRow(_ candidate: URL) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.shield")
+                .foregroundStyle(Theme.warn)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Candidate exported — not installed")
+                    .font(Theme.ui(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.ink1)
+                Text(candidate.path)
+                    .font(Theme.mono(size: 10))
+                    .foregroundStyle(Theme.ink3)
+                    .lineLimit(1)
+            }
+            Spacer()
+            LBButton(title: "Install passing report…", variant: .outline, size: .sm,
+                     systemIcon: "lock.shield") {
+                choosePassingReport()
+            }
+        }
+        .padding(12)
+        .lbCard(Theme.surface2, radius: Theme.Radius.r3, stroke: Theme.warn.opacity(0.35))
+    }
+
+    private func choosePassingReport() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a passing schema-5 promotion report"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        training.installVerifiedModel(reportURL: url)
     }
 
     @ViewBuilder
@@ -422,9 +459,9 @@ struct TrainingDashboardView: View {
             if line.hasPrefix("=== Training pipeline started") { out.append("Started training pipeline.") }
             else if line.hasPrefix("=== Installing training environment") { out.append("Installing Python + ultralytics\u{2026}") }
             else if line.hasPrefix("=== Environment installed OK") { out.append("Training environment ready.") }
-            else if line.hasPrefix("=== Pipeline OK") { out.append("Training complete and model installed.") }
+            else if line.hasPrefix("=== Pipeline OK") { out.append("Training complete; candidate awaits verification.") }
             else if line.hasPrefix("FAILED") { out.append(line) }
-            else if line.contains("Hot-reloaded model") { out.append("New model loaded into the running app.") }
+            else if line.contains("Verified model installed") { out.append("Passing verified model installed atomically.") }
         }
         // Add the latest epoch summary if we have one.
         if case .training(let p) = training.state, p.totalEpochs > 0 {

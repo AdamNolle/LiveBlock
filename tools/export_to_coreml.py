@@ -3,14 +3,12 @@
 
   Usage:
     tools/.venv/bin/python tools/export_to_coreml.py path/to/best.pt
-    tools/.venv/bin/python tools/export_to_coreml.py path/to/best.pt --install
     tools/.venv/bin/python tools/export_to_coreml.py path/to/best.pt --no-int8
     tools/.venv/bin/python tools/export_to_coreml.py path/to/best.pt --format onnx
 
-The exported artifact is written next to the .pt by ultralytics. For CoreML it
-is optionally copied (with a `.bak` of the previous one) to
-`Sources/liveblock-detector.mlpackage` so the app picks it up after the next
-build.
+The exported artifact is written next to the .pt by ultralytics. Export never
+installs: replacement requires a complete passing schema-5 report consumed by
+`tools/install_verified_model.py`.
 
 The heavy `ultralytics` import is deliberately LAZY (inside ``export``) so this
 module imports on Python 3.13 without the venv / torch installed.
@@ -18,13 +16,8 @@ module imports on Python 3.13 without the venv / torch installed.
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-TARGET_PATH = REPO_ROOT / "Sources" / "liveblock-detector.mlpackage"
-
 
 def export(pt_path: Path, *, fmt: str = "coreml", int8: bool = True,
            nms: bool = True) -> Path:
@@ -64,24 +57,11 @@ def export(pt_path: Path, *, fmt: str = "coreml", int8: bool = True,
 
 
 def install_into_repo(mlpackage: Path) -> None:
-    if mlpackage.resolve() == TARGET_PATH.resolve():
-        print(f"✓ Already at {TARGET_PATH}")
-        return
-
-    if TARGET_PATH.exists():
-        backup = TARGET_PATH.with_suffix(".mlpackage.bak")
-        if backup.exists():
-            shutil.rmtree(backup)
-        print(f"→ Backing up existing model → {backup}")
-        shutil.move(str(TARGET_PATH), str(backup))
-
-    TARGET_PATH.parent.mkdir(parents=True, exist_ok=True)
-    print(f"→ Copying {mlpackage} → {TARGET_PATH}")
-    if mlpackage.is_dir():
-        shutil.copytree(mlpackage, TARGET_PATH)
-    else:
-        shutil.copy2(mlpackage, TARGET_PATH)
-    print(f"✓ Installed. Now: ./run.sh --clean")
+    """Retained as a fail-closed compatibility shim for older callers."""
+    raise RuntimeError(
+        f"direct installation of {mlpackage} is disabled; "
+        "run verify_promotion.py and install_verified_model.py"
+    )
 
 
 def main() -> int:
@@ -90,20 +70,16 @@ def main() -> int:
     parser.add_argument("pt", type=Path, help="Path to a YOLO .pt")
     parser.add_argument("--format", choices=["coreml", "onnx"], default="coreml",
                         help="Export format (default: coreml)")
-    parser.add_argument("--install", action="store_true",
-                        help="Replace Sources/liveblock-detector.mlpackage with "
-                             "the export (CoreML only)")
+    parser.add_argument("--install", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-int8", dest="int8", action="store_false", default=True,
                         help="Disable INT8 weight quantization (CoreML only)")
     parser.add_argument("--no-nms", dest="nms", action="store_false", default=True,
                         help="Disable embedded NMS (then app code must do post-NMS)")
     args = parser.parse_args()
 
-    out = export(args.pt, fmt=args.format, int8=args.int8, nms=args.nms)
     if args.install:
-        if args.format != "coreml":
-            sys.exit("--install only applies to the CoreML .mlpackage export")
-        install_into_repo(out)
+        parser.error("direct installation is disabled; run verify_promotion.py and install_verified_model.py")
+    export(args.pt, fmt=args.format, int8=args.int8, nms=args.nms)
     return 0
 
 

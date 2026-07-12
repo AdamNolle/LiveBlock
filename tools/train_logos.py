@@ -4,14 +4,15 @@
   Usage:
     tools/.venv/bin/python tools/train_logos.py --data path/to/data.yaml
     tools/.venv/bin/python tools/train_logos.py --data data.yaml --epochs 50 --imgsz 640 --device mps
-    tools/.venv/bin/python tools/train_logos.py --data data.yaml --model yolov8s.pt --install
+    tools/.venv/bin/python tools/train_logos.py --data data.yaml --model yolov8s.pt
 
 `data.yaml` is a standard ultralytics YOLO data config — see tools/README.md
 for sources and the expected directory layout.
 
 Auto-detects the best available device:  mps  →  cuda  →  cpu.
 After training finishes, exports the best checkpoint to a CoreML .mlpackage.
-With `--install`, drops it into Sources/yolov8n.mlpackage (with a .bak).
+Direct installation is intentionally prohibited; use verify_promotion.py and
+install_verified_model.py with a complete passing schema-5 report.
 """
 from __future__ import annotations
 
@@ -92,10 +93,12 @@ def main() -> int:
     parser.add_argument("--patience", type=int, default=15,
                         help="Early-stopping patience (0 disables)")
     parser.add_argument("--install", action="store_true",
-                        help="After export, install into Sources/yolov8n.mlpackage")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--no-int8", dest="int8", action="store_false", default=True)
     parser.add_argument("--no-nms", dest="nms", action="store_false", default=True)
     args = parser.parse_args()
+    if args.install:
+        parser.error("direct installation is disabled; run verify_promotion.py and install_verified_model.py")
 
     best_pt = train(args)
 
@@ -103,11 +106,10 @@ def main() -> int:
     print()
     print("→ Exporting to CoreML…")
     sys.path.insert(0, str(REPO_ROOT / "tools"))
-    from export_to_coreml import export, install_into_repo  # type: ignore
+    from export_to_coreml import export  # type: ignore
 
     mlpackage = export(best_pt, int8=args.int8, nms=args.nms)
-    if args.install:
-        install_into_repo(mlpackage)
+    print(f"Candidate only (not installed): {mlpackage}")
     print()
     print("✓ Done.")
     return 0

@@ -637,6 +637,8 @@ struct SettingsView: View {
                 infoRow(label: "Version", value: "\(version) (build \(build))", divider: false)
                 infoRow(label: "Detector", value: "liveblock-detector CoreML (open-vocabulary — blocks logos & ads with no training)", divider: true)
                 infoRow(label: "Capture", value: "Apple ScreenCaptureKit at 60 Hz", divider: true)
+                infoRow(label: "Screen access", value: controller.screenRecordingGranted ? "Granted" : "Not granted", divider: true)
+                infoRow(label: "Accessibility", value: controller.accessibilityGranted ? "Granted" : "Not granted", divider: true)
                 infoRow(label: "Inpainter", value: "Mirror-blend (sample band, reflect across edge, cross-fade)", divider: true)
                 infoRow(label: "Network", value: "None. Zero outbound traffic. No telemetry.", divider: true)
             }
@@ -655,6 +657,11 @@ struct SettingsView: View {
                          systemIcon: "sparkles") {
                     controller.restartOnboarding()
                 }
+                LBButton(title: "Export diagnostics…", variant: .outline, size: .md,
+                         systemIcon: "stethoscope") {
+                    controller.exportDiagnostics()
+                }
+                .help("Saves frame-free diagnostics; no apps, windows, labels, regions, or user paths")
                 Spacer()
             }
         }

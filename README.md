@@ -184,8 +184,9 @@ size, and contrast. To personalize it for the ads you actually see:
 3. Open the Label window and drag a rectangle around each ad. Yellow
    proposals from the bundled model help — accept or reject with one click.
 4. Open the Training Dashboard, click Train Now.
-5. A macOS notification fires when training completes; the new model is
-   auto-installed.
+5. A macOS notification fires when training completes. The export remains a
+   candidate until a complete schema-5 promotion report passes; the app never
+   auto-installs unverified weights.
 
 End-to-end docs in [`tools/README.md`](tools/README.md). Realistic timing
 on M-series Macs: 30 minutes to 3 hours, depending on dataset size.
@@ -216,7 +217,7 @@ LiveBlock/
 | Windows port         | Experimental scaffold. WGC/DirectML code exists, but the locked dependency graph and callback integration are not yet release-verified. |
 | Linux port           | Experimental scaffold. Capture, global hotkeys, and click-through overlays still contain platform TODOs and are not functional end to end. |
 | Bundled detector     | Experimental YOLO-World model for Logo / Ad banner / Sponsored; fixture-based precision/recall validation is still required. |
-| Code signing         | Stable self-signed identity via `tools/setup_codesign_identity.sh`. Developer ID + notarization is a separate task. |
+| Code signing         | Stable self-signed development identity plus a fail-closed Developer ID/notarization runbook in [`docs/MACOS_RELEASE.md`](docs/MACOS_RELEASE.md); production execution still requires genuine credentials. |
 
 ## Roadmap
 

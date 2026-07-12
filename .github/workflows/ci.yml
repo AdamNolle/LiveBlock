@@ -1,0 +1,139 @@
+name: Desktop CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, feat/desktop-release-completion]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shared-contracts:
+    name: Shared Rust, Python, and frontend contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: platform/_shared-frontend/package-lock.json
+      - name: Rust formatting
+        run: cargo fmt --manifest-path core/Cargo.toml --all -- --check
+      - name: Shared Rust tests
+        run: cargo test --manifest-path core/Cargo.toml --workspace --lib
+      - name: Label and desktop adapter contract tests
+        env:
+          PYTHONPATH: tools
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts
+      - name: Release profile stays inference-only
+        run: cargo test --manifest-path core/Cargo.toml -p liveblock-config --lib --release build_profile_controls_training_runtime
+      - name: Parse published JSON Schemas
+        run: |
+          python -m json.tool contracts/regions.schema.json >/dev/null
+          python -m json.tool contracts/labels.schema.json >/dev/null
+          python -m json.tool contracts/settings.schema.json >/dev/null
+          python -m json.tool contracts/model-manifest.schema.json >/dev/null
+      - name: Shared frontend build
+        working-directory: platform/_shared-frontend
+        run: npm ci && npm run build
+
+  macos:
+    name: macOS 26 build and tests
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate, test Debug, and compile Release
+        run: |
+          xcodegen generate
+          xcodebuild -project LiveBlock.xcodeproj -scheme LiveBlock \
+            -destination 'platform=macOS' \
+            -derivedDataPath tools/runs/ci-macos-derived \
+            test CODE_SIGNING_ALLOWED=NO
+          xcodebuild -project LiveBlock.xcodeproj -scheme LiveBlock \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath tools/runs/ci-macos-derived \
+            build CODE_SIGNING_ALLOWED=NO
+      - name: Preserve macOS test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-xcresult
+          path: tools/runs/ci-macos-derived/Logs/Test/*.xcresult
+          if-no-files-found: warn
+
+  windows:
+    name: Windows 11 compile
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/windows
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: platform/_shared-frontend/package-lock.json
+      - name: Build shared frontend
+        working-directory: platform/_shared-frontend
+        run: npm ci && npm run build
+      - name: Compile Windows adapter (debug and release, all targets)
+        run: |
+          cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets
+          cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets --release
+
+  linux:
+    name: Ubuntu Linux compile
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/linux
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: platform/_shared-frontend/package-lock.json
+      - name: Install Tauri, PipeWire, Wayland, and X11 headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libx11-xcb-dev libxcomposite-dev libxfixes-dev libxinerama-dev \
+            libxkbcommon-dev libwayland-dev
+      - name: Build shared frontend
+        working-directory: platform/_shared-frontend
+        run: npm ci && npm run build
+      - name: Compile Linux adapter (debug and release, all targets)
+        run: |
+          cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets
+          cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release

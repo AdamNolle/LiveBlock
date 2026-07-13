@@ -59,6 +59,14 @@ export interface LabelDocument {
   labeledAt: string;
 }
 
+export interface ModelUpdateReceipt {
+  modelId: string;
+  modelVersion: string;
+  releaseSequence: number;
+  artifactSha256: string;
+  previousArtifactPreserved: boolean;
+}
+
 export interface DesktopCapabilityProfile {
   contractVersion: number;
   platform: string;
@@ -109,6 +117,11 @@ export const lb = {
   startTraining: (epochs: number, batch: number, imgsz: number) =>
     invoke<void>("start_training", { epochs, batch, imgsz }),
   cancelTraining: () => invoke<void>("cancel_training"),
+
+  // Authenticated ONNX updates. The backend owns the destination, keyring,
+  // rollback state, production load validation, and atomic activation.
+  installModelUpdate: (manifestPath: string, artifactPath: string) =>
+    invoke<ModelUpdateReceipt>("install_model_update", { manifestPath, artifactPath }),
 
   // Window lifecycle.
   showWindow: (label: string) => invoke<void>("show_window", { label }),

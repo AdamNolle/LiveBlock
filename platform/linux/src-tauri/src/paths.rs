@@ -31,6 +31,16 @@ pub fn regions_path() -> PathBuf {
     data_root().join("regions.json")
 }
 
+pub fn models_dir() -> PathBuf {
+    data_root().join("models")
+}
+pub fn active_model_path() -> PathBuf {
+    models_dir().join("liveblock-detector.onnx")
+}
+pub fn model_update_state_path() -> PathBuf {
+    models_dir().join("update-state.json")
+}
+
 pub fn training_root() -> PathBuf {
     data_root().join("training")
 }
@@ -50,6 +60,7 @@ pub fn trash_dir() -> PathBuf {
 pub fn ensure_directories() -> Result<()> {
     for dir in [
         data_root(),
+        models_dir(),
         training_root(),
         screenshots_dir(),
         labels_dir(),

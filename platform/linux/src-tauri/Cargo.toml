@@ -24,6 +24,7 @@ tensorrt = ["ort/tensorrt"]
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
+liveblock-config = { path = "../../../core/crates/liveblock-config" }
 
 [dependencies]
 # Shared core (data types + JSON format identical to macOS / Windows).

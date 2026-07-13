@@ -53,6 +53,7 @@ jobs:
           python -m json.tool contracts/settings.schema.json >/dev/null
           python -m json.tool contracts/model-manifest.schema.json >/dev/null
           python -m json.tool contracts/model-keyring.schema.json >/dev/null
+          python -m json.tool contracts/model-update-state.schema.json >/dev/null
       - name: Shared frontend build
         working-directory: platform/_shared-frontend
         run: npm ci && npm run build
@@ -112,6 +113,11 @@ jobs:
       - name: Compile Windows adapter (debug and release, all targets)
         run: |
           cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets
+          $output = cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets --release 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0 -or $output -notmatch "release packages require a nonempty") {
+            throw "empty production model keyring was not rejected as expected`n$output"
+          }
+          $env:LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING = "1"
           cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets --release
 
   linux:
@@ -142,4 +148,9 @@ jobs:
       - name: Compile Linux adapter (debug and release, all targets)
         run: |
           cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets
-          cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release
+          if cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release 2>empty-ring.log; then
+            echo "empty production model keyring was accepted" >&2
+            exit 1
+          fi
+          grep -q "release packages require a nonempty" empty-ring.log
+          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release

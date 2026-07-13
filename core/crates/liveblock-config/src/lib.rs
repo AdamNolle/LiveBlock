@@ -1,6 +1,7 @@
 pub mod desktop_contract;
 pub mod embeddings;
 pub mod model_manifest;
+pub mod model_update;
 pub mod settings;
 pub mod vocabulary;
 
@@ -13,6 +14,10 @@ pub use embeddings::ClassEmbeddings;
 pub use model_manifest::{
     artifact_sha256, install_verified_artifact, verifying_key_from_base64, ArtifactFormat,
     ModelManifest, ModelManifestError, TrustedKeyring, TrustedKeyringDocument, TrustedPublicKey,
+};
+pub use model_update::{
+    apply_verified_file_update, recover_verified_active_manifest, ModelUpdateError,
+    ModelUpdateReceipt, ModelUpdateState, MODEL_UPDATE_STATE_SCHEMA_VERSION,
 };
 pub use settings::{ClassRule, CoordinatorConfig, DetectionSettings, SettingsStore};
 pub use vocabulary::{VocabClass, Vocabulary};

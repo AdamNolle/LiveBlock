@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use crate::capture_policy::{
     enqueue_latest, CaptureTelemetry, CaptureTelemetrySnapshot, ConsecutiveFailureGate,
 };
-use windows::core::{IInspectable, Interface};
+use windows::core::{AgileReference, IInspectable, Interface};
 use windows::Foundation::{EventRegistrationToken, TypedEventHandler};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
@@ -162,7 +162,7 @@ impl CaptureSession {
             .context("spawn frame processor")?;
 
         let device_clone = d3d_device.clone();
-        let direct3d_clone = direct3d_device.clone();
+        let direct3d_agile = AgileReference::new(&direct3d_device)?;
         let context_clone = d3d_context.clone();
         let latest_clone = latest.clone();
         let last_emit_clone = last_emit.clone();
@@ -196,8 +196,9 @@ impl CaptureSession {
 
                     let next_size = pack_size(content_size.Width, content_size.Height);
                     if current_size_clone.load(Ordering::Acquire) != next_size {
+                        let resize_device: IDirect3DDevice = direct3d_agile.resolve()?;
                         pool_ref.Recreate(
-                            &direct3d_clone,
+                            &resize_device,
                             DirectXPixelFormat::B8G8R8A8UIntNormalized,
                             2,
                             content_size,

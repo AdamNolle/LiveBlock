@@ -66,7 +66,7 @@ class DesktopAdapterContractTests(unittest.TestCase):
             self.assertIn("fn get_capture_telemetry", source)
         self.assertIn('emit("capture-state-changed", true)', WINDOWS)
         self.assertIn('emit("capture-state-changed", true)', LINUX)
-        self.assertIn("open_capture().await", LINUX)
+        self.assertIn("source = open_capture()", LINUX)
         self.assertIn("portal-selection", LINUX)
         self.assertIn("x11-root", LINUX)
         self.assertIn("startCapture: (monitorId: string)", IPC)

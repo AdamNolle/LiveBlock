@@ -5,15 +5,15 @@
 //!
 //! X11: classic `XGrabKey` on the root window.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
 
 #[derive(Debug, Clone, Copy)]
 pub enum HotkeyAction {
-    ToggleCapture,        // Ctrl+Shift+L
-    ToggleEditor,         // Ctrl+Shift+B
-    CaptureForLabeling,   // Ctrl+Shift+S
-    PanicDisable,         // Ctrl+Shift+Alt+Period
+    ToggleCapture,      // Ctrl+Shift+L
+    ToggleEditor,       // Ctrl+Shift+B
+    CaptureForLabeling, // Ctrl+Shift+S
+    PanicDisable,       // Ctrl+Shift+Alt+Period
 }
 
 pub fn install(tx: Sender<HotkeyAction>) -> Result<()> {
@@ -26,17 +26,23 @@ pub fn install(tx: Sender<HotkeyAction>) -> Result<()> {
 }
 
 fn install_wayland_portal(_tx: Sender<HotkeyAction>) -> Result<()> {
-    // TODO(linux-port): use ashpd::desktop::global_shortcuts::GlobalShortcuts.
-    // Steps:
-    //   1. create_session (persist_mode = ExplicitlyRevoked)
-    //   2. bind_shortcuts(["toggle_capture" → Ctrl+Shift+L, ...])
-    //   3. listen on the .activated signal; map shortcut id → HotkeyAction
-    //      and forward via tx.
-    Ok(())
+    Err(anyhow!(
+        "Wayland GlobalShortcuts portal integration is not implemented"
+    ))
 }
 
 fn install_x11_grab(_tx: Sender<HotkeyAction>) -> Result<()> {
-    // TODO(linux-port): open an x11rb connection, call grab_key on the root
-    // window for each combo. Spawn a thread to pump XEvents and dispatch.
-    Ok(())
+    Err(anyhow!("X11 global hotkey integration is not implemented"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unfinished_installers_fail_instead_of_claiming_registration() {
+        let (sender, _) = crossbeam_channel::bounded(1);
+        assert!(install_wayland_portal(sender.clone()).is_err());
+        assert!(install_x11_grab(sender).is_err());
+    }
 }

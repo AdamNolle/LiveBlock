@@ -19,6 +19,20 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+struct PipeWireWorkerGuard {
+    stop_requested: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for PipeWireWorkerGuard {
+    fn drop(&mut self) {
+        self.stop_requested.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub struct WaylandCapture {
     pub node_id: u32,
     _portal: Screencast<'static>,
@@ -83,17 +97,23 @@ impl WaylandCapture {
                 )
             })
             .context("spawn PipeWire capture thread")?;
+        let mut worker_guard = PipeWireWorkerGuard {
+            stop_requested: stop_requested.clone(),
+            worker: Some(worker),
+        };
         let setup =
             tokio::task::spawn_blocking(move || setup_rx.recv_timeout(Duration::from_secs(10)))
                 .await
                 .context("join PipeWire setup waiter")?
                 .map_err(|_| anyhow!("PipeWire setup timed out"))?;
         if let Err(error) = setup {
-            stop_requested.store(true, Ordering::Release);
-            let _ = worker.join();
             let _ = session.close().await;
             return Err(anyhow!(error));
         }
+        let worker = worker_guard
+            .worker
+            .take()
+            .ok_or_else(|| anyhow!("PipeWire worker disappeared during setup"))?;
 
         Ok(Self {
             node_id,

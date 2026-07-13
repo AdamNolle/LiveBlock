@@ -78,15 +78,11 @@ cargo tauri build         # produces .deb, .rpm, .AppImage in src-tauri/target/r
 
 ## Hotkeys
 
-| Combo                  | Action                                      |
-|------------------------|---------------------------------------------|
-| Ctrl + Shift + L       | Toggle capture                              |
-| Ctrl + Shift + B       | Toggle region editor                        |
-| Ctrl + Shift + S       | Capture screenshot for labeling             |
-| Ctrl + Shift + Alt + . | Panic disable (close editor, show panel)   |
-
-System-wide hotkeys on Wayland require granting access via the GlobalShortcuts
-portal (one-time prompt). On X11 they use XGrabKey on the root.
+**Global hotkeys are not available in the current Linux build.** The capability
+profile reports `globalHotkeys: false`, and the backend installers fail rather
+than claiming registration. In particular, do not rely on the planned
+Ctrl+Shift+Alt+Period panic shortcut; stop capture from the control panel.
+Wayland GlobalShortcuts portal and X11 `XGrabKey` integration remain open.
 
 ## Data layout
 

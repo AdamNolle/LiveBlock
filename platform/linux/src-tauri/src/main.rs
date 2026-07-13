@@ -77,22 +77,23 @@ async fn start_capture(
         previous.stop_requested.store(true, Ordering::Release);
         let _ = previous.task.await;
     }
-    let source = open_capture().await.map_err(|error| error.to_string())?;
     state.capture_telemetry.reset();
     state.latest_frame.store(None);
-    state.capture_running.store(true, Ordering::SeqCst);
+    state.capture_running.store(false, Ordering::SeqCst);
     let stop_requested = Arc::new(AtomicBool::new(false));
     let task_stop = stop_requested.clone();
     let task_state = state.inner().clone();
     let task_app = app.clone();
     let task = tokio::spawn(async move {
-        run_capture_loop(source, task_stop, task_state, task_app).await;
+        run_capture_task(task_stop, task_state, task_app).await;
     });
     *lifecycle = Some(CaptureRuntime {
         stop_requested,
         task,
     });
-    let _ = app.emit("capture-state-changed", true);
+    // The task emits `true` only after receiving and validating a first frame.
+    // Portal selection can therefore be cancelled by stop/panic without this
+    // command holding the lifecycle mutex.
     Ok(())
 }
 
@@ -142,6 +143,27 @@ fn list_monitors() -> Vec<serde_json::Value> {
     }
 }
 
+async fn run_capture_task(
+    stop_requested: Arc<AtomicBool>,
+    state: Arc<AppState>,
+    app: AppHandle,
+) {
+    let source = tokio::select! {
+        source = open_capture() => match source {
+            Ok(source) => source,
+            Err(error) => {
+                let message = error.to_string();
+                tracing::error!("Linux capture startup failed: {message}");
+                let _ = app.emit("capture-runtime-error", message);
+                let _ = app.emit("capture-state-changed", false);
+                return;
+            }
+        },
+        _ = wait_for_stop(stop_requested.clone()) => return,
+    };
+    run_capture_loop(source, stop_requested, state, app).await;
+}
+
 async fn run_capture_loop(
     mut source: Box<dyn CaptureSource>,
     stop_requested: Arc<AtomicBool>,
@@ -154,6 +176,7 @@ async fn run_capture_loop(
         Vec::<DetBox>::new(),
     );
     let mut failure = None;
+    let mut announced_running = false;
     while !stop_requested.load(Ordering::Acquire) {
         let frame_result = tokio::select! {
             frame = source.next_frame() => Some(frame),
@@ -179,6 +202,11 @@ async fn run_capture_loop(
         }
         state.capture_telemetry.captured();
         state.capture_telemetry.set_dropped(source.dropped_frames());
+        if !announced_running {
+            announced_running = true;
+            state.capture_running.store(true, Ordering::SeqCst);
+            let _ = app.emit("capture-state-changed", true);
+        }
         state.latest_frame.store(Some(Arc::new(frame.clone())));
         frame_number = frame_number.wrapping_add(1);
 

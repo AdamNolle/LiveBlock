@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveblock.local/contracts/model-keyring.schema.json",
+  "title": "LiveBlock Trusted Model Signing Keys",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "keys"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "keys": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["keyId", "publicKeyBase64"],
+        "properties": {
+          "keyId": { "type": "string", "minLength": 1 },
+          "publicKeyBase64": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

@@ -5,6 +5,7 @@ torchvision>=0.17
 numpy>=1.26,<2.0
 pillow>=10.0
 pyyaml>=6.0
+cryptography>=45.0
 scikit-learn>=1.5,<=1.5.1  # coremltools 9 conversion API upper bound
 huggingface_hub>=0.24
 # Open-vocabulary build + ONNX export (Route A)

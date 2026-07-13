@@ -27,6 +27,12 @@ from pathlib import Path
 from PIL import Image, ImageStat
 import yaml
 
+from promotion_contract import (
+    REQUIRED_PROMOTION_NEGATIVE_PLACEMENTS,
+    REQUIRED_PROMOTION_PLACEMENTS,
+    REQUIRED_PROMOTION_PRESERVATION_KINDS,
+)
+
 CLASSES = {"Logo": 0, "Ad banner": 1, "Sponsored": 2}
 PRESERVATION_KINDS = {
     "team_name", "jersey_number", "vehicle_number", "team_crest", "manufacturer_badge",
@@ -37,15 +43,6 @@ PLACEMENT_KINDS = {
 ALLOWED_LICENSES = {
     "cc0", "public domain", "pd", "cc by 2.0", "cc by 3.0", "cc by 4.0", "mit",
 }
-REQUIRED_PROMOTION_PLACEMENTS = (
-    "car_livery", "jersey", "venue_board", "ordinary_screen", "broadcast_overlay",
-)
-REQUIRED_PROMOTION_PRESERVATION_KINDS = (
-    "team_name", "jersey_number", "vehicle_number", "team_crest", "manufacturer_badge",
-)
-REQUIRED_PROMOTION_NEGATIVE_PLACEMENTS = (
-    "ordinary_screen", "broadcast_overlay", "jersey",
-)
 
 
 def normalized_license(value: str) -> str:

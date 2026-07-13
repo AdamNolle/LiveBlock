@@ -67,6 +67,16 @@ export interface ModelUpdateReceipt {
   previousArtifactPreserved: boolean;
 }
 
+export interface CaptureTelemetry {
+  capturedFrames: number;
+  processedFrames: number;
+  droppedFrames: number;
+  copyErrors: number;
+  protectedFrames: number;
+  protectedContent: boolean;
+  lastFrameUnixMs: number;
+}
+
 export interface DesktopCapabilityProfile {
   contractVersion: number;
   platform: string;
@@ -89,6 +99,7 @@ export const lb = {
   getCapabilities: () => invoke<DesktopCapabilityProfile>("get_capabilities"),
   startCapture: (monitorId: string) => invoke<void>("start_capture", { monitorId }),
   stopCapture: () => invoke<void>("stop_capture"),
+  getCaptureTelemetry: () => invoke<CaptureTelemetry>("get_capture_telemetry"),
   setDetectionEnabled: (enabled: boolean) =>
     invoke<void>("set_detection_enabled", { enabled }),
   listMonitors: () => invoke<MonitorInfo[]>("list_monitors"),
@@ -136,4 +147,8 @@ export const events = {
     listen<NormalizedRegion[]>("regions-updated", (e) => cb(e.payload)),
   onCaptureState: (cb: (running: boolean) => void) =>
     listen<boolean>("capture-state-changed", (e) => cb(e.payload)),
+  onProtectedContent: (cb: (protectedContent: boolean) => void) =>
+    listen<boolean>("protected-content-changed", (e) => cb(e.payload)),
+  onCaptureError: (cb: (message: string) => void) =>
+    listen<string>("capture-runtime-error", (e) => cb(e.payload)),
 };

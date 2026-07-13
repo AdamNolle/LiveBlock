@@ -53,15 +53,25 @@ fn get_capabilities() -> Result<liveblock_config::DesktopCapabilityProfile, Stri
 
 // ---------- Capture / detection lifecycle ----------
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureTelemetrySnapshot {
+    captured_frames: u64,
+    processed_frames: u64,
+    dropped_frames: u64,
+    copy_errors: u64,
+    protected_frames: u64,
+    protected_content: bool,
+    last_frame_unix_ms: u64,
+}
+
 #[tauri::command]
 fn start_capture(
     _monitor_id: String,
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
+    _app: AppHandle,
+    _state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    state.capture_running.store(true, Ordering::SeqCst);
-    let _ = app.emit("capture-state-changed", true);
-    Ok(())
+    Err("Linux capture is unavailable in this build; PipeWire and X11 frame loops are not yet release-ready".into())
 }
 
 #[tauri::command]
@@ -69,6 +79,13 @@ fn stop_capture(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), S
     state.capture_running.store(false, Ordering::SeqCst);
     let _ = app.emit("capture-state-changed", false);
     Ok(())
+}
+
+#[tauri::command]
+fn get_capture_telemetry() -> CaptureTelemetrySnapshot {
+    // Linux capture telemetry remains zero until the PipeWire/X11 frame loops
+    // land; returning an explicit truthful snapshot preserves IPC parity.
+    CaptureTelemetrySnapshot::default()
 }
 
 #[tauri::command]
@@ -305,6 +322,7 @@ fn main() {
             get_capabilities,
             start_capture,
             stop_capture,
+            get_capture_telemetry,
             set_detection_enabled,
             list_monitors,
             list_regions,

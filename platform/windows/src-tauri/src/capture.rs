@@ -12,12 +12,20 @@
 
 use anyhow::{anyhow, Context, Result};
 use arc_swap::ArcSwapOption;
+use crossbeam_channel::{bounded, RecvTimeoutError};
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::capture_policy::{
+    enqueue_latest, CaptureTelemetry, CaptureTelemetrySnapshot, ConsecutiveFailureGate,
+};
 use windows::core::{IInspectable, Interface};
-use windows::Foundation::TypedEventHandler;
+use windows::Foundation::{EventRegistrationToken, TypedEventHandler};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
@@ -26,9 +34,9 @@ use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
@@ -45,6 +53,7 @@ pub struct FrameView {
 }
 
 pub type FrameCallback = Arc<dyn Fn(&FrameView) + Send + Sync + 'static>;
+pub type CaptureErrorCallback = Arc<dyn Fn(String) + Send + Sync + 'static>;
 
 pub struct CaptureSession {
     _item: GraphicsCaptureItem,
@@ -56,10 +65,20 @@ pub struct CaptureSession {
     pub latest: Arc<ArcSwapOption<FrameView>>,
     /// 30-Hz throttle; mirrors macOS `lastEmitClock`.
     last_emit: Arc<Mutex<Instant>>,
+    frame_token: EventRegistrationToken,
+    closed_token: EventRegistrationToken,
+    stop_worker: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+    telemetry: Arc<CaptureTelemetry>,
 }
 
 impl CaptureSession {
-    pub fn start(monitor: HMONITOR, on_frame: FrameCallback) -> Result<Self> {
+    pub fn start(
+        monitor: HMONITOR,
+        on_frame: FrameCallback,
+        on_error: CaptureErrorCallback,
+        telemetry: Arc<CaptureTelemetry>,
+    ) -> Result<Self> {
         if monitor.0.is_null() {
             return Err(anyhow!("invalid HMONITOR"));
         }
@@ -106,35 +125,107 @@ impl CaptureSession {
         )?;
         let session = pool.CreateCaptureSession(&item)?;
 
-        // 5. Frame arrived handler.
+        // 5. The WGC callback performs only the unavoidable GPU→CPU copy and
+        // newest-frame enqueue. Detection/inpainting runs on one worker so slow
+        // inference never stalls frame-pool delivery.
         let latest = Arc::new(ArcSwapOption::<FrameView>::from(None));
         let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
-        let on_frame_clone = on_frame.clone();
+        let stop_worker = Arc::new(AtomicBool::new(false));
+        let (frame_sender, frame_receiver) = bounded::<FrameView>(1);
+        let eviction_receiver = frame_receiver.clone();
+        let worker_stop = stop_worker.clone();
+        let worker_telemetry = telemetry.clone();
+        let worker_error = on_error.clone();
+        let worker = thread::Builder::new()
+            .name("liveblock-frame-processor".into())
+            .spawn(move || {
+                while !worker_stop.load(Ordering::Acquire) {
+                    match frame_receiver.recv_timeout(Duration::from_millis(100)) {
+                        Ok(frame) => {
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    on_frame(&frame)
+                                }));
+                            if result.is_err() {
+                                worker_error(
+                                    "frame processor panicked; capture stopped processing".into(),
+                                );
+                                break;
+                            }
+                            worker_telemetry.processed();
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            })
+            .context("spawn frame processor")?;
+
         let device_clone = d3d_device.clone();
+        let direct3d_clone = direct3d_device.clone();
         let context_clone = d3d_context.clone();
         let latest_clone = latest.clone();
         let last_emit_clone = last_emit.clone();
+        let telemetry_clone = telemetry.clone();
+        let error_clone = on_error.clone();
+        let failure_gate = Arc::new(Mutex::new(ConsecutiveFailureGate::default()));
+        let failure_gate_clone = failure_gate.clone();
+        let current_size = Arc::new(AtomicU64::new(pack_size(size.Width, size.Height)));
+        let current_size_clone = current_size.clone();
 
-        pool.FrameArrived(&TypedEventHandler::new(move |sender: &Option<Direct3D11CaptureFramePool>, _: &Option<IInspectable>| {
-            // SAFETY: closure runs on the WGC thread; D3D11 immediate context
-            // is single-threaded — we only touch it here. If we ever switch
-            // to multi-frame parallelism, switch to a deferred context.
-            if let Some(pool_ref) = sender {
-                if let Ok(frame) = pool_ref.TryGetNextFrame() {
-                    if let Ok(view) = process_frame(&device_clone, &context_clone, &frame) {
-                        latest_clone.store(Some(Arc::new(view.clone())));
-                        // Throttle emits to 30 Hz.
-                        let mut last = last_emit_clone.lock();
-                        if last.elapsed() >= Duration::from_millis(33) {
-                            *last = Instant::now();
-                            drop(last);
-                            on_frame_clone(&view);
-                        }
+        let frame_token = pool.FrameArrived(&TypedEventHandler::new(
+            move |sender: &Option<Direct3D11CaptureFramePool>, _: &Option<IInspectable>| {
+                // SAFETY: the immediate context is touched only by this free-threaded
+                // callback. The downstream worker receives packed CPU bytes.
+                let Some(pool_ref) = sender else {
+                    return Ok(());
+                };
+                let result = (|| -> Result<()> {
+                    let frame = pool_ref.TryGetNextFrame()?;
+                    telemetry_clone.captured();
+                    let mut last = last_emit_clone.lock();
+                    if last.elapsed() < Duration::from_millis(33) {
+                        return Ok(());
+                    }
+                    *last = Instant::now();
+                    drop(last);
+
+                    let content_size = frame.ContentSize()?;
+                    let view = process_frame(&device_clone, &context_clone, &frame)?;
+                    latest_clone.store(Some(Arc::new(view.clone())));
+
+                    let next_size = pack_size(content_size.Width, content_size.Height);
+                    if current_size_clone.load(Ordering::Acquire) != next_size {
+                        pool_ref.Recreate(
+                            &direct3d_clone,
+                            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                            2,
+                            content_size,
+                        )?;
+                        current_size_clone.store(next_size, Ordering::Release);
+                    }
+
+                    enqueue_latest(&frame_sender, &eviction_receiver, view, &telemetry_clone);
+                    failure_gate_clone.lock().success();
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    telemetry_clone.copy_error();
+                    if failure_gate_clone.lock().failure() {
+                        error_clone(format!("three consecutive capture-frame failures: {error}"));
                     }
                 }
-            }
-            Ok(())
-        }))?;
+                Ok(())
+            },
+        ))?;
+
+        let closed_error = on_error.clone();
+        let closed_token = item.Closed(&TypedEventHandler::new(
+            move |_: &Option<GraphicsCaptureItem>, _: &Option<IInspectable>| {
+                closed_error("selected display capture item closed".into());
+                Ok(())
+            },
+        ))?;
 
         session.StartCapture()?;
         Ok(Self {
@@ -145,6 +236,11 @@ impl CaptureSession {
             _d3d_context: d3d_context,
             latest,
             last_emit,
+            frame_token,
+            closed_token,
+            stop_worker,
+            worker: Some(worker),
+            telemetry,
         })
     }
 
@@ -152,9 +248,25 @@ impl CaptureSession {
         self.latest.load_full().map(|a| (*a).clone())
     }
 
-    pub fn stop(self) {
-        let _ = self.session.Close();
+    pub fn telemetry(&self) -> CaptureTelemetrySnapshot {
+        self.telemetry.snapshot()
     }
+
+    pub fn stop(mut self) {
+        self.stop_worker.store(true, Ordering::Release);
+        let _ = self._frame_pool.RemoveFrameArrived(self.frame_token);
+        let _ = self._item.RemoveClosed(self.closed_token);
+        let _ = self.session.Close();
+        let _ = self._frame_pool.Close();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        self.latest.store(None);
+    }
+}
+
+fn pack_size(width: i32, height: i32) -> u64 {
+    (width as u32 as u64) << 32 | height as u32 as u64
 }
 
 /// Copy WGC frame to a CPU-readable staging texture, map, and produce a packed
@@ -180,7 +292,10 @@ fn process_frame(
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Usage: D3D11_USAGE_STAGING,
         BindFlags: 0,
         CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,

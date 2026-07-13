@@ -43,7 +43,7 @@
         <span id="logo"></span>
         <div class="col">
           <div class="name">LiveBlocker</div>
-          <div class="meta"><span class="lb-dot success pulse"></span><span id="status">Active · 0 regions</span></div>
+          <div class="meta"><span id="statusDot" class="lb-dot"></span><span id="status">Stopped · 0 regions</span></div>
         </div>
         <span id="powerToggle"></span>
       </div>
@@ -56,7 +56,7 @@
       <div class="stats">
         <div class="stat block"><div class="v" id="statBlocked">0</div><div class="l">blocked today</div></div>
         <div class="stat train"><div class="v" id="statRegions">0</div><div class="l">active regions</div></div>
-        <div class="stat detect"><div class="v">2.1</div><div class="l">ms/frame</div></div>
+        <div class="stat detect"><div class="v" id="statDropped">0</div><div class="l">stale dropped</div></div>
       </div>
 
       <div class="lb-uppercase">This space</div>
@@ -78,38 +78,90 @@
 
     <script type="module">
       import { logo, toggle } from "./primitives.ts";
-      import { lb } from "./ipc.ts";
+      import { events, lb } from "./ipc.ts";
 
       document.getElementById("logo").appendChild(logo({ size: 32, radius: 8 }));
       let selectedMonitorId = null;
-      document.getElementById("powerToggle").appendChild(toggle({
+      let running = false;
+      let protectedContent = false;
+      let captureError = null;
+      let regionCount = 0;
+      const power = toggle({
         value: false,
         accent: "success",
         onChange: async (on) => {
-          if (on) {
-            if (!selectedMonitorId) throw new Error("No capture monitor is available");
-            await lb.startCapture(selectedMonitorId);
-          } else {
-            await lb.stopCapture();
+          try {
+            if (on) {
+              if (!selectedMonitorId) throw new Error("No capture monitor is available");
+              captureError = null;
+              await lb.startCapture(selectedMonitorId);
+            } else {
+              await lb.stopCapture();
+            }
+          } catch (error) {
+            power.dataset.on = String(running);
+            captureError = String(error);
+            renderStatus();
           }
         },
-      }));
+      });
+      document.getElementById("powerToggle").appendChild(power);
       document.getElementById("appToggle").appendChild(toggle({ value: true, accent: "block" }));
 
       document.getElementById("blockBtn").addEventListener("click", () => lb.showWindow("editor"));
       document.getElementById("trainBtn").addEventListener("click", () => lb.showWindow("training"));
       document.getElementById("prefsBtn").addEventListener("click", () => lb.showWindow("settings"));
 
-      // Refresh stats periodically
+      function renderStatus() {
+        const dot = document.getElementById("statusDot");
+        dot.className = "lb-dot";
+        let text;
+        if (captureError) {
+          dot.classList.add("warn");
+          text = "Capture error · restart required";
+        } else if (protectedContent) {
+          dot.classList.add("warn");
+          text = "Possible protected or unavailable content · overlays paused";
+        } else if (running) {
+          dot.classList.add("success", "pulse");
+          text = `Active · ${regionCount} region${regionCount === 1 ? "" : "s"}`;
+        } else {
+          text = `Stopped · ${regionCount} region${regionCount === 1 ? "" : "s"}`;
+        }
+        document.getElementById("status").textContent = text;
+      }
+
+      events.onCaptureState((value) => {
+        running = value;
+        power.dataset.on = String(value);
+        if (value) captureError = null;
+        renderStatus();
+      });
+      events.onProtectedContent((value) => {
+        protectedContent = value;
+        renderStatus();
+      });
+      events.onCaptureError((message) => {
+        captureError = message;
+        running = false;
+        power.dataset.on = "false";
+        renderStatus();
+      });
+
+      // Refresh counters periodically. Values come from native telemetry; no
+      // synthetic frame-time claim is shown.
       async function refresh() {
         try {
           if (!selectedMonitorId) {
             const monitors = await lb.listMonitors();
             selectedMonitorId = monitors.find((monitor) => monitor.isPrimary)?.id ?? monitors[0]?.id ?? null;
           }
-          const regions = await lb.listRegions();
-          document.getElementById("statRegions").textContent = String(regions.length);
-          document.getElementById("status").textContent = `Active · ${regions.length} region${regions.length === 1 ? "" : "s"}`;
+          const [regions, telemetry] = await Promise.all([lb.listRegions(), lb.getCaptureTelemetry()]);
+          regionCount = regions.length;
+          protectedContent = telemetry.protectedContent;
+          document.getElementById("statRegions").textContent = String(regionCount);
+          document.getElementById("statDropped").textContent = String(telemetry.droppedFrames);
+          renderStatus();
         } catch (_) { /* tauri not present in `vite preview` mode */ }
       }
       refresh();

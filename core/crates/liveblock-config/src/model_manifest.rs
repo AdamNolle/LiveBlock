@@ -304,27 +304,38 @@ pub fn install_verified_artifact(
     }
 
     let lock_path = canonical_parent.join(format!("{name}.update.lock"));
+    match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ModelManifestError::InstallCollision(lock_path));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ModelManifestError::Io(error)),
+    }
     let lock = fs::OpenOptions::new()
+        .read(true)
         .write(true)
-        .create_new(true)
-        .open(&lock_path)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                ModelManifestError::InstallCollision(lock_path.clone())
-            } else {
-                ModelManifestError::Io(error)
-            }
-        })?;
-    let _lock = InstallLock {
-        path: lock_path,
-        _file: lock,
-    };
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    fs2::FileExt::try_lock_exclusive(&lock).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            ModelManifestError::InstallCollision(lock_path.clone())
+        } else {
+            ModelManifestError::Io(error)
+        }
+    })?;
+    // Keep the regular marker and let the OS release the advisory lock on
+    // process death. Unlinking a live advisory lock would create inode races.
+    let _lock = InstallLock { _file: lock };
 
     let nonce = uuid::Uuid::new_v4();
     let staging = canonical_parent.join(format!(".{name}.{nonce}.installing"));
     let backup = canonical_parent.join(format!("{name}.pre-update"));
-    if backup.exists() {
-        return Err(ModelManifestError::InstallCollision(backup));
+    match fs::symlink_metadata(&backup) {
+        Ok(_) => return Err(ModelManifestError::InstallCollision(backup)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ModelManifestError::Io(error)),
     }
 
     let result = (|| {
@@ -406,14 +417,7 @@ fn collect_files(
 }
 
 struct InstallLock {
-    path: PathBuf,
     _file: fs::File,
-}
-
-impl Drop for InstallLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
 }
 
 fn copy_file_create_new(source: &Path, destination: &Path) -> Result<(), ModelManifestError> {
@@ -663,11 +667,20 @@ mod tests {
         let signing = SigningKey::from_bytes(&[12; 32]);
         let manifest = signed_manifest(&source, &signing);
         let keys = BTreeMap::from([("release-2026".into(), signing.verifying_key())]);
-        fs::write(dir.path().join("active.onnx.update.lock"), b"held").unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.path().join("active.onnx.update.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
         assert!(matches!(
             install_verified_artifact(&manifest, &source, &destination, &keys),
             Err(ModelManifestError::InstallCollision(_))
         ));
+        drop(lock);
+        install_verified_artifact(&manifest, &source, &destination, &keys).unwrap();
 
         let package = dir.path().join("candidate.mlpackage");
         fs::create_dir(&package).unwrap();

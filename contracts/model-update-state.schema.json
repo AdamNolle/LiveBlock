@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveblock.local/contracts/model-update-state.schema.json",
+  "title": "LiveBlock authenticated model update state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "highestReleaseSequence", "acceptedManifest"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "highestReleaseSequence": { "type": "integer", "minimum": 1 },
+    "acceptedManifest": {
+      "allOf": [
+        { "$ref": "model-manifest.schema.json" },
+        {
+          "type": "object",
+          "properties": { "artifactFormat": { "const": "onnx" } },
+          "required": ["artifactFormat"]
+        }
+      ]
+    }
+  }
+}

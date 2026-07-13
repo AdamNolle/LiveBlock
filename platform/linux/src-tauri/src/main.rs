@@ -11,6 +11,7 @@ mod detection;
 mod hotkeys;
 mod inpainting;
 mod labels;
+mod model_updates;
 mod overlay;
 mod paths;
 mod regions;
@@ -198,7 +199,9 @@ fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    LabelDocument::load(&path).map(Some).map_err(|e| e.to_string())
+    LabelDocument::load(&path)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -268,6 +271,26 @@ fn main() {
         .plugin(tauri_plugin_os::init())
         .manage(app_state)
         .setup(|app| {
+            let detector = match model_updates::load_authenticated_active(app.handle()) {
+                Ok(Some(detector)) => {
+                    tracing::info!("loaded authenticated detector update");
+                    Some(detector)
+                }
+                Ok(None) => match model_updates::load_authenticated_packaged(app.handle()) {
+                    Ok(detector) => detector,
+                    Err(error) => {
+                        tracing::error!("authenticated packaged detector rejected: {error}");
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::error!("authenticated detector update rejected: {error}");
+                    None
+                }
+            };
+            if let (Some(detector), Some(state)) = (detector, app.try_state::<Arc<AppState>>()) {
+                *state.detector.lock() = Some(detector);
+            }
             if let Err(e) = overlay::install_click_through(overlay::pick_strategy()) {
                 tracing::warn!("overlay install failed: {e}");
             }
@@ -297,6 +320,7 @@ fn main() {
             discard_screenshot,
             start_training,
             cancel_training,
+            model_updates::install_model_update,
             show_window,
             hide_window,
             quit,

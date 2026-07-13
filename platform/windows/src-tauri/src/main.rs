@@ -7,6 +7,7 @@ mod detection;
 mod hotkeys;
 mod inpainting;
 mod labels;
+mod model_updates;
 mod overlay;
 mod paths;
 mod regions;
@@ -97,6 +98,7 @@ fn main() {
             discard_screenshot,
             start_training,
             cancel_training,
+            model_updates::install_model_update,
             quit,
             show_window,
             hide_window,
@@ -130,28 +132,31 @@ fn apply_window_styles(app: &AppHandle) {
 fn apply_window_styles(_: &AppHandle) {}
 
 fn try_load_default_detector(app: &AppHandle) {
-    let candidate: PathBuf = match app.path().resolve(
-        "liveblock-detector.onnx",
-        tauri::path::BaseDirectory::Resource,
-    ) {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    if !candidate.exists() {
-        tracing::warn!(
-            "detector model not found at {} — drop liveblock-detector.onnx into resources/",
-            candidate.display()
-        );
-        return;
-    }
-    match Detector::load(&candidate) {
-        Ok(d) => {
-            if let Some(state) = app.try_state::<AppState>() {
-                *state.detector.lock() = Some(d);
-                tracing::info!("loaded detector from {}", candidate.display());
-            }
+    let detector = match model_updates::load_authenticated_active(app) {
+        Ok(Some(detector)) => {
+            tracing::info!("loaded authenticated detector update");
+            Some(detector)
         }
-        Err(e) => tracing::error!("detector load failed: {e}"),
+        Ok(None) => match model_updates::load_authenticated_packaged(app) {
+            Ok(detector) => detector,
+            Err(error) => {
+                tracing::error!("authenticated packaged detector rejected: {error}");
+                return;
+            }
+        },
+        Err(error) => {
+            // Accepted update state exists but failed recovery/authentication.
+            // Never roll the running detector back to a packaged baseline.
+            tracing::error!("authenticated detector update rejected: {error}");
+            return;
+        }
+    };
+    if let Some(detector) = detector {
+        if let Some(state) = app.try_state::<AppState>() {
+            *state.detector.lock() = Some(detector);
+        }
+    } else {
+        tracing::warn!("no authenticated detector is installed or packaged");
     }
 }
 

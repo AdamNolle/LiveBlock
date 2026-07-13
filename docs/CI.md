@@ -2,8 +2,9 @@
 
 `.github/workflows/ci.yml` runs four independent jobs:
 
-- shared Rust contracts/tests, schema parsing, Python adapter-contract tests,
-  release-profile training gate, and frontend build;
+- shared Rust contracts/tests, schema parsing, Python adapter and
+  promotion-bound model-signing tests, release-profile training gate, and
+  frontend build (using only a deterministic test key, never a release key);
 - unsigned macOS 26 Debug tests plus a Release compile, with the `.xcresult` uploaded;
 - Windows debug/release all-target compilation on a Windows runner; and
 - Linux debug/release all-target compilation after installing Tauri,

@@ -21,6 +21,8 @@ from sign_model_manifest import (
     _create_manifest_from_attested_report,
     _signing_bytes,
 )
+from validate_model_keyring import validate as validate_keyring
+from verify_signed_model_bundle import verify as verify_signed_bundle
 from promotion_contract import (
     GATE_SCHEMA,
     REQUIRED_MAX_FALSE_POSITIVES,
@@ -248,6 +250,68 @@ class ModelDistributionTests(unittest.TestCase):
     def test_report_validator_rejects_unknown_artifact_selector(self):
         with self.assertRaisesRegex(ValueError, "unsupported promotion artifact"):
             validate_promotion_report(self.report_path, "candidate_model")
+
+    def test_signed_coreml_bundle_verifier_binds_compiled_artifact(self):
+        bundle = self.root / "release-bundle"
+        artifact = bundle / "liveblock-detector.mlmodelc"
+        artifact.mkdir(parents=True)
+        (artifact / "model.bin").write_bytes(b"compiled")
+        private_key = Ed25519PrivateKey.from_private_bytes(self.seed)
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+        (bundle / "trusted-model-keys.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "keys": [{"keyId": "release", "publicKeyBase64": base64.b64encode(public_key).decode()}],
+        }))
+        manifest = {
+            "schemaVersion": MODEL_MANIFEST_SCHEMA,
+            "modelId": "liveblock-detector",
+            "modelVersion": "1.0.0",
+            "artifactFormat": "coreml",
+            "artifactHashAlgorithm": "sha256-file-or-tree-v1",
+            "artifactSha256": artifact_sha256(artifact),
+            "runtimeClasses": ["Logo", "Ad banner", "Sponsored"],
+            "inputWidth": 640,
+            "inputHeight": 640,
+            "nmsEmbedded": True,
+            "releaseSequence": 1,
+            "promotionGateSchema": GATE_SCHEMA,
+            "promotionReportSha256": "ab" * 32,
+            "createdAt": "2026-07-13T00:00:00Z",
+            "keyId": "release",
+            "signature": "",
+        }
+        manifest["signature"] = base64.b64encode(private_key.sign(_signing_bytes(manifest))).decode()
+        manifest_path = bundle / "liveblock-detector.manifest.json"
+        manifest_path.write_text(json.dumps(manifest))
+        self.assertEqual(verify_signed_bundle(bundle)["releaseSequence"], 1)
+        (artifact / "model.bin").write_bytes(b"tampered")
+        with self.assertRaisesRegex(ValueError, "fingerprint"):
+            verify_signed_bundle(bundle)
+
+    def test_release_keyring_validator_is_strict_and_empty_is_explicit(self):
+        keyring = self.root / "trusted-model-keys.json"
+        keyring.write_text(json.dumps({"schemaVersion": 1, "keys": []}))
+        with self.assertRaisesRegex(ValueError, "at least one key"):
+            validate_keyring(keyring)
+        validate_keyring(keyring, allow_empty=True)
+
+        public_key = Ed25519PrivateKey.from_private_bytes(self.seed).public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+        keyring.write_text(json.dumps({
+            "schemaVersion": 1,
+            "keys": [{"keyId": "release", "publicKeyBase64": base64.b64encode(public_key).decode()}],
+        }))
+        validate_keyring(keyring)
+        document = json.loads(keyring.read_text())
+        document["keys"][0]["extra"] = True
+        keyring.write_text(json.dumps(document))
+        with self.assertRaisesRegex(ValueError, "unknown or missing"):
+            validate_keyring(keyring)
 
 
 if __name__ == "__main__":

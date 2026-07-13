@@ -20,6 +20,8 @@ Execute requires:
   LB_DEVELOPER_ID_APPLICATION  Full Developer ID Application identity
   LB_TEAM_ID                   Apple Developer Team ID
   LB_NOTARY_PROFILE            notarytool keychain profile name
+  LB_MACOS_MODEL_BUNDLE_DIR    Protected directory containing the precompiled
+                               model, manifest, and trusted public keyring
 
 Optional:
   ALLOW_DIRTY=1                Permit an execute-mode build from a dirty tree
@@ -40,6 +42,19 @@ for tool in xcodegen xcodebuild xcrun codesign ditto shasum git; do
   command -v "$tool" >/dev/null || { echo "Missing required tool: $tool" >&2; exit 1; }
 done
 
+DEVELOPMENT_KEYRING="$ROOT/Sources/Resources/trusted-model-keys.json"
+RELEASE_MODEL_STAGING="$ROOT/Sources/Resources/release-liveblock-detector.mlmodelc"
+RELEASE_MANIFEST_STAGING="$ROOT/Sources/Resources/release-liveblock-detector.manifest.json"
+RELEASE_KEYRING_STAGING="$ROOT/Sources/Resources/release-trusted-model-keys.json"
+if [[ "$MODE" == execute ]]; then
+  [[ "${LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING:-0}" != 1 ]] || {
+    echo "The empty model-keyring override is forbidden for release execution." >&2
+    exit 1
+  }
+else
+  /usr/bin/python3 tools/validate_model_keyring.py --keyring "$DEVELOPMENT_KEYRING" --allow-empty
+fi
+
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/tools/runs/release-macos/$STAMP}"
 ARCHIVE="$OUTPUT_DIR/LiveBlock.xcarchive"
@@ -47,11 +62,6 @@ APP="$ARCHIVE/Products/Applications/LiveBlock.app"
 SUBMISSION_ZIP="$OUTPUT_DIR/LiveBlock-notary-submission.zip"
 FINAL_ZIP="$OUTPUT_DIR/LiveBlock-macOS-notarized.zip"
 NOTARY_JSON="$OUTPUT_DIR/notary-result.json"
-
-# Keep generated project metadata deterministic and prove Release settings load.
-xcodegen generate >/dev/null
-xcodebuild -project LiveBlock.xcodeproj -scheme LiveBlock -configuration Release \
-  -showBuildSettings CODE_SIGNING_ALLOWED=NO >/dev/null
 
 print_command() {
   printf '  '
@@ -69,9 +79,15 @@ archive_command=(
 )
 
 if [[ "$MODE" == dry-run ]]; then
+  # Keep generated project metadata deterministic and prove Release settings load.
+  xcodegen generate >/dev/null
+  xcodebuild -project LiveBlock.xcodeproj -scheme LiveBlock -configuration Release \
+    -showBuildSettings CODE_SIGNING_ALLOWED=NO >/dev/null
   cat <<EOF
 macOS release dry-run passed local preflight.
 No signing, keychain access, upload, or release artifact was performed.
+The committed development model keyring is allowed only for this dry run;
+execute mode requires a verified protected compiled-model bundle and nonempty ring.
 Planned output: $OUTPUT_DIR
 Planned commands:
 EOF
@@ -90,15 +106,51 @@ fi
 : "${LB_DEVELOPER_ID_APPLICATION:?Set LB_DEVELOPER_ID_APPLICATION for --execute}"
 : "${LB_TEAM_ID:?Set LB_TEAM_ID for --execute}"
 : "${LB_NOTARY_PROFILE:?Set LB_NOTARY_PROFILE for --execute}"
+: "${LB_MACOS_MODEL_BUNDLE_DIR:?Set LB_MACOS_MODEL_BUNDLE_DIR for --execute}"
 
 if [[ "${ALLOW_DIRTY:-0}" != 1 ]] && [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
   echo "Refusing release from a dirty tree, including untracked files (set ALLOW_DIRTY=1 to override)." >&2
   exit 1
 fi
 
+MODEL_INPUT="$(cd "$LB_MACOS_MODEL_BUNDLE_DIR" && pwd)"
+[[ "$MODEL_INPUT/liveblock-detector.mlmodelc" != "$RELEASE_MODEL_STAGING" ]] || {
+  echo "LB_MACOS_MODEL_BUNDLE_DIR must not be the internal staging location." >&2; exit 1;
+}
+[[ -d "$MODEL_INPUT/liveblock-detector.mlmodelc" ]] || {
+  echo "Missing precompiled liveblock-detector.mlmodelc in protected model bundle." >&2; exit 1;
+}
+[[ -f "$MODEL_INPUT/liveblock-detector.manifest.json" && ! -L "$MODEL_INPUT/liveblock-detector.manifest.json" ]] || {
+  echo "Missing regular liveblock-detector.manifest.json in protected model bundle." >&2; exit 1;
+}
+/usr/bin/python3 tools/validate_model_keyring.py --keyring "$MODEL_INPUT/trusted-model-keys.json"
+[[ -x "$ROOT/tools/.venv/bin/python" ]] || {
+  echo "Protected release verification requires tools/.venv; install tools/requirements.txt." >&2; exit 1;
+}
+PYTHONPATH=tools "$ROOT/tools/.venv/bin/python" tools/verify_signed_model_bundle.py --bundle "$MODEL_INPUT"
+rm -rf "$RELEASE_MODEL_STAGING"
+rm -f "$RELEASE_MANIFEST_STAGING" "$RELEASE_KEYRING_STAGING"
+cp -R "$MODEL_INPUT/liveblock-detector.mlmodelc" "$RELEASE_MODEL_STAGING"
+cp "$MODEL_INPUT/liveblock-detector.manifest.json" "$RELEASE_MANIFEST_STAGING"
+cp "$MODEL_INPUT/trusted-model-keys.json" "$RELEASE_KEYRING_STAGING"
+cleanup_release_model_staging() {
+  rm -rf "$RELEASE_MODEL_STAGING"
+  rm -f "$RELEASE_MANIFEST_STAGING" "$RELEASE_KEYRING_STAGING"
+}
+trap cleanup_release_model_staging EXIT
+
+xcodegen generate >/dev/null
+xcodebuild -project LiveBlock.xcodeproj -scheme LiveBlock -configuration Release \
+  -showBuildSettings CODE_SIGNING_ALLOWED=NO >/dev/null
 mkdir -p "$OUTPUT_DIR"
 "${archive_command[@]}"
 [[ -d "$APP" ]] || { echo "Archive did not contain $APP" >&2; exit 1; }
+APP_RESOURCES="$APP/Contents/Resources"
+[[ -d "$APP_RESOURCES/release-liveblock-detector.mlmodelc" \
+   && -f "$APP_RESOURCES/release-liveblock-detector.manifest.json" \
+   && -f "$APP_RESOURCES/release-trusted-model-keys.json" ]] || {
+  echo "Archive omitted authenticated production model resources." >&2; exit 1;
+}
 
 codesign --verify --deep --strict --verbose=2 "$APP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$SUBMISSION_ZIP"

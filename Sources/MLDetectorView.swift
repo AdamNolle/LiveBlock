@@ -68,6 +68,20 @@ struct MLDetectorView: View {
 
             Spacer(minLength: 8)
 
+            VStack(alignment: .trailing, spacing: 6) {
+                LBButton(title: controller.modelUpdateInProgress ? "Verifying…" : "Install signed update",
+                         variant: .outline, size: .md, systemIcon: "checkmark.shield") {
+                    controller.chooseAndInstallSignedModelUpdate()
+                }
+                .disabled(controller.modelUpdateInProgress)
+                if let status = controller.modelUpdateStatus {
+                    Text(status)
+                        .font(Theme.ui(size: 10))
+                        .foregroundStyle(Theme.ink3)
+                        .lineLimit(2)
+                        .frame(maxWidth: 240, alignment: .trailing)
+                }
+            }
             LBButton(title: "Train", variant: .outline, size: .md,
                      systemIcon: "sparkles") {
                 controller.showTrainingDashboard()

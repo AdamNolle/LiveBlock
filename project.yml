@@ -50,6 +50,29 @@ targets:
           ENABLE_HARDENED_RUNTIME: YES
           LIVEBLOCK_TRAINING_RUNTIME_ENABLED: NO
     preBuildScripts:
+      - name: Validate production model keyring
+        script: |
+          set -euo pipefail
+          if [[ "${CONFIGURATION}" == "Release" ]]; then
+            if [[ "${LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING:-0}" == "1" ]]; then
+              /usr/bin/python3 "${SRCROOT}/tools/validate_model_keyring.py" \
+                --keyring "${SRCROOT}/Sources/Resources/trusted-model-keys.json" --allow-empty
+            else
+              release_root="${SRCROOT}/Sources/Resources"
+              /usr/bin/python3 "${SRCROOT}/tools/validate_model_keyring.py" \
+                --keyring "${release_root}/release-trusted-model-keys.json"
+              [[ -d "${release_root}/release-liveblock-detector.mlmodelc" ]] || {
+                echo "Production Release requires precompiled release-liveblock-detector.mlmodelc" >&2; exit 1;
+              }
+              [[ -f "${release_root}/release-liveblock-detector.manifest.json" && ! -L "${release_root}/release-liveblock-detector.manifest.json" ]] || {
+                echo "Production Release requires regular release-liveblock-detector.manifest.json" >&2; exit 1;
+              }
+            fi
+          fi
+        inputFiles:
+          - $(SRCROOT)/Sources/Resources/trusted-model-keys.json
+          - $(SRCROOT)/tools/validate_model_keyring.py
+        basedOnDependencyAnalysis: false
       - name: Build liveblock-bridge (universal)
         script: |
           set -euo pipefail

@@ -71,9 +71,23 @@ jobs:
           workspaces: core
       - name: Install XcodeGen
         run: brew install xcodegen
+      - name: Empty macOS production model inputs fail closed
+        run: |
+          xcodegen generate
+          if xcodebuild -quiet -project LiveBlock.xcodeproj -scheme LiveBlock \
+            -configuration Release -destination 'platform=macOS' \
+            -derivedDataPath tools/runs/ci-macos-keyring-gate \
+            build CODE_SIGNING_ALLOWED=NO >tools/runs/ci-macos-keyring-gate.log 2>&1; then
+            echo "empty macOS production model inputs were accepted" >&2
+            exit 1
+          fi
+          grep -q "model keyring must be a regular file\|production model keyring must contain at least one key" \
+            tools/runs/ci-macos-keyring-gate.log
       - name: Generate bridge inputs
         run: LB_BRIDGE_HOST_ONLY=1 tools/build_bridge.sh
       - name: Generate, test Debug, and compile Release
+        env:
+          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING: "1"
         run: |
           xcodegen generate
           xcodebuild -project LiveBlock.xcodeproj -scheme LiveBlock \

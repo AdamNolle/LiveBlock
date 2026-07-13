@@ -105,7 +105,8 @@ The fastest way to a working logo detector. You skip training entirely.
        ~/Downloads/logos-yolov8n.pt
    ```
 4. Evaluate it with `tools/verify_promotion.py`. Only a complete passing
-   schema-5 report may be installed:
+   schema-5 report may be installed; the installer treats it as a recipe,
+   reruns the current gate, and preserves the fresh attested report:
    ```bash
    tools/.venv/bin/python tools/install_verified_model.py \
        --report tools/runs/promotion-gate-current.json \
@@ -116,6 +117,15 @@ The fastest way to a working logo detector. You skip training entirely.
 Community weights are untrusted candidates until their license, taxonomy,
 quality, preservation behavior, parity, latency, and artifact fingerprints all
 pass the same promotion policy as locally trained weights.
+
+For production distribution, a protected release job must additionally run
+`tools/sign_model_manifest.py`. The signer revalidates the complete passing
+schema-5 recipe by rerunning the complete gate, then binds the fresh attested
+report hash, promoted artifact hash, derived runtime contract, and monotonic
+release sequence into manifest schema 2. It reads the
+Ed25519 private seed only from `LIVEBLOCK_MODEL_SIGNING_KEY_B64`; see
+[`docs/MODEL_DISTRIBUTION_SECURITY.md`](../docs/MODEL_DISTRIBUTION_SECURITY.md).
+This signing step does not install a model and cannot make a failed report pass.
 
 ---
 

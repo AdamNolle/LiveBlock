@@ -34,6 +34,8 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: platform/_shared-frontend/package-lock.json
+      - name: Install model-signing test dependency
+        run: python -m pip install 'cryptography>=45.0'
       - name: Rust formatting
         run: cargo fmt --manifest-path core/Cargo.toml --all -- --check
       - name: Shared Rust tests
@@ -41,7 +43,7 @@ jobs:
       - name: Label and desktop adapter contract tests
         env:
           PYTHONPATH: tools
-        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution
       - name: Release profile stays inference-only
         run: cargo test --manifest-path core/Cargo.toml -p liveblock-config --lib --release build_profile_controls_training_runtime
       - name: Parse published JSON Schemas
@@ -50,6 +52,7 @@ jobs:
           python -m json.tool contracts/labels.schema.json >/dev/null
           python -m json.tool contracts/settings.schema.json >/dev/null
           python -m json.tool contracts/model-manifest.schema.json >/dev/null
+          python -m json.tool contracts/model-keyring.schema.json >/dev/null
       - name: Shared frontend build
         working-directory: platform/_shared-frontend
         run: npm ci && npm run build

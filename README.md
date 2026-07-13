@@ -237,6 +237,8 @@ LiveBlock/
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — system design and migration phases.
 - [`docs/DESKTOP_RELEASE_MATRIX.md`](docs/DESKTOP_RELEASE_MATRIX.md) — supported desktop tiers and measurable release gates.
+- [`docs/SHARED_CONTRACTS.md`](docs/SHARED_CONTRACTS.md) — versioned persistence and authenticated model contracts.
+- [`docs/MODEL_DISTRIBUTION_SECURITY.md`](docs/MODEL_DISTRIBUTION_SECURITY.md) — promotion-bound signing, rollback, and platform adoption status.
 - [`ASSESSMENT.md`](ASSESSMENT.md) — standing audit and prioritized roadmap.
 - [`AI.md`](AI.md) — guide for AI agents working on this codebase.
 - [`tools/README.md`](tools/README.md) — training-pipeline walkthrough.

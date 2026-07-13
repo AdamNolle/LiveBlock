@@ -14,6 +14,7 @@ EXPECTED_COMMANDS = {
     "get_capabilities",
     "start_capture",
     "stop_capture",
+    "get_capture_telemetry",
     "set_detection_enabled",
     "list_monitors",
     "list_regions",
@@ -59,13 +60,19 @@ class DesktopAdapterContractTests(unittest.TestCase):
     def test_monitor_screenshot_and_event_shapes_are_aligned(self):
         for source in (WINDOWS, LINUX):
             self.assertRegex(source, r"fn start_capture\([\s\S]*?monitor_id: String")
-            self.assertIn('emit("capture-state-changed", true)', source)
             self.assertIn('emit("capture-state-changed", false)', source)
             self.assertIn('serde(rename_all = "camelCase")', source)
             self.assertIn("struct ScreenshotData", source)
+            self.assertIn("fn get_capture_telemetry", source)
+        self.assertIn('emit("capture-state-changed", true)', WINDOWS)
+        self.assertNotIn('emit("capture-state-changed", true)', LINUX)
+        self.assertIn("Linux capture is unavailable in this build", LINUX)
         self.assertIn("startCapture: (monitorId: string)", IPC)
+        self.assertIn("getCaptureTelemetry", IPC)
         self.assertIn("loadScreenshot: (path: string) => invoke<ScreenshotData>", IPC)
         self.assertIn('listen<boolean>("capture-state-changed"', IPC)
+        self.assertIn('listen<boolean>("protected-content-changed"', IPC)
+        self.assertIn('listen<string>("capture-runtime-error"', IPC)
 
     def test_release_training_uses_shared_fail_closed_gate(self):
         for source in (WINDOWS, LINUX):

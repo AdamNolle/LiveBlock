@@ -8,9 +8,14 @@ Linux port.
 
 ## Status
 
-**Skeleton.** Compiles a runnable bundle with real Windows API calls; a
-few hot-path bits (D3D11 compute inpaint, full WGC frame loop) are
-flagged with `// TODO(windows-port):`.
+**Experimental, not release-ready.** The Windows.Graphics.Capture path acquires
+BGRA monitor frames, handles size changes and item closure, retains the newest
+labeling frame, and feeds a capacity-one worker so slow CPU inference/inpainting
+drops stale work instead of blocking frame delivery. Deterministic host tests
+cover the queue and conservative unavailable/protected-black-frame policy.
+D3D11 compute inpainting, DirectML activation, bounded automatic lifecycle
+recovery, packaging, and real-device GPU/multi-monitor certification remain
+open.
 
 ## Prerequisites
 
@@ -62,10 +67,17 @@ data round-trips across platforms.
 
 ## Known limitations
 
-- DRM-protected windows return black via Windows.Graphics.Capture.
-- Anti-cheat tooling may flag the always-on-top overlay.
+- DRM-protected windows can return black via Windows.Graphics.Capture. After
+  sustained near-total opaque-black frames, LiveBlock pauses overlays and shows
+  **possible protected or unavailable content**; this conservative heuristic
+  cannot distinguish DRM from genuinely black content.
+- Anti-cheat tooling may flag an always-on-top overlay. No process injection,
+  game hooks, or anti-cheat bypass is attempted; game/anti-cheat real-device
+  behavior remains uncertified.
 - Per-monitor DPI requires the manifest's `PerMonitorV2` declaration.
-- Bundled detector model is generic YOLOv8n on COCO classes — train your
-  own with `tools/auto.sh` for real ad detection.
+- Production packages require an authenticated promoted ONNX model and a
+  nonempty embedded public-key ring. Source/CI builds use an explicit empty-ring
+  override and are not distributable; release packages never train or download
+  replacement weights.
 
 See [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) for cross-platform context.

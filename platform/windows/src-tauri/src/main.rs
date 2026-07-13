@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
+mod capture_policy;
 mod detection;
 mod hotkeys;
 mod inpainting;
@@ -16,7 +17,7 @@ mod tray;
 mod training;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::capture::{enumerate_monitors, CaptureSession, FrameView};
+use crate::capture_policy::{CaptureTelemetry, CaptureTelemetrySnapshot, ProtectedFrameDetector};
 use crate::detection::{DetBox, Detector};
 use crate::inpainting::PatchPayload;
 use crate::labels::{LabelDocument, ScreenshotEntry};
@@ -83,6 +85,7 @@ fn main() {
             get_capabilities,
             start_capture,
             stop_capture,
+            get_capture_telemetry,
             set_detection_enabled,
             list_monitors,
             list_regions,
@@ -192,11 +195,28 @@ struct MonitorInfo {
 
 #[tauri::command]
 fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    use windows::Win32::Graphics::Gdi::HMONITOR;
-
     let monitor_hmonitor = monitor_id
         .parse::<usize>()
         .map_err(|_| "invalid monitor id".to_string())?;
+    let selected = enumerate_monitors()
+        .into_iter()
+        .map(|(handle, _)| handle)
+        .find(|handle| handle.0 as usize == monitor_hmonitor)
+        .ok_or_else(|| "selected monitor is no longer available".to_string())?;
+
+    // Start/stop/publication share one lock so a concurrent stop cannot miss a
+    // not-yet-published session and a concurrent start cannot overwrite one.
+    let _lifecycle_guard = state.capture_lifecycle.lock();
+    let generation = state
+        .capture_generation
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
+    let existing = { state.capture.lock().take() };
+    if let Some(existing) = existing {
+        existing.stop();
+        let _ = state.app.emit("capture-state-changed", false);
+        let _ = state.app.emit("patches-updated", Vec::<PatchPayload>::new());
+    }
     let app = state.app.clone();
     let regions_arc = state.regions.clone();
     let inpainter_arc = state.inpainter.clone();
@@ -204,13 +224,30 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
     let detection_on = state.detection_enabled.clone();
     let last_detection: Arc<Mutex<(Instant, Vec<DetBox>)>> =
         Arc::new(Mutex::new((Instant::now() - Duration::from_secs(1), Vec::new())));
+    let protected_detector = Arc::new(Mutex::new(ProtectedFrameDetector::default()));
+    let telemetry = Arc::new(CaptureTelemetry::default());
+    let telemetry_for_frame = telemetry.clone();
 
     let frame_counter = AtomicU64::new(0);
     let on_frame = Arc::new(move |frame: &FrameView| {
         let frame_number = frame_counter.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
 
-        // Detection every 4th frame, async-blocking on the WGC thread is fine
-        // because we already throttled to 30 Hz.
+        let mut protected = protected_detector.lock();
+        if let Some(value) = protected.observe_bgra(&frame.bytes, frame.width, frame.height) {
+            telemetry_for_frame.set_protected(value);
+            let _ = app.emit("protected-content-changed", value);
+        }
+        if protected.is_protected() {
+            telemetry_for_frame.protected_frame();
+            last_detection.lock().1.clear();
+            drop(protected);
+            let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+            return;
+        }
+        drop(protected);
+
+        // Detection every fourth processed frame. CaptureSession's capacity-one
+        // queue keeps this CPU/ORT work off the WGC callback and drops stale work.
         if detection_on.load(Ordering::Relaxed) && frame_number % 4 == 0 {
             if let Some(det) = detector_arc.lock().as_mut() {
                 if let Ok(boxes) = det.detect(&frame.bytes, frame.width, frame.height) {
@@ -244,21 +281,72 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
         let _ = app.emit("patches-updated", &payloads);
     }) as Arc<dyn Fn(&FrameView) + Send + Sync>;
 
-    let session = CaptureSession::start(HMONITOR(monitor_hmonitor as *mut _), on_frame)
+    let error_app = state.app.clone();
+    let capture_slot = state.capture.clone();
+    let capture_lifecycle = state.capture_lifecycle.clone();
+    let active_generation = state.capture_generation.clone();
+    let failure_reported = Arc::new(AtomicBool::new(false));
+    let on_error = Arc::new(move |message: String| {
+        if active_generation.load(Ordering::SeqCst) != generation
+            || failure_reported.swap(true, Ordering::SeqCst)
+        { return; }
+        tracing::error!("capture runtime failure: {message}");
+        let _ = error_app.emit("capture-runtime-error", &message);
+        let _ = error_app.emit("capture-state-changed", false);
+        let _ = error_app.emit("protected-content-changed", false);
+        let _ = error_app.emit("patches-updated", Vec::<PatchPayload>::new());
+
+        // Never tear down from a WGC callback or the frame worker itself. A
+        // short-lived cleanup thread waits for start_capture to publish this
+        // generation, then owns deterministic handler/session/worker closure.
+        let slot = capture_slot.clone();
+        let lifecycle = capture_lifecycle.clone();
+        let generation_counter = active_generation.clone();
+        std::thread::spawn(move || {
+            for _ in 0..50 {
+                let lifecycle_guard = lifecycle.lock();
+                let failed = {
+                    let mut guard = slot.lock();
+                    if generation_counter.load(Ordering::SeqCst) != generation { return; }
+                    guard.take()
+                };
+                if let Some(session) = failed {
+                    session.stop();
+                    drop(lifecycle_guard);
+                    return;
+                }
+                drop(lifecycle_guard);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+    });
+    let session = CaptureSession::start(selected, on_frame, on_error, telemetry)
         .map_err(|e| e.to_string())?;
+    if state.capture_generation.load(Ordering::SeqCst) != generation {
+        session.stop();
+        return Err("capture start was superseded".into());
+    }
     *state.capture.lock() = Some(session);
+    let _ = state.app.emit("protected-content-changed", false);
     let _ = state.app.emit("capture-state-changed", true);
     Ok(())
 }
 
 #[tauri::command]
 fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(session) = state.capture.lock().take() {
-        session.stop();
-    }
+    let _lifecycle_guard = state.capture_lifecycle.lock();
+    state.capture_generation.fetch_add(1, Ordering::SeqCst);
+    let session = { state.capture.lock().take() };
+    if let Some(session) = session { session.stop(); }
     let _ = state.app.emit("capture-state-changed", false);
+    let _ = state.app.emit("protected-content-changed", false);
     let _ = state.app.emit("patches-updated", Vec::<PatchPayload>::new());
     Ok(())
+}
+
+#[tauri::command]
+fn get_capture_telemetry(state: State<'_, AppState>) -> CaptureTelemetrySnapshot {
+    state.capture.lock().as_ref().map(CaptureSession::telemetry).unwrap_or_default()
 }
 
 #[tauri::command]

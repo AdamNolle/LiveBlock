@@ -5,6 +5,7 @@
 
 #[cfg(windows)]
 pub mod capture;
+pub mod capture_policy;
 pub mod detection;
 #[cfg(windows)]
 pub mod hotkeys;

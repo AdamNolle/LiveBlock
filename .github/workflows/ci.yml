@@ -75,6 +75,7 @@ jobs:
         run: LB_BRIDGE_HOST_ONLY=1 tools/build_bridge.sh
       - name: Empty macOS production model inputs fail closed
         run: |
+          mkdir -p tools/runs
           xcodegen generate
           if xcodebuild -quiet -project LiveBlock.xcodeproj -scheme LiveBlock \
             -configuration Release -destination 'platform=macOS' \

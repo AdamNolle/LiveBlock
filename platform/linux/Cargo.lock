@@ -2635,6 +2635,7 @@ dependencies = [
  "liveblock-detection",
  "liveblock-labels",
  "liveblock-regions",
+ "memmap2 0.9.10",
  "ndarray",
  "once_cell",
  "ort",

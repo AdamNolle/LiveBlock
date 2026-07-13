@@ -21,15 +21,19 @@ mod training;
 
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+use crate::capture::{open_capture, CaptureSource, FrameView};
+use crate::detection::DetBox;
+use crate::inpainting::PatchPayload;
 use crate::labels::{LabelDocument, ScreenshotEntry};
 use crate::regions::{NormalizedRegion, RegionStore, SharedRegionStore};
 use crate::session::detect_session;
-use crate::state::AppState;
+use crate::state::{AppState, CaptureRuntime, CaptureTelemetrySnapshot};
 
 #[tauri::command]
 fn get_capabilities() -> Result<liveblock_config::DesktopCapabilityProfile, String> {
@@ -53,39 +57,66 @@ fn get_capabilities() -> Result<liveblock_config::DesktopCapabilityProfile, Stri
 
 // ---------- Capture / detection lifecycle ----------
 
-#[derive(Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CaptureTelemetrySnapshot {
-    captured_frames: u64,
-    processed_frames: u64,
-    dropped_frames: u64,
-    copy_errors: u64,
-    protected_frames: u64,
-    protected_content: bool,
-    last_frame_unix_ms: u64,
-}
-
 #[tauri::command]
-fn start_capture(
-    _monitor_id: String,
-    _app: AppHandle,
-    _state: State<'_, Arc<AppState>>,
+async fn start_capture(
+    monitor_id: String,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    Err("Linux capture is unavailable in this build; PipeWire and X11 frame loops are not yet release-ready".into())
-}
+    let expected_id = match detect_session() {
+        session::SessionType::Wayland => "portal-selection",
+        session::SessionType::X11 => "x11-root",
+        session::SessionType::Unknown => return Err("unknown Linux display server".into()),
+    };
+    if monitor_id != expected_id {
+        return Err("selected Linux capture target is no longer available".into());
+    }
 
-#[tauri::command]
-fn stop_capture(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    state.capture_running.store(false, Ordering::SeqCst);
-    let _ = app.emit("capture-state-changed", false);
+    let mut lifecycle = state.capture.lock().await;
+    if let Some(previous) = lifecycle.take() {
+        previous.stop_requested.store(true, Ordering::Release);
+        let _ = previous.task.await;
+    }
+    let source = open_capture().await.map_err(|error| error.to_string())?;
+    state.capture_telemetry.reset();
+    state.latest_frame.store(None);
+    state.capture_running.store(true, Ordering::SeqCst);
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let task_stop = stop_requested.clone();
+    let task_state = state.inner().clone();
+    let task_app = app.clone();
+    let task = tokio::spawn(async move {
+        run_capture_loop(source, task_stop, task_state, task_app).await;
+    });
+    *lifecycle = Some(CaptureRuntime {
+        stop_requested,
+        task,
+    });
+    let _ = app.emit("capture-state-changed", true);
     Ok(())
 }
 
 #[tauri::command]
-fn get_capture_telemetry() -> CaptureTelemetrySnapshot {
-    // Linux capture telemetry remains zero until the PipeWire/X11 frame loops
-    // land; returning an explicit truthful snapshot preserves IPC parity.
-    CaptureTelemetrySnapshot::default()
+async fn stop_capture(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Hold the lifecycle lock through join and global-state cleanup so a new
+    // start cannot be overwritten by the previous generation's teardown.
+    let mut lifecycle = state.capture.lock().await;
+    let runtime = lifecycle.take();
+    if let Some(runtime) = runtime {
+        runtime.stop_requested.store(true, Ordering::Release);
+        let _ = runtime.task.await;
+    }
+    state.capture_running.store(false, Ordering::SeqCst);
+    state.latest_frame.store(None);
+    *state.current_patches.lock() = Vec::new();
+    let _ = app.emit("capture-state-changed", false);
+    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    Ok(())
+}
+
+#[tauri::command]
+fn get_capture_telemetry(state: State<'_, Arc<AppState>>) -> CaptureTelemetrySnapshot {
+    state.capture_telemetry.snapshot()
 }
 
 #[tauri::command]
@@ -96,14 +127,145 @@ fn set_detection_enabled(enabled: bool, state: State<'_, Arc<AppState>>) -> Resu
 
 #[tauri::command]
 fn list_monitors() -> Vec<serde_json::Value> {
-    // Linux capture surface is per-output but the runtime enumeration depends
-    // on the live wayland/x11 connection. Until that's wired, return a single
-    // synthetic primary so the frontend's monitor picker doesn't render empty.
-    vec![serde_json::json!({
-        "id": "primary",
-        "name": "Primary display",
-        "isPrimary": true,
-    })]
+    match detect_session() {
+        session::SessionType::Wayland => vec![serde_json::json!({
+            "id": "portal-selection",
+            "name": "Choose a display in the system portal",
+            "isPrimary": true,
+        })],
+        session::SessionType::X11 => vec![serde_json::json!({
+            "id": "x11-root",
+            "name": "X11 virtual desktop",
+            "isPrimary": true,
+        })],
+        session::SessionType::Unknown => Vec::new(),
+    }
+}
+
+async fn run_capture_loop(
+    mut source: Box<dyn CaptureSource>,
+    stop_requested: Arc<AtomicBool>,
+    state: Arc<AppState>,
+    app: AppHandle,
+) {
+    let mut frame_number = 0u64;
+    let mut recent_detections = (
+        Instant::now() - Duration::from_secs(1),
+        Vec::<DetBox>::new(),
+    );
+    let mut failure = None;
+    while !stop_requested.load(Ordering::Acquire) {
+        let frame_result = tokio::select! {
+            frame = source.next_frame() => Some(frame),
+            _ = wait_for_stop(stop_requested.clone()) => None,
+        };
+        let Some(frame_result) = frame_result else { break; };
+        let frame = match frame_result {
+            Ok(frame) => frame,
+            Err(error) => {
+                state.capture_telemetry.copy_error();
+                failure = Some(error.to_string());
+                break;
+            }
+        };
+        if frame.width == 0
+            || frame.height == 0
+            || frame.stride != frame.width * 4
+            || frame.pixels.len() != frame.width as usize * frame.height as usize * 4
+        {
+            state.capture_telemetry.copy_error();
+            failure = Some("capture backend returned an invalid BGRA frame".into());
+            break;
+        }
+        state.capture_telemetry.captured();
+        state.capture_telemetry.set_dropped(source.dropped_frames());
+        state.latest_frame.store(Some(Arc::new(frame.clone())));
+        frame_number = frame_number.wrapping_add(1);
+
+        if state.detection_enabled.load(Ordering::Relaxed) && frame_number % 4 == 0 {
+            let detector_state = state.clone();
+            let detection_frame = frame.clone();
+            match tokio::task::spawn_blocking(move || {
+                let mut detector = detector_state.detector.lock();
+                detector
+                    .as_mut()
+                    .map(|detector| {
+                        detector.detect_bgra(
+                            &detection_frame.pixels,
+                            detection_frame.width,
+                            detection_frame.height,
+                        )
+                    })
+                    .transpose()
+            })
+            .await
+            {
+                Ok(Ok(Some(detections))) => {
+                    recent_detections = (Instant::now(), detections);
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => tracing::warn!("Linux detector frame failed: {error}"),
+                Err(error) => tracing::error!("Linux detector worker failed: {error}"),
+            }
+        }
+
+        let mut regions = state.region_store.current();
+        if recent_detections.0.elapsed() < Duration::from_millis(800) {
+            for detection in &recent_detections.1 {
+                if detection.score < 0.5 {
+                    continue;
+                }
+                regions.push(NormalizedRegion::new(
+                    f64::from(detection.x) / f64::from(frame.width),
+                    f64::from(detection.y) / f64::from(frame.height),
+                    f64::from(detection.w) / f64::from(frame.width),
+                    f64::from(detection.h) / f64::from(frame.height),
+                ));
+            }
+        }
+        let paint_state = state.clone();
+        let paint_frame = frame.clone();
+        let patches = match tokio::task::spawn_blocking(move || {
+            paint_state.inpainter.lock().inpaint(
+                &paint_frame.pixels,
+                paint_frame.width,
+                paint_frame.height,
+                &regions,
+            )
+        })
+        .await
+        {
+            Ok(Ok(patches)) => patches,
+            Ok(Err(error)) => {
+                tracing::warn!("Linux inpainting frame failed: {error}");
+                Vec::new()
+            }
+            Err(error) => {
+                failure = Some(format!("Linux inpainting worker stopped: {error}"));
+                break;
+            }
+        };
+        *state.current_patches.lock() = patches.clone();
+        state.capture_telemetry.processed();
+        let _ = app.emit("patches-updated", &patches);
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+    source.stop().await;
+    state.capture_running.store(false, Ordering::SeqCst);
+    state.latest_frame.store(None);
+    *state.current_patches.lock() = Vec::new();
+    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    let _ = app.emit("capture-state-changed", false);
+    if let Some(message) = failure {
+        tracing::error!("Linux capture stopped: {message}");
+        let _ = app.emit("capture-runtime-error", message);
+    }
+}
+
+async fn wait_for_stop(stop_requested: Arc<AtomicBool>) {
+    while !stop_requested.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 // ---------- Region CRUD ----------
@@ -150,12 +312,36 @@ fn clear_regions(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 // ---------- Labeling pipeline ----------
 
 #[tauri::command]
-fn capture_screenshot_for_labeling() -> Result<Option<PathBuf>, String> {
-    // The Wayland/X11 capture surface isn't yet plumbed into the labeling
-    // pipeline. Return None so the frontend treats this as "no frame yet"
-    // rather than an error. Wiring is symmetric with Windows once
-    // `capture::latest_frame()` is exposed.
-    Ok(None)
+fn capture_screenshot_for_labeling(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(frame) = state.latest_frame.load_full() else {
+        return Ok(None);
+    };
+    paths::ensure_directories().map_err(|error| error.to_string())?;
+    let stem = paths::new_screenshot_stem();
+    let destination = paths::screenshots_dir().join(format!("{stem}.png"));
+    let mut rgba = Vec::with_capacity(frame.pixels.len());
+    for pixel in frame.pixels.chunks_exact(4) {
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(frame.width, frame.height, rgba)
+        .ok_or("invalid captured frame")?;
+    let write_result = (|| -> Result<(), String> {
+        use std::io::Write;
+        let file = paths::create_private_file(&destination).map_err(|error| error.to_string())?;
+        let mut writer = std::io::BufWriter::new(file);
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut writer, image::ImageFormat::Png)
+            .map_err(|error| error.to_string())?;
+        writer.flush().map_err(|error| error.to_string())?;
+        writer.get_ref().sync_all().map_err(|error| error.to_string())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&destination);
+        return Err(error);
+    }
+    Ok(Some(destination))
 }
 
 #[tauri::command]

@@ -7,21 +7,23 @@ Liquid Glass aesthetic.
 
 ## Status
 
-**Skeleton.** The crate compiles a runnable Tauri bundle, with stubbed but
-real-API capture / detection / inpaint paths. Display-server detection,
-overlay strategy selection, and the data layer (regions / labels) are
-fully implemented. The actual frame loops (PipeWire stream pumping, X11
-shm copy, wgpu compute dispatch) are flagged with `// TODO(linux-port):`
-and need on-Linux iteration.
+**Experimental, not release-ready.** Wayland uses the ScreenCast portal and a
+dedicated PipeWire loop with capacity-one newest-frame delivery and BGRA/BGRx,
+NV12, and YUY2 conversion. X11 captures the virtual root through XComposite and
+fd-backed MIT-SHM, converting padded 24/32-bit server pixels to packed BGRA.
+Both paths feed local ONNX detection, CPU inpainting, patch rendering,
+telemetry, and labeling screenshots. Native CI proves compilation and format
+unit tests; real compositor/server, multi-output, GPU, overlay, hotkey, and
+lifecycle certification remain open.
 
 ## Distribution-server matrix
 
 | Compositor | Capture | Overlay | Notes |
 |---|---|---|---|
-| Sway / Hyprland / river / wlroots | Portal + PipeWire | wlr-layer-shell | Full feature parity |
-| KDE Plasma (Wayland) | Portal + PipeWire | wlr-layer-shell | KWin supports layer-shell since 5.27 |
-| GNOME / Mutter (Wayland) | Portal + PipeWire | **GNOME mode** | Visible movable window — no layer-shell |
-| X11 (any) | XComposite + XShm | override-redirect + xfixes | Best feature compatibility, going away |
+| Sway / Hyprland / river / wlroots | Portal + PipeWire (experimental) | layer-shell incomplete | Target full support; not certified |
+| KDE Plasma (Wayland) | Portal + PipeWire (experimental) | layer-shell incomplete | Target full support; not certified |
+| GNOME / Mutter (Wayland) | Portal + PipeWire (experimental) | **limited preview window** | No global click-through overlay |
+| X11 (any) | XComposite + XShm (experimental) | override-redirect incomplete | Target full support; not certified |
 
 Picked at runtime from `XDG_SESSION_TYPE` and `XDG_CURRENT_DESKTOP`.
 
@@ -116,7 +118,8 @@ Schema is byte-compatible with macOS + Windows so labels round-trip.
 cargo tauri build --features cuda
 ```
 
-The first run downloads `libonnxruntime.so` automatically (ort `load-dynamic`).
+Production packages must bundle or declare a trusted local ONNX Runtime CPU
+library. LiveBlock does not download runtimes, code, or replacement weights.
 
 ## Known limitations
 
@@ -126,8 +129,9 @@ The first run downloads `libonnxruntime.so` automatically (ort `load-dynamic`).
 - **DRM-protected windows on Wayland** may return black frames depending on
   the compositor's portal implementation.
 - **Anti-cheat tooling** in some games will treat any overlay as suspicious.
-- **The bundled detection model is generic YOLOv8n on COCO** — it doesn't
-  detect ads. Train your own with `tools/auto.sh` (root of repo).
+- Production packages require the exact authenticated promoted ONNX model and
+  a nonempty embedded public-key ring. The current source/CI empty-ring build is
+  intentionally not distributable.
 - **Flatpak distribution requires portal-only operation.** The X11 path
   won't work inside a Flatpak sandbox; document this in the Flathub listing.
 
@@ -144,9 +148,9 @@ flatpak run com.adamnolle.LiveBlock
 
 ## Top 3 things to verify on real Linux
 
-1. **PipeWire SPA pod negotiation** — BGRA8888 is preferred, but some
-   compositors only offer YUY2 / NV12. `src-tauri/src/capture/wayland.rs`
-   needs format-specific conversion paths.
+1. **PipeWire SPA pod negotiation** — BGRA/BGRx, YUY2, and NV12 conversion is
+   implemented and unit-tested, but DMA-BUF-only portals, plane metadata, color
+   range, resize, revocation, and compositor-specific negotiation need devices.
 2. **Wayland layer-shell click-through with wgpu surface** — the empty
    input region must be re-applied after every `wl_surface::commit` and
    resize. KWin in particular re-asserts the input region on commit.

@@ -34,6 +34,7 @@
       }
       .row.active { background: rgba(255,255,255,0.5); }
       .footer { display:flex; align-items:center; gap:8px; }
+      .notice { padding:9px 10px;border-radius:10px;background:rgba(224,148,42,.12);color:var(--lb-ink);font:500 11px/1.35 var(--lb-font-ui); }
       .swatch { width:16px; height:16px; border-radius:4px; }
     </style>
   </head>
@@ -47,6 +48,8 @@
         </div>
         <span id="powerToggle"></span>
       </div>
+
+      <div id="capabilityNotice" class="notice" role="status" hidden></div>
 
       <div class="actions">
         <button class="lb-pill lb-block" id="blockBtn">⌧ Block</button>
@@ -86,6 +89,7 @@
       let protectedContent = false;
       let captureError = null;
       let regionCount = 0;
+      let capabilitiesLoaded = false;
       const power = toggle({
         value: false,
         accent: "success",
@@ -152,6 +156,16 @@
       // synthetic frame-time claim is shown.
       async function refresh() {
         try {
+          if (!capabilitiesLoaded) {
+            const capabilities = await lb.getCapabilities();
+            capabilitiesLoaded = true;
+            if (capabilities.supportMode === "limited" || !capabilities.releaseReady) {
+              const notice = document.getElementById("capabilityNotice");
+              const platform = capabilities.platform.replaceAll("_", " ");
+              notice.textContent = `${platform}: ${capabilities.limitations.join(" ")}`;
+              notice.hidden = false;
+            }
+          }
           if (!selectedMonitorId) {
             const monitors = await lb.listMonitors();
             selectedMonitorId = monitors.find((monitor) => monitor.isPrimary)?.id ?? monitors[0]?.id ?? null;

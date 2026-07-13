@@ -18,9 +18,12 @@ pub struct FrameView {
 }
 
 #[async_trait::async_trait]
-pub trait CaptureSource: Send + Sync {
+pub trait CaptureSource: Send {
     async fn next_frame(&mut self) -> Result<FrameView>;
-    fn stop(&mut self);
+    fn dropped_frames(&self) -> u64 {
+        0
+    }
+    async fn stop(&mut self);
 }
 
 /// Open a capture source for the current display server.

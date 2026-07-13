@@ -12,6 +12,8 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use std::fs::File;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// XDG_DATA_HOME or ~/.local/share, then `LiveBlock`.
@@ -67,9 +69,24 @@ pub fn ensure_directories() -> Result<()> {
         exports_dir(),
         trash_dir(),
     ] {
-        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        ensure_private_directory(&dir)?;
     }
     Ok(())
+}
+
+fn ensure_private_directory(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("protect {}", path.display()))
+}
+
+pub fn create_private_file(path: &Path) -> Result<File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("create private file {}", path.display()))
 }
 
 pub fn new_screenshot_stem() -> String {
@@ -82,4 +99,26 @@ pub fn label_path_for(screenshot: &Path) -> PathBuf {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     labels_dir().join(format!("{stem}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_capture_paths_reject_group_and_other_access() {
+        let root = std::env::temp_dir().join(format!("liveblock-private-{}", uuid::Uuid::new_v4()));
+        ensure_private_directory(&root).unwrap();
+        let file_path = root.join("frame.png");
+        drop(create_private_file(&file_path).unwrap());
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

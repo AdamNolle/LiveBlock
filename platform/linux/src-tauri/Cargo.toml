@@ -54,6 +54,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 ndarray = "=0.15.6"
 arc-swap = "1.7"
 crossbeam-channel = "0.5"
+memmap2 = "0.9"
 dirs = "5"
 
 # ONNX Runtime — Linux gets multiple EPs as cargo features.

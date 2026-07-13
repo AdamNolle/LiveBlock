@@ -101,7 +101,7 @@ impl DesktopCapabilityProfile {
                 contract_version: DESKTOP_CONTRACT_VERSION,
                 platform,
                 support_mode: SupportMode::Limited,
-                capture_backend: "pipewire_portal_not_implemented".into(),
+                capture_backend: "pipewire_portal_bgra_nv12_yuy2_experimental".into(),
                 inference_backends: vec!["onnx_cpu_experimental".into()],
                 overlay_backend: "layer_shell_wgpu_not_implemented".into(),
                 click_through_overlay: false,
@@ -112,15 +112,14 @@ impl DesktopCapabilityProfile {
                 production_training_runtime: false,
                 release_ready: false,
                 limitations: vec![
-                    "PipeWire capture, layer-shell overlay, and global hotkeys are not end-to-end"
-                        .into(),
+                    "PipeWire capture is implemented but lacks real-compositor certification; layer-shell overlay and global hotkeys are not end-to-end".into(),
                 ],
             },
             DesktopPlatform::LinuxX11 => Self {
                 contract_version: DESKTOP_CONTRACT_VERSION,
                 platform,
                 support_mode: SupportMode::Limited,
-                capture_backend: "xcomposite_xshm_not_implemented".into(),
+                capture_backend: "xcomposite_xshm_experimental".into(),
                 inference_backends: vec!["onnx_cpu_experimental".into()],
                 overlay_backend: "x11_wgpu_not_implemented".into(),
                 click_through_overlay: false,
@@ -131,16 +130,16 @@ impl DesktopCapabilityProfile {
                 production_training_runtime: false,
                 release_ready: false,
                 limitations: vec![
-                    "XComposite/XShm capture, overlay, and hotkeys are not end-to-end".into(),
+                    "XComposite/XShm capture is implemented but lacks real-server certification; overlay and hotkeys are not end-to-end".into(),
                 ],
             },
             DesktopPlatform::LinuxGnomeWayland => Self {
                 contract_version: DESKTOP_CONTRACT_VERSION,
                 platform,
                 support_mode: SupportMode::Limited,
-                capture_backend: "pipewire_portal_not_implemented".into(),
+                capture_backend: "pipewire_portal_bgra_nv12_yuy2_experimental".into(),
                 inference_backends: vec!["onnx_cpu_experimental".into()],
-                overlay_backend: "preview_window_not_implemented".into(),
+                overlay_backend: "tauri_preview_window_limited".into(),
                 click_through_overlay: false,
                 capture_exclusion: false,
                 global_hotkeys: false,
@@ -149,8 +148,7 @@ impl DesktopCapabilityProfile {
                 production_training_runtime: false,
                 release_ready: false,
                 limitations: vec![
-                    "GNOME Mutter does not provide feature-equivalent global click-through overlays"
-                        .into(),
+                    "GNOME Mutter does not provide feature-equivalent global click-through overlays; only a movable preview window is available".into(),
                 ],
             },
             _ => panic!("non-Linux platform passed to Linux profile"),
@@ -320,7 +318,7 @@ mod tests {
             assert_eq!(profile.support_mode, SupportMode::Limited);
             assert!(!profile.release_ready);
             assert!(!profile.global_hotkeys);
-            assert!(profile.capture_backend.contains("not_implemented"));
+            assert!(profile.capture_backend.contains("experimental"));
         }
     }
 

@@ -76,9 +76,14 @@ load with the production ONNX adapter before committing schema-1 update state,
 atomically activate at a fixed application-data path, and reauthenticate the
 persisted signed manifest plus artifact at startup. The authenticated packaged
 manifest supplies the initial monotonic floor, so an older still-signed model
-cannot replace a newer detector shipped with the application. Their Release build scripts
-reject empty rings unless the explicit source/CI-only override is set.
+cannot replace a newer detector shipped with the application. Their Release
+build scripts reject empty rings unless the explicit source/CI-only override is
+set.
 
-macOS currently uses the stricter schema-5 Python installer for developer
-promotion and still needs a signed, atomic directory-aware production updater.
-Therefore “signed-manifest verification on every platform” remains open.
+macOS applies the same schemas and hash/signature contract through CryptoKit.
+Release model loading reauthenticates accepted state or a packaged manifest;
+installation uses a fixed same-volume staging directory, production CoreML load,
+file/directory synchronization, `renameatx_np(RENAME_SWAP)`, rollback, and startup
+recovery. Its Release build phase and release script also reject an empty ring.
+Debug/source training continues to use the candidate-only developer installer
+and is not a production trust path.

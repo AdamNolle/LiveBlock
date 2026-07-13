@@ -126,6 +126,11 @@ release sequence into manifest schema 2. It reads the
 Ed25519 private seed only from `LIVEBLOCK_MODEL_SIGNING_KEY_B64`; see
 [`docs/MODEL_DISTRIBUTION_SECURITY.md`](../docs/MODEL_DISTRIBUTION_SECURITY.md).
 This signing step does not install a model and cannot make a failed report pass.
+For macOS production updates, compile first and promote/sign the exact resulting
+`liveblock-detector.mlmodelc`; never reuse a source `.mlpackage` fingerprint.
+`tools/verify_signed_model_bundle.py --bundle <protected-dir>` validates the
+compiled artifact, manifest signature, and nonempty keyring before release
+staging.
 
 ---
 

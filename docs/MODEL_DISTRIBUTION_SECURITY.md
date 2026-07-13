@@ -3,10 +3,12 @@
 ## Status
 
 The repository has a promotion-bound distribution contract and signing entry
-point. Windows and Linux now share authenticated, monotonic ONNX update
-activation; macOS production updates still need an atomic CoreML directory swap,
-embedded release keyring, and equivalent rollback state. No checklist or release
-claim may state that every platform authenticates updates yet.
+point. Windows/Linux use the shared authenticated ONNX coordinator; macOS uses
+strict CryptoKit verification plus atomic CoreML directory exchange. All three
+platform implementations require embedded nonempty production keyrings, signed
+manifests, monotonic state, production-runtime validation, and startup
+reauthentication. The committed rings are intentionally empty, so no production
+package is currently distributable.
 
 ## Trust chain
 
@@ -114,11 +116,13 @@ non-regular lock/backup files fail closed. A regular previous backup is never
 loaded without matching accepted state and is removed only while holding the
 next update transaction lock.
 
-CoreML directory activation requires macOS `renameatx_np(RENAME_SWAP)` (or an
-equivalent proven atomic exchange), recursive no-symlink/no-special-file copy,
-file and directory synchronization, post-copy hashing, a cooperating update
-lock, and crash recovery tests. Two sequential `rename` calls are not an
-atomic replacement and are not sufficient.
+macOS CoreML activation copies to a fixed same-volume staging directory, rejects
+symlinks/special entries, re-hashes and production-loads it, synchronizes files
+and directories, and uses `renameatx_np(RENAME_SWAP)` when replacing an active
+model. Schema-1 state contains the complete accepted manifest. Startup restores
+an accepted model from staging/backup after an interrupted swap, and an injected
+state-commit failure test verifies immediate rollback. Debug/source model loading
+remains explicitly separate; Release `VisionProcessor` accepts only this path.
 
 ## Key rotation and revocation
 
@@ -144,7 +148,10 @@ atomic replacement and are not sufficient.
   `LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1` development override; both build
   scripts otherwise reject empty production rings.
 
-These are contract, adapter, and tool tests, not evidence of macOS updater
-adoption, production key custody, package signing, notarization, or rollback on
-real Windows/Linux devices. The committed development rings are intentionally
-empty, so no production package can yet be represented as distributable.
+These are contract, adapter, simulator/host, and tool tests, not evidence of
+production key custody, package signing, notarization, power-loss behavior, or
+rollback on every real target device. The committed development rings are
+intentionally empty, so no production package can yet be represented as
+distributable. A bundled compiled `.mlmodelc` also needs its own exact passing
+schema-5 artifact/parity evidence before it may receive a packaged manifest; a
+source `.mlpackage` report cannot be reused for that compiled artifact.

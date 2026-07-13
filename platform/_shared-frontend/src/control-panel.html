@@ -75,7 +75,7 @@
       <div class="footer">
         <button class="lb-pill lb-sm" id="prefsBtn">⚙ Preferences</button>
         <div class="lb-spacer"></div>
-        <span class="lb-mono" style="font-size:10px;color:var(--lb-ink-faint)">Ctrl+Shift+B</span>
+        <span id="hotkeyHint" class="lb-mono" style="font-size:10px;color:var(--lb-ink-faint)">Ctrl+Shift+B</span>
       </div>
     </div>
 
@@ -159,6 +159,9 @@
           if (!capabilitiesLoaded) {
             const capabilities = await lb.getCapabilities();
             capabilitiesLoaded = true;
+            if (!capabilities.globalHotkeys) {
+              document.getElementById("hotkeyHint").textContent = "Global hotkeys unavailable";
+            }
             if (capabilities.supportMode === "limited" || !capabilities.releaseReady) {
               const notice = document.getElementById("capabilityNotice");
               const platform = capabilities.platform.replaceAll("_", " ");

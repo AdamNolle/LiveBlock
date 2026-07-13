@@ -12,7 +12,7 @@ pub use desktop_contract::{
 pub use embeddings::ClassEmbeddings;
 pub use model_manifest::{
     artifact_sha256, install_verified_artifact, verifying_key_from_base64, ArtifactFormat,
-    ModelManifest, ModelManifestError, TrustedKeyring,
+    ModelManifest, ModelManifestError, TrustedKeyring, TrustedKeyringDocument, TrustedPublicKey,
 };
 pub use settings::{ClassRule, CoordinatorConfig, DetectionSettings, SettingsStore};
 pub use vocabulary::{VocabClass, Vocabulary};

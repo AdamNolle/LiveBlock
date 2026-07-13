@@ -15,7 +15,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const MODEL_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const MODEL_MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const MODEL_KEYRING_SCHEMA_VERSION: u32 = 1;
+pub const PROMOTION_GATE_SCHEMA_VERSION: u32 = 5;
 pub const ARTIFACT_HASH_ALGORITHM: &str = "sha256-file-or-tree-v1";
 pub const RUNTIME_CLASSES: [&str; 3] = ["Logo", "Ad banner", "Sponsored"];
 
@@ -27,7 +29,7 @@ pub enum ArtifactFormat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelManifest {
     pub schema_version: u32,
     pub model_id: String,
@@ -39,12 +41,29 @@ pub struct ModelManifest {
     pub input_width: u32,
     pub input_height: u32,
     pub nms_embedded: bool,
+    pub release_sequence: u64,
+    pub promotion_gate_schema: u32,
+    pub promotion_report_sha256: String,
     pub created_at: String,
     pub key_id: String,
     pub signature: String,
 }
 
 pub type TrustedKeyring = BTreeMap<String, VerifyingKey>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrustedKeyringDocument {
+    pub schema_version: u32,
+    pub keys: Vec<TrustedPublicKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrustedPublicKey {
+    pub key_id: String,
+    pub public_key_base64: String,
+}
 
 #[derive(Debug, Error)]
 pub enum ModelManifestError {
@@ -60,8 +79,12 @@ pub enum ModelManifestError {
     InvalidField(&'static str),
     #[error("untrusted signing key id: {0}")]
     UntrustedKey(String),
-    #[error("invalid base64 signature")]
+    #[error("invalid base64 signature or public key")]
     SignatureEncoding,
+    #[error("trusted model keyring is empty")]
+    EmptyKeyring,
+    #[error("duplicate trusted signing key id: {0}")]
+    DuplicateKey(String),
     #[error("model manifest signature verification failed")]
     Signature,
     #[error("artifact fingerprint mismatch")]
@@ -104,6 +127,15 @@ impl ModelManifest {
         if self.runtime_classes != expected {
             return Err(ModelManifestError::RuntimeClasses);
         }
+        if self.release_sequence == 0 {
+            return Err(ModelManifestError::InvalidField("releaseSequence"));
+        }
+        if self.promotion_gate_schema != PROMOTION_GATE_SCHEMA_VERSION {
+            return Err(ModelManifestError::InvalidField("promotionGateSchema"));
+        }
+        if !is_lower_hex_sha256(&self.promotion_report_sha256) {
+            return Err(ModelManifestError::InvalidField("promotionReportSha256"));
+        }
         if self.created_at.trim().is_empty() {
             return Err(ModelManifestError::InvalidField("createdAt"));
         }
@@ -144,6 +176,42 @@ impl ModelManifest {
             return Err(ModelManifestError::ArtifactFingerprint);
         }
         Ok(())
+    }
+}
+
+impl TrustedKeyringDocument {
+    pub fn from_json(
+        input: &str,
+        require_nonempty: bool,
+    ) -> Result<TrustedKeyring, ModelManifestError> {
+        let document: Self = serde_json::from_str(input)?;
+        if document.schema_version != MODEL_KEYRING_SCHEMA_VERSION {
+            return Err(ModelManifestError::UnsupportedSchema(
+                document.schema_version,
+            ));
+        }
+        if require_nonempty && document.keys.is_empty() {
+            return Err(ModelManifestError::EmptyKeyring);
+        }
+        let mut keyring = TrustedKeyring::new();
+        for entry in document.keys {
+            if entry.key_id.trim().is_empty() {
+                return Err(ModelManifestError::InvalidField("keyId"));
+            }
+            if keyring.contains_key(&entry.key_id) {
+                return Err(ModelManifestError::DuplicateKey(entry.key_id));
+            }
+            let key = verifying_key_from_base64(&entry.public_key_base64)?;
+            keyring.insert(entry.key_id, key);
+        }
+        Ok(keyring)
+    }
+
+    pub fn load(
+        path: impl AsRef<Path>,
+        require_nonempty: bool,
+    ) -> Result<TrustedKeyring, ModelManifestError> {
+        Self::from_json(&fs::read_to_string(path)?, require_nonempty)
     }
 }
 
@@ -203,6 +271,11 @@ pub fn install_verified_artifact(
     trusted_keys: &TrustedKeyring,
 ) -> Result<PathBuf, ModelManifestError> {
     manifest.verify(source, trusted_keys)?;
+    if manifest.artifact_format != ArtifactFormat::Onnx {
+        return Err(ModelManifestError::InvalidField(
+            "single-file installation requires ONNX format",
+        ));
+    }
     let source_metadata = fs::symlink_metadata(source)?;
     if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
         return Err(ModelManifestError::InvalidField(
@@ -442,6 +515,9 @@ mod tests {
             input_width: 640,
             input_height: 640,
             nms_embedded: true,
+            release_sequence: 1,
+            promotion_gate_schema: PROMOTION_GATE_SCHEMA_VERSION,
+            promotion_report_sha256: "ab".repeat(32),
             created_at: "2026-07-12T00:00:00Z".into(),
             key_id: "release-2026".into(),
             signature: String::new(),
@@ -468,6 +544,33 @@ mod tests {
             schema["properties"]["runtimeClasses"]["prefixItems"],
             serde_json::Value::Array(expected)
         );
+    }
+
+    #[test]
+    fn published_keyring_schema_matches_runtime_contract() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/model-keyring.schema.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            schema["properties"]["schemaVersion"]["const"],
+            MODEL_KEYRING_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn manifest_parser_matches_closed_published_schema() {
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("model.onnx");
+        fs::write(&artifact, b"model-v1").unwrap();
+        let signing = SigningKey::from_bytes(&[17; 32]);
+        let manifest = signed_manifest(&artifact, &signing);
+        let mut value = serde_json::to_value(manifest).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("unsignedExtension".into(), serde_json::json!(true));
+        assert!(ModelManifest::from_json(&value.to_string()).is_err());
     }
 
     #[test]
@@ -524,6 +627,18 @@ mod tests {
     }
 
     #[test]
+    fn tree_hash_matches_cross_language_fixture() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("a.txt"), b"X").unwrap();
+        fs::write(dir.path().join("nested/b.bin"), b"Y").unwrap();
+        assert_eq!(
+            artifact_sha256(dir.path()).unwrap(),
+            "8961fa489500947939aca204c59fff6f27f19e0fabb49cab47e2d0158efcf134"
+        );
+    }
+
+    #[test]
     fn atomic_install_preserves_previous_artifact() {
         let dir = tempdir().unwrap();
         let source = dir.path().join("candidate.onnx");
@@ -561,6 +676,83 @@ mod tests {
         assert!(matches!(
             install_verified_artifact(&package_manifest, &package, &destination, &keys),
             Err(ModelManifestError::InvalidField(_))
+        ));
+    }
+
+    #[test]
+    fn keyring_is_strict_and_release_requires_a_key() {
+        let signing = SigningKey::from_bytes(&[14; 32]);
+        let public_key = BASE64.encode(signing.verifying_key().to_bytes());
+        let json = serde_json::json!({
+            "schemaVersion": MODEL_KEYRING_SCHEMA_VERSION,
+            "keys": [{"keyId": "release-2026", "publicKeyBase64": public_key}],
+        });
+        let keys = TrustedKeyringDocument::from_json(&json.to_string(), true).unwrap();
+        assert_eq!(keys.get("release-2026"), Some(&signing.verifying_key()));
+
+        assert!(matches!(
+            TrustedKeyringDocument::from_json(r#"{"schemaVersion":1,"keys":[]}"#, true),
+            Err(ModelManifestError::EmptyKeyring)
+        ));
+        assert!(TrustedKeyringDocument::from_json(
+            r#"{"schemaVersion":1,"keys":[],"unexpected":true}"#,
+            false,
+        )
+        .is_err());
+        assert!(TrustedKeyringDocument::from_json(
+            r#"{"schemaVersion":1,"schemaVersion":1,"keys":[]}"#,
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn keyring_rejects_duplicate_ids_and_bad_keys() {
+        let signing = SigningKey::from_bytes(&[15; 32]);
+        let public_key = BASE64.encode(signing.verifying_key().to_bytes());
+        let duplicate = serde_json::json!({
+            "schemaVersion": MODEL_KEYRING_SCHEMA_VERSION,
+            "keys": [
+                {"keyId": "same", "publicKeyBase64": public_key},
+                {"keyId": "same", "publicKeyBase64": public_key},
+            ],
+        });
+        assert!(matches!(
+            TrustedKeyringDocument::from_json(&duplicate.to_string(), true),
+            Err(ModelManifestError::DuplicateKey(id)) if id == "same"
+        ));
+        assert!(matches!(
+            TrustedKeyringDocument::from_json(
+                r#"{"schemaVersion":1,"keys":[{"keyId":"bad","publicKeyBase64":"AA=="}]}"#,
+                true,
+            ),
+            Err(ModelManifestError::SignatureEncoding)
+        ));
+    }
+
+    #[test]
+    fn promotion_binding_and_release_sequence_are_mandatory() {
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("model.onnx");
+        fs::write(&artifact, b"model-v1").unwrap();
+        let signing = SigningKey::from_bytes(&[16; 32]);
+        let mut manifest = signed_manifest(&artifact, &signing);
+        manifest.release_sequence = 0;
+        assert!(matches!(
+            manifest.validate_contract(),
+            Err(ModelManifestError::InvalidField("releaseSequence"))
+        ));
+        manifest.release_sequence = 1;
+        manifest.promotion_gate_schema = 4;
+        assert!(matches!(
+            manifest.validate_contract(),
+            Err(ModelManifestError::InvalidField("promotionGateSchema"))
+        ));
+        manifest.promotion_gate_schema = PROMOTION_GATE_SCHEMA_VERSION;
+        manifest.promotion_report_sha256 = "not-a-hash".into();
+        assert!(matches!(
+            manifest.validate_contract(),
+            Err(ModelManifestError::InvalidField("promotionReportSha256"))
         ));
     }
 

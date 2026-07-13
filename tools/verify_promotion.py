@@ -9,7 +9,6 @@ model; successful verification is still followed by an explicit install step.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import traceback
 from pathlib import Path
@@ -20,80 +19,12 @@ from corpus.build_sports_corpus import (REQUIRED_PROMOTION_NEGATIVE_PLACEMENTS,
                                         build)
 from corpus.export_eval_fixtures import export as export_fixtures
 from eval.run_eval import evaluate
+from promotion_contract import (GATE_SCHEMA, REQUIRED_MAX_FALSE_POSITIVES,
+                                REQUIRED_MAX_P95_MS, REQUIRED_MIN_PLACEMENT_RECALL,
+                                REQUIRED_MIN_PRECISION, REQUIRED_MIN_RECALL,
+                                artifact_sha256, gate_code_artifacts,
+                                validate_gate_limits, validate_required_facets)
 from validate_coreml_detector import validate as validate_coreml
-
-GATE_SCHEMA = 5
-REQUIRED_MIN_PRECISION = 0.50
-REQUIRED_MIN_RECALL = 0.50
-REQUIRED_MIN_PLACEMENT_RECALL = 0.50
-REQUIRED_MAX_FALSE_POSITIVES = 10
-REQUIRED_MAX_P95_MS = 10.0
-
-
-def artifact_sha256(path: Path) -> str:
-    """Hash a file or directory tree including stable relative paths."""
-    digest = hashlib.sha256()
-    if path.is_file():
-        digest.update(path.read_bytes())
-        return digest.hexdigest()
-    if not path.is_dir():
-        raise FileNotFoundError(path)
-    for item in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
-        digest.update(str(item.relative_to(path)).encode())
-        digest.update(b"\0")
-        with item.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-    return digest.hexdigest()
-
-
-def gate_code_artifacts() -> dict[str, str]:
-    root = Path(__file__).resolve().parent
-    paths = {
-        "verify_promotion.py": root / "verify_promotion.py",
-        "corpus/build_sports_corpus.py": root / "corpus" / "build_sports_corpus.py",
-        "corpus/export_eval_fixtures.py": root / "corpus" / "export_eval_fixtures.py",
-        "eval/run_eval.py": root / "eval" / "run_eval.py",
-        "validate_coreml_detector.py": root / "validate_coreml_detector.py",
-    }
-    return {name: artifact_sha256(path) for name, path in paths.items()}
-
-
-def validate_required_facets(placements, negative_placements, preservation_kinds) -> None:
-    requested = {
-        "placement": set(placements),
-        "negative-placement": set(negative_placements),
-        "preservation-kind": set(preservation_kinds),
-    }
-    required = {
-        "placement": set(REQUIRED_PROMOTION_PLACEMENTS),
-        "negative-placement": set(REQUIRED_PROMOTION_NEGATIVE_PLACEMENTS),
-        "preservation-kind": set(REQUIRED_PROMOTION_PRESERVATION_KINDS),
-    }
-    missing = {
-        kind: sorted(values - requested[kind])
-        for kind, values in required.items() if values - requested[kind]
-    }
-    if missing:
-        raise ValueError(f"promotion configuration missing required facets: {missing}")
-
-
-def validate_gate_limits(*, min_precision: float, min_recall: float,
-                         min_placement_recall: float, max_false_positives: int,
-                         max_p95_ms: float) -> None:
-    failures = []
-    if min_precision < REQUIRED_MIN_PRECISION:
-        failures.append(f"min_precision must be >= {REQUIRED_MIN_PRECISION}")
-    if min_recall < REQUIRED_MIN_RECALL:
-        failures.append(f"min_recall must be >= {REQUIRED_MIN_RECALL}")
-    if min_placement_recall < REQUIRED_MIN_PLACEMENT_RECALL:
-        failures.append(f"min_placement_recall must be >= {REQUIRED_MIN_PLACEMENT_RECALL}")
-    if max_false_positives > REQUIRED_MAX_FALSE_POSITIVES:
-        failures.append(f"max_false_positives must be <= {REQUIRED_MAX_FALSE_POSITIVES}")
-    if max_p95_ms > REQUIRED_MAX_P95_MS:
-        failures.append(f"max_p95_ms must be <= {REQUIRED_MAX_P95_MS}")
-    if failures:
-        raise ValueError("promotion configuration weakens required limits: " + "; ".join(failures))
 
 
 def compare_quality(candidate: dict, baseline: dict, *, min_precision: float,
@@ -158,6 +89,8 @@ def main() -> int:
     parser.add_argument("--score", type=float, default=0.25)
     parser.add_argument("--benchmark-runs", type=int, default=30)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--exclusive-output", action="store_true",
+                        help="create the report without replacing an existing path")
     args = parser.parse_args()
 
     report: dict = {
@@ -237,7 +170,12 @@ def main() -> int:
         report["failed_stage_trace"] = traceback.format_exc()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.exclusive_output:
+        with args.output.open("x", encoding="utf-8") as handle:
+            handle.write(rendered)
+    else:
+        args.output.write_text(rendered)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["passed"] else 1
 

@@ -8,12 +8,20 @@ import os
 import shutil
 from pathlib import Path
 
-from verify_promotion import (GATE_SCHEMA, artifact_sha256, gate_code_artifacts,
-                              validate_gate_limits, validate_required_facets)
+from promotion_contract import (DEFAULT_MODEL_SIGNING_KEY_ENV, GATE_SCHEMA,
+                                artifact_sha256, gate_code_artifacts,
+                                rerun_promotion_gate, validate_gate_limits,
+                                validate_required_facets)
 
 
-def install(report_path: Path, destination: Path) -> Path:
-    report = json.loads(report_path.read_text())
+def validate_promotion_report_snapshot(
+    report_path: Path, artifact_key: str = "candidate_coreml"
+) -> tuple[dict, Path, bytes]:
+    """Revalidate one immutable read of a passing schema-5 report."""
+    if artifact_key not in {"candidate_coreml", "candidate_onnx"}:
+        raise ValueError(f"unsupported promotion artifact key: {artifact_key}")
+    report_bytes = report_path.read_bytes()
+    report = json.loads(report_bytes)
     if report.get("passed") is not True or report.get("failures"):
         raise ValueError("promotion report did not pass every gate")
     gate = report.get("gate", {})
@@ -45,15 +53,29 @@ def install(report_path: Path, destination: Path) -> Path:
     missing_artifacts = sorted(required_artifacts - artifacts.keys())
     if missing_artifacts:
         raise ValueError(f"passing report lacks required artifact fingerprints: {missing_artifacts}")
-    for key in sorted(required_artifacts):
-        artifact = artifacts[key]
-        path = Path(artifact["path"])
+    keys_to_verify = required_artifacts | {artifact_key}
+    for key in sorted(keys_to_verify):
+        artifact = artifacts.get(key)
+        if not isinstance(artifact, dict):
+            raise ValueError(f"passing report lacks {key} fingerprint")
+        path = Path(artifact.get("path", ""))
         if report["config"].get(key) != str(path):
             raise ValueError(f"{key} path disagrees with promotion config")
         if artifact_sha256(path) != artifact.get("sha256"):
             raise ValueError(f"{key} fingerprint no longer matches the passing report")
-    artifact = artifacts["candidate_coreml"]
-    source = Path(artifact["path"])
+    return report, Path(artifacts[artifact_key]["path"]), report_bytes
+
+
+def validate_promotion_report(
+    report_path: Path, artifact_key: str = "candidate_coreml"
+) -> tuple[dict, Path]:
+    report, artifact, _ = validate_promotion_report_snapshot(report_path, artifact_key)
+    return report, artifact
+
+
+def install(report_path: Path, destination: Path) -> Path:
+    report, source = validate_promotion_report(report_path)
+    artifact = report["artifacts"]["candidate_coreml"]
     if destination.exists() and artifact_sha256(destination) == artifact["sha256"]:
         return destination
 
@@ -83,11 +105,20 @@ def main() -> int:
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
     args = parser.parse_args()
-    installed = install(args.report, args.destination)
+    attested_report = args.destination.with_name(
+        args.destination.name + ".promotion-report.json"
+    )
+    rerun_promotion_gate(
+        args.report,
+        attested_report,
+        secret_environment_names=(DEFAULT_MODEL_SIGNING_KEY_ENV,),
+    )
+    installed = install(attested_report, args.destination)
     print(f"installed verified model at {installed}")
     backup = installed.with_name(installed.name + ".pre-promotion")
     if backup.exists():
         print(f"previous model preserved at {backup}")
+    print(f"fresh passing promotion report preserved at {attested_report}")
     return 0
 
 

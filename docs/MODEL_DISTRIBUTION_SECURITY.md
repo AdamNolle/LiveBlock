@@ -2,11 +2,11 @@
 
 ## Status
 
-The repository now has a promotion-bound distribution contract and signing
-entry point. Platform adoption is **not complete**: Windows/Linux still load a
-packaged ONNX file directly, and macOS production updates still need an atomic
-directory swap plus embedded release keyring. No checklist or release claim may
-state that every platform authenticates updates yet.
+The repository has a promotion-bound distribution contract and signing entry
+point. Windows and Linux now share authenticated, monotonic ONNX update
+activation; macOS production updates still need an atomic CoreML directory swap,
+embedded release keyring, and equivalent rollback state. No checklist or release
+claim may state that every platform authenticates updates yet.
 
 ## Trust chain
 
@@ -28,6 +28,17 @@ state that every platform authenticates updates yet.
 A valid signature from an arbitrary key is worthless. The allowlisted keyring
 is part of the signed/notarized application or signed Linux package. A release
 package must contain a nonempty approved ring before platform signing.
+
+### Threat boundary
+
+Rollback state prevents a compromised update channel, stale signed payload, or
+normal application workflow from installing an equal/older sequence. It does
+not defend against an attacker already able to rewrite arbitrary same-user
+application data, replay an old signed state/artifact pair, or modify the running
+process; such access can also disable or replace the application. The packaged
+signed release floor limits rollback below the current application bundle.
+Hardware/OS-backed non-replayable counters are not implemented, so claims must
+not imply protection from a fully compromised local user session.
 
 ## Signing command
 
@@ -74,13 +85,34 @@ promotion result.
 Each platform must atomically persist the highest accepted value per `modelId`.
 It must reject equal or lower values before staging. Downgrade recovery requires
 a newly signed application release or a newly promoted model with a higher
-sequence; deleting local state must not be a normal updater operation.
+sequence; deleting local state must not be a normal updater operation. The authenticated
+manifest packaged with the application is also a release floor: an initial
+application-data update must be newer, and a newer packaged detector supersedes
+an older persisted update at startup.
 
-The staged model must be loaded with the production runtime before success is
-reported. Inference/reload must be serialized so no thread observes partial
-state. A failed load restores the previous active artifact and leaves evidence
-for diagnosis. Existing lock, staging, or backup paths fail closed rather than
-being silently deleted.
+Windows and Linux persist closed schema-1 `model-update-state.json` content that
+contains the complete accepted signed manifest and highest sequence. Startup
+reverifies that signature and active artifact before loading. An interrupted
+swap whose backup matches the last accepted manifest is restored before load;
+an interrupted first installation with no committed state is removed from the
+new update-only path. Malformed/future state, symlinks, and mismatched state fail
+closed and remain untouched. The currently accepted signing key must remain in the packaged
+ring through rotation, because startup and the next update reauthenticate the
+accepted manifest.
+
+The staged model is loaded with the production ONNX Runtime adapter before
+success is reported, then swapped into the detector mutex only after state
+commit while update serialization remains held. A packaged bootstrap detector
+is also loaded only when its colocated signed manifest verifies against the
+embedded keyring; rejected accepted state never falls back to an older package.
+A failed load restores the previous active artifact and leaves the old
+signed state intact. An OS advisory transaction lock spans sequence checks,
+recovery, install, runtime validation, state commit, and the in-memory detector
+swap; its marker is safely reusable after process death. A platform application
+mutex also serializes command preparation in one process. Staging paths and
+non-regular lock/backup files fail closed. A regular previous backup is never
+loaded without matching accepted state and is removed only while holding the
+next update transaction lock.
 
 CoreML directory activation requires macOS `renameatx_np(RENAME_SWAP)` (or an
 equivalent proven atomic exchange), recursive no-symlink/no-special-file copy,
@@ -99,15 +131,20 @@ atomic replacement and are not sufficient.
 
 ## Current automated evidence
 
-- Rust rejects future manifest/keyring schemas, taxonomy drift, malformed
-  hashes/keys/signatures, duplicate key IDs, empty release rings, symlinks,
-  staging collisions, concurrent locks, and artifact tampering.
+- Rust rejects future manifest/keyring/update-state schemas, taxonomy drift,
+  malformed hashes/keys/signatures, duplicate key IDs, empty release rings,
+  rollback sequences, untracked active files, symlinks, staging collisions,
+  concurrent locks, and artifact tampering.
 - Python and Rust implement the same domain-separated,
   length-prefixed `sha256-file-or-tree-v1` algorithm.
 - The signing tests prove failed/stale reports, mutated artifacts, absent ONNX
   parity artifacts, missing secrets, and symlinked trees cannot be signed.
-- CI parses both schemas and runs these tests without a production private key.
+- CI parses all three distribution schemas and runs these tests without a
+  production private key. Windows/Linux Release compilation uses the explicit
+  `LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1` development override; both build
+  scripts otherwise reject empty production rings.
 
-These are contract and tool tests, not evidence of completed platform updater
+These are contract, adapter, and tool tests, not evidence of macOS updater
 adoption, production key custody, package signing, notarization, or rollback on
-real devices.
+real Windows/Linux devices. The committed development rings are intentionally
+empty, so no production package can yet be represented as distributable.

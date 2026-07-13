@@ -7,8 +7,9 @@ independent wire formats.
 ## Versioning rules
 
 - `schemaVersion` is required in every current persisted document.
-- Version 1 is current for regions, label sidecars, detector settings, and
-  trusted-public-key rings. Signed model manifests are version 2.
+- Version 1 is current for regions, label sidecars, detector settings,
+  trusted-public-key rings, and accepted model-update state. Signed model
+  manifests are version 2.
 - Legacy region arrays and unversioned label/settings objects are version 0.
   They are accepted only when structurally valid and atomically rewritten to
   version 1.
@@ -69,9 +70,15 @@ changes rollback policy.
 
 ## Platform adoption
 
-Windows and Linux already depend on `liveblock-config`, `liveblock-regions`, and
-`liveblock-labels`; their future ONNX update commands should call the shared
-file installer rather than adding platform copy logic. macOS currently uses the
-stricter schema-5 Python installer for developer promotion and still needs a
-signed, atomic directory-aware production updater. Therefore “signed-manifest
-verification on every platform” remains open despite the shared primitive.
+Windows and Linux expose matching `install_model_update` commands backed by the
+shared coordinator. They resolve a packaged nonempty keyring, reject rollback,
+load with the production ONNX adapter before committing schema-1 update state,
+atomically activate at a fixed application-data path, and reauthenticate the
+persisted signed manifest plus artifact at startup. The authenticated packaged
+manifest supplies the initial monotonic floor, so an older still-signed model
+cannot replace a newer detector shipped with the application. Their Release build scripts
+reject empty rings unless the explicit source/CI-only override is set.
+
+macOS currently uses the stricter schema-5 Python installer for developer
+promotion and still needs a signed, atomic directory-aware production updater.
+Therefore “signed-manifest verification on every platform” remains open.

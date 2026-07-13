@@ -43,6 +43,8 @@ final class AppController: ObservableObject {
         didSet { updateAutoCaptureTimer() }
     }
     @Published private(set) var lastCaptureTimestamp: Date? = nil
+    @Published private(set) var modelUpdateInProgress: Bool = false
+    @Published private(set) var modelUpdateStatus: String? = nil
     /// Frontmost-app metadata, refreshed on `NSWorkspace.didActivateApplicationNotification`.
     /// Drives the `pauseOnFullscreen` toggle and per-app rules pipeline gates.
     @Published private(set) var frontmostBundleID: String? = nil
@@ -491,6 +493,41 @@ final class AppController: ObservableObject {
         }
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Select and install a signed offline update package. The package supplies
+    /// no trust root; only the keyring embedded in the signed app is accepted.
+    func chooseAndInstallSignedModelUpdate() {
+        guard !modelUpdateInProgress else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose signed LiveBlock model update"
+        panel.prompt = "Verify and install"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let package = panel.url else { return }
+
+        modelUpdateInProgress = true
+        modelUpdateStatus = "Verifying signed model update…"
+        let captureManager = self.captureManager
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let receipt = try MacModelDistribution().installUpdatePackage(at: package) {
+                    captureManager.reloadDetectionModel()
+                }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.labelingController.reloadDetectionModel()
+                    self.modelUpdateStatus = "Installed model \(receipt.modelVersion) (sequence \(receipt.releaseSequence))."
+                    self.modelUpdateInProgress = false
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    self?.modelUpdateStatus = "Model update rejected: \(error.localizedDescription)"
+                    self?.modelUpdateInProgress = false
+                }
+            }
+        }
     }
 
     func showTrainingDashboard() {

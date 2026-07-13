@@ -37,8 +37,11 @@ LiveBlock *.xcodeproj/
 Package.resolved
 .build/
 
-# CoreML build artifacts
+# CoreML build artifacts and protected release-only model inputs
 *.mlmodelc
+/Sources/Resources/release-liveblock-detector.mlmodelc/
+/Sources/Resources/release-liveblock-detector.manifest.json
+/Sources/Resources/release-trusted-model-keys.json
 
 # Python
 __pycache__/

@@ -8,6 +8,7 @@ DOC = (ROOT / "docs/WINDOWS_RELEASE.md").read_text()
 CI = (ROOT / ".github/workflows/ci.yml").read_text()
 CONFIG = json.loads((ROOT / "platform/windows/src-tauri/tauri.conf.json").read_text())
 BUILD_RS = (ROOT / "platform/windows/src-tauri/build.rs").read_text()
+CARGO_TOML = (ROOT / "platform/windows/src-tauri/Cargo.toml").read_text()
 
 
 class WindowsPackagingContractTests(unittest.TestCase):
@@ -77,6 +78,8 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn("package.sha256", CI)
         self.assertIn("msi-payload-inventory.json", CI)
         self.assertIn("msi-extracted/**", CI)
+        self.assertIn('"download-binaries"', CARGO_TOML)
+        self.assertIn('"copy-dylibs"', CARGO_TOML)
 
 
 if __name__ == "__main__":

@@ -1,54 +1,63 @@
 {
-    "app-id": "com.adamnolle.LiveBlock",
-    "runtime": "org.gnome.Platform",
-    "runtime-version": "47",
-    "sdk": "org.gnome.Sdk",
-    "sdk-extensions": [
-        "org.freedesktop.Sdk.Extension.rust-stable",
-        "org.freedesktop.Sdk.Extension.node20"
-    ],
-    "command": "liveblock-linux",
-    "finish-args": [
-        "--share=ipc",
-        "--share=network",
-        "--socket=wayland",
-        "--socket=fallback-x11",
-        "--device=dri",
-        "--device=all",
-        "--filesystem=xdg-data/LiveBlock:create",
-        "--talk-name=org.freedesktop.portal.Desktop",
-        "--talk-name=org.freedesktop.portal.ScreenCast",
-        "--talk-name=org.freedesktop.portal.GlobalShortcuts",
-        "--talk-name=org.freedesktop.portal.FileChooser",
-        "--talk-name=org.freedesktop.portal.Notifications",
-        "--system-talk-name=org.freedesktop.RealtimeKit1"
-    ],
-    "build-options": {
-        "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin",
-        "build-args": ["--share=network"],
-        "env": {
-            "CARGO_HOME": "/run/build/liveblock-linux/cargo",
-            "RUSTFLAGS": "--remap-path-prefix =../"
-        }
-    },
-    "modules": [
+  "app-id": "com.adamnolle.LiveBlock",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "47",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable",
+    "org.freedesktop.Sdk.Extension.node20"
+  ],
+  "command": "liveblock-linux",
+  "finish-args": [
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--talk-name=org.freedesktop.portal.Desktop"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/liveblock-linux/cargo",
+      "CARGO_NET_OFFLINE": "true",
+      "LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING": "1",
+      "RUSTFLAGS": "--remap-path-prefix =../"
+    }
+  },
+  "modules": [
+    {
+      "name": "liveblock-linux",
+      "buildsystem": "simple",
+      "build-commands": [
+        "python3 tools/stage_linux_onnxruntime.py --architecture ${FLATPAK_ARCH} --archive onnxruntime-${FLATPAK_ARCH}.tgz --destination platform/linux/src-tauri/resources/onnxruntime",
+        "cd platform/_shared-frontend && npm ci --offline && npm run build",
+        "cd platform/linux/src-tauri && ../../_shared-frontend/node_modules/.bin/tauri build --no-bundle --ci",
+        "install -Dm755 platform/linux/target/release/liveblock-linux /app/bin/liveblock-linux",
+        "mkdir -p /app/lib/LiveBlock/resources && cp -a platform/linux/src-tauri/resources/. /app/lib/LiveBlock/resources/",
+        "install -Dm644 platform/linux/flatpak/com.adamnolle.LiveBlock.desktop /app/share/applications/com.adamnolle.LiveBlock.desktop",
+        "install -Dm644 platform/linux/flatpak/com.adamnolle.LiveBlock.metainfo.xml /app/share/metainfo/com.adamnolle.LiveBlock.metainfo.xml",
+        "install -Dm644 platform/linux/icons/icon.png /app/share/icons/hicolor/512x512/apps/com.adamnolle.LiveBlock.png"
+      ],
+      "sources": [
         {
-            "name": "liveblock-linux",
-            "buildsystem": "simple",
-            "build-commands": [
-                "cd platform/linux && npm install --offline",
-                "cd platform/linux && cargo tauri build --bundles deb",
-                "install -Dm755 platform/linux/src-tauri/target/release/liveblock-linux /app/bin/liveblock-linux",
-                "install -Dm644 platform/linux/flatpak/com.adamnolle.LiveBlock.desktop /app/share/applications/com.adamnolle.LiveBlock.desktop",
-                "install -Dm644 platform/linux/flatpak/com.adamnolle.LiveBlock.metainfo.xml /app/share/metainfo/com.adamnolle.LiveBlock.metainfo.xml",
-                "install -Dm644 platform/linux/icons/icon.png /app/share/icons/hicolor/512x512/apps/com.adamnolle.LiveBlock.png"
-            ],
-            "sources": [
-                {
-                    "type": "dir",
-                    "path": "../../.."
-                }
-            ]
+          "type": "dir",
+          "path": "../../.."
+        },
+        {
+          "type": "file",
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-x64-1.18.1.tgz",
+          "sha256": "a0994512ec1e1debc00c18bfc7a5f16249f6ebd6a6128ff2034464cc380ea211",
+          "dest-filename": "onnxruntime-x86_64.tgz",
+          "only-arches": ["x86_64"]
+        },
+        {
+          "type": "file",
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-aarch64-1.18.1.tgz",
+          "sha256": "c1dcd8ab29e8d227d886b6ee415c08aea893956acf98f0758a42a84f27c02851",
+          "dest-filename": "onnxruntime-aarch64.tgz",
+          "only-arches": ["aarch64"]
         }
-    ]
+      ]
+    }
+  ]
 }

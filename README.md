@@ -247,6 +247,7 @@ LiveBlock/
 - [`docs/PRIVACY_SECURITY_REVIEW.md`](docs/PRIVACY_SECURITY_REVIEW.md) — local frame/data flow and authenticated update boundary review.
 - [`docs/RELEASE_NOTES_DRAFT.md`](docs/RELEASE_NOTES_DRAFT.md) — unreleased scope, implemented behavior, and known limitations.
 - [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) — artifact inventories, SBOM/license evidence, and package-integrity boundaries.
+- [`docs/LINUX_PACKAGING.md`](docs/LINUX_PACKAGING.md) — pinned runtime staging, native build evidence, and Flatpak permission/source boundaries.
 - [`ASSESSMENT.md`](ASSESSMENT.md) — standing audit and prioritized roadmap.
 - [`AI.md`](AI.md) — guide for AI agents working on this codebase.
 - [`tools/README.md`](tools/README.md) — training-pipeline walkthrough.

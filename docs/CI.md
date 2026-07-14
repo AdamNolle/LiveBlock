@@ -11,7 +11,9 @@
 - Linux library tests plus debug/release all-target compilation after installing
   Tauri, PipeWire, Wayland, and X11 development headers; Release separately
   proves that an unpackaged ONNX Runtime is rejected before using explicit
-  compile-only empty-keyring/runtime overrides.
+  compile-only empty-keyring/runtime overrides; then CI checksum-stages the
+  pinned CPU runtime, builds a build-only `.deb`, extracts it, and immediately
+  creates/verifies a canonical byte/mode inventory.
 
 Cargo lockfiles pin `ort`, `ort-sys`, and `ndarray` exactly because mismatched
 prerelease versions do not compile together.
@@ -20,8 +22,12 @@ The shared job uploads `release-dependency-integrity-evidence`: a deterministic
 CycloneDX 1.5 build-input SBOM, declared-license policy/report, a verified
 schema-1 inventory of the built webview payload, and a deterministic tar plus
 SHA-256 preserving the exact inventoried bytes/modes for independent recheck. See
-[`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md). This CI payload is explicitly
-`build-only`; it is not an installer or signed production package.
+[`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md). This webview payload is explicitly `build-only`; it is not an installer or
+signed production package. The Linux job separately uploads
+`linux-build-only-package-evidence` containing the exact `.deb`, package hash,
+extracted-payload inventory, and runtime staging manifest. Its embedded keyring
+is intentionally empty, so it proves package construction only and must not be
+distributed. See [`LINUX_PACKAGING.md`](LINUX_PACKAGING.md).
 
 A green compile job proves source/build compatibility on that hosted image. It
 does **not** certify DirectML/CUDA/ROCm/CoreML performance, capture permission

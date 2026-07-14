@@ -77,6 +77,8 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn(
             '--output "$evidence/$format-payload-inventory.json"', self.workflow
         )
+        self.assertIn("LICENSE.onnxruntime.txt", self.workflow)
+        self.assertNotIn("onnxruntime/LICENSE.txt", self.workflow)
         self.assertIn("runtime-staging-manifest.json", self.workflow)
         self.assertIn("packages.sha256", self.workflow)
 

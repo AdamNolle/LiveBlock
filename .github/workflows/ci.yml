@@ -282,10 +282,17 @@ jobs:
           deb_name="$(basename "$deb")"; rpm_name="$(basename "$rpm")"; appimage_name="$(basename "$appimage")"
           cp "$deb" "$rpm" "$appimage" "$evidence/packages/"
           dpkg-deb --extract "$deb" "$evidence/deb-root"
-          (cd "$evidence/rpm-root" && rpm2cpio "$GITHUB_WORKSPACE/$rpm" | cpio -idm --quiet)
+          echo "extracted deb payload"
+          (cd "$evidence/rpm-root" && rpm2cpio "$GITHUB_WORKSPACE/$rpm" | cpio -idm)
+          echo "extracted rpm payload"
           chmod +x "$evidence/packages/$appimage_name"
           (cd "$evidence/appimage-extract" && ../packages/"$appimage_name" --appimage-extract > ../appimage-extraction.log)
+          echo "extracted AppImage payload"
           for root in "$evidence/deb-root" "$evidence/rpm-root" "$evidence/appimage-extract/squashfs-root"; do
+            echo "validating $root"
+            find "$root/usr" -maxdepth 7 \( -type f -o -type l \) \
+              \( -name 'liveblock-linux' -o -name 'libonnxruntime.so' -o -name 'trusted-model-keys.json' \) \
+              -printf '%y %p\n' | sort
             test -x "$root/usr/bin/liveblock-linux"
             test -f "$root/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so"
             test ! -L "$root/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so"

@@ -60,7 +60,10 @@ class LinuxPackagingContractTests(unittest.TestCase):
         bundle = self.tauri["bundle"]
         self.assertEqual(bundle["targets"], ["deb", "rpm", "appimage"])
         self.assertIn("resources/**/*", bundle["resources"])
-        self.assertIn("npm ci", self.tauri["build"]["beforeBuildCommand"])
+        self.assertEqual(
+            self.tauri["build"]["beforeBuildCommand"],
+            "cd ../_shared-frontend && npm ci && npm run build",
+        )
         self.assertNotIn("npm install", self.tauri["build"]["beforeBuildCommand"])
 
 

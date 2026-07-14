@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.adamnolle.LiveBlock",
   "build": {
-    "beforeDevCommand": "cd ../../_shared-frontend && npm install && npm run dev",
-    "beforeBuildCommand": "cd ../../_shared-frontend && npm ci && npm run build",
+    "beforeDevCommand": "cd ../_shared-frontend && npm install && npm run dev",
+    "beforeBuildCommand": "cd ../_shared-frontend && npm ci && npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../../_shared-frontend/dist"
   },

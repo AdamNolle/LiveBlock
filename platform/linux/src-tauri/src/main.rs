@@ -427,11 +427,7 @@ fn list_screenshots() -> Vec<ScreenshotEntry> {
     let mut out: Vec<ScreenshotEntry> = entries
         .flatten()
         .filter_map(|e| {
-            let p = e.path();
-            let ext = p.extension().and_then(|x| x.to_str())?;
-            if !ext.eq_ignore_ascii_case("png") {
-                return None;
-            }
+            let p = paths::validate_screenshot_path(&e.path()).ok()?;
             let stem = p.file_stem()?.to_string_lossy().into_owned();
             let label = paths::label_path_for(&p);
             Some(ScreenshotEntry {
@@ -456,6 +452,7 @@ struct ScreenshotData {
 #[tauri::command]
 fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let path = paths::validate_screenshot_path(&path).map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let image = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
     Ok(ScreenshotData {
@@ -467,14 +464,18 @@ fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
 
 #[tauri::command]
 fn save_label(path: PathBuf, doc: LabelDocument) -> Result<(), String> {
+    let path = paths::validate_label_path(&path, false).map_err(|e| e.to_string())?;
+    validate_label_binding(&path, &doc)?;
     doc.save(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
     if !path.exists() {
+        paths::validate_label_path(&path, false).map_err(|e| e.to_string())?;
         return Ok(None);
     }
+    let path = paths::validate_label_path(&path, true).map_err(|e| e.to_string())?;
     LabelDocument::load(&path)
         .map(Some)
         .map_err(|e| e.to_string())
@@ -482,9 +483,23 @@ fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
 
 #[tauri::command]
 fn discard_screenshot(path: PathBuf) -> Result<(), String> {
-    paths::ensure_directories().map_err(|e| e.to_string())?;
+    let path = paths::validate_screenshot_path(&path).map_err(|e| e.to_string())?;
     let dst = paths::trash_dir().join(path.file_name().ok_or("no filename")?);
-    std::fs::rename(&path, &dst).map_err(|e| e.to_string())
+    liveblock_config::move_regular_file_no_replace(&path, &dst).map_err(|e| e.to_string())
+}
+
+fn validate_label_binding(path: &std::path::Path, doc: &LabelDocument) -> Result<(), String> {
+    let label_stem = path.file_stem().and_then(|value| value.to_str()).ok_or("invalid label name")?;
+    let image = std::path::Path::new(&doc.image);
+    if image.parent().is_some_and(|parent| !parent.as_os_str().is_empty())
+        || image.extension().and_then(|value| value.to_str()) != Some("png")
+        || image.file_stem().and_then(|value| value.to_str()) != Some(label_stem)
+    {
+        return Err("label image must be the matching managed screenshot filename".into());
+    }
+    let screenshot = paths::screenshots_dir().join(&doc.image);
+    paths::validate_screenshot_path(&screenshot).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: Arc<AppState>) {
@@ -594,12 +609,7 @@ fn main() {
     );
     let app_state = AppState::new(region_store);
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_os::init())
-        .manage(app_state)
+    tauri::Builder::default().manage(app_state)
         .setup(|app| {
             let detector = match model_updates::load_authenticated_active(app.handle()) {
                 Ok(Some(detector)) => {

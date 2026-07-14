@@ -1,5 +1,6 @@
 pub mod desktop_contract;
 pub mod embeddings;
+pub mod managed_path;
 pub mod model_manifest;
 pub mod model_update;
 pub mod settings;
@@ -11,6 +12,7 @@ pub use desktop_contract::{
     DESKTOP_CONTRACT_VERSION,
 };
 pub use embeddings::ClassEmbeddings;
+pub use managed_path::{move_regular_file_no_replace, validate_managed_file_path, ManagedPathMode};
 pub use model_manifest::{
     artifact_sha256, install_verified_artifact, verifying_key_from_base64, ArtifactFormat,
     ModelManifest, ModelManifestError, TrustedKeyring, TrustedKeyringDocument, TrustedPublicKey,

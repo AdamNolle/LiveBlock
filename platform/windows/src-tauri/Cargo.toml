@@ -25,10 +25,6 @@ liveblock-detection = { path = "../../../core/crates/liveblock-detection" }
 liveblock-config = { path = "../../../core/crates/liveblock-config" }
 
 tauri = { version = "2.0", features = ["tray-icon", "image-png"] }
-tauri-plugin-dialog = "2.0"
-tauri-plugin-fs = "2.0"
-tauri-plugin-shell = "2.0"
-tauri-plugin-os = "2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"

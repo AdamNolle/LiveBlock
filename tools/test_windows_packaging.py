@@ -37,7 +37,9 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertNotIn(".pfx", SCRIPT.lower())
         self.assertIn("release_evidence.py inventory", SCRIPT)
         self.assertIn("Get-FileHash -Algorithm SHA256", SCRIPT)
-        self.assertIn("msiexec.exe /a", SCRIPT)
+        self.assertIn('Start-Process -FilePath "msiexec.exe"', SCRIPT)
+        self.assertIn('"/a"', SCRIPT)
+        self.assertIn("-Wait -PassThru", SCRIPT)
         self.assertIn('"onnxruntime.dll"', SCRIPT)
         self.assertIn("msi-payload-inventory.json", SCRIPT)
 

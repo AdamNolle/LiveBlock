@@ -131,8 +131,12 @@ try {
     try {
         cargo build --release
         if ($LASTEXITCODE -ne 0) { throw "Windows release runtime build failed" }
-        $windowsTarget = Join-Path $Root "platform\windows\target"
-        $runtimeCandidates = @(Get-ChildItem -LiteralPath $windowsTarget -Recurse -Force -Filter "onnxruntime.dll" |
+        $runtimeSearchRoots = @(
+            (Join-Path $Root "platform\windows\target"),
+            (Join-Path $env:LOCALAPPDATA "ort.pyke.io\dfbin")
+        )
+        $runtimeCandidates = @($runtimeSearchRoots | Where-Object { Test-Path -LiteralPath $_ -PathType Container } |
+            ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -Force -Filter "onnxruntime.dll" } |
             Where-Object { -not $_.PSIsContainer })
         if ($runtimeCandidates.Count -eq 0) { throw "Windows release build did not produce onnxruntime.dll" }
         $runtimeHashes = @($runtimeCandidates | ForEach-Object {

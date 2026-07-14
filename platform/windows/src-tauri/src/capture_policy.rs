@@ -7,6 +7,12 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// A sequenced toggle emitted before (or at) panic must never restart capture
+/// after panic teardown wins the lifecycle lock.
+pub fn action_is_newer_than_panic(action_sequence: u64, last_panic_sequence: u64) -> bool {
+    action_sequence > last_panic_sequence
+}
+
 #[derive(Default)]
 pub struct CaptureTelemetry {
     captured_frames: AtomicU64,
@@ -230,6 +236,13 @@ mod tests {
             }
         }
         assert!(!looks_like_protected_black(&dark, 64, 64));
+    }
+
+    #[test]
+    fn sequenced_panic_rejects_delayed_toggle_but_allows_fresh_intent() {
+        assert!(!action_is_newer_than_panic(8, 9));
+        assert!(!action_is_newer_than_panic(9, 9));
+        assert!(action_is_newer_than_panic(10, 9));
     }
 
     #[test]

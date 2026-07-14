@@ -12,6 +12,7 @@ LINUX_UPDATES = (ROOT / "platform/linux/src-tauri/src/model_updates.rs").read_te
 
 EXPECTED_COMMANDS = {
     "get_capabilities",
+    "begin_user_action",
     "start_capture",
     "stop_capture",
     "get_capture_telemetry",
@@ -69,12 +70,26 @@ class DesktopAdapterContractTests(unittest.TestCase):
         self.assertIn("source = open_capture()", LINUX)
         self.assertIn("portal-selection", LINUX)
         self.assertIn("x11-root", LINUX)
-        self.assertIn("startCapture: (monitorId: string)", IPC)
+        self.assertIn("startCapture: async (monitorId: string)", IPC)
+        self.assertIn('invoke<number>("begin_user_action")', IPC)
         self.assertIn("getCaptureTelemetry", IPC)
         self.assertIn("loadScreenshot: (path: string) => invoke<ScreenshotData>", IPC)
         self.assertIn('listen<boolean>("capture-state-changed"', IPC)
         self.assertIn('listen<boolean>("protected-content-changed"', IPC)
         self.assertIn('listen<string>("capture-runtime-error"', IPC)
+
+    def test_native_hotkey_and_panic_dispatch_is_not_frontend_only(self):
+        for event in (
+            "hotkey-toggle-capture",
+            "hotkey-toggle-editor",
+            "hotkey-capture-screenshot",
+            "hotkey-panic-disable",
+        ):
+            self.assertIn(event, WINDOWS)
+        self.assertIn("panic_disable_action", WINDOWS)
+        self.assertIn('for label in ["editor", "render", "labeling", "training"]', WINDOWS)
+        self.assertIn("dispatch_hotkey", LINUX)
+        self.assertIn("PanicDisable", LINUX)
 
     def test_release_training_uses_shared_fail_closed_gate(self):
         for source in (WINDOWS, LINUX):

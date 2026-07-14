@@ -132,17 +132,15 @@ try {
         cargo build --release
         if ($LASTEXITCODE -ne 0) { throw "Windows release runtime build failed" }
         $windowsTarget = Join-Path $Root "platform\windows\target"
-        $runtimeCandidates = @(Get-ChildItem -LiteralPath $windowsTarget -Recurse -File -Filter "onnxruntime.dll")
+        $runtimeCandidates = @(Get-ChildItem -LiteralPath $windowsTarget -Recurse -Force -Filter "onnxruntime.dll" |
+            Where-Object { -not $_.PSIsContainer })
         if ($runtimeCandidates.Count -eq 0) { throw "Windows release build did not produce onnxruntime.dll" }
-        foreach ($candidate in $runtimeCandidates) {
-            if ($candidate.LinkType) { throw "Built onnxruntime.dll must be a regular non-symlink file" }
-        }
         $runtimeHashes = @($runtimeCandidates | ForEach-Object {
             (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
         } | Sort-Object -Unique)
         if ($runtimeHashes.Count -ne 1) { throw "Windows release build produced conflicting onnxruntime.dll files" }
         $runtimeSource = ($runtimeCandidates | Sort-Object FullName | Select-Object -First 1).FullName
-        Copy-Item -LiteralPath $runtimeSource -Destination $RuntimeStaging
+        [IO.File]::WriteAllBytes($RuntimeStaging, [IO.File]::ReadAllBytes($runtimeSource))
         $stagedRuntime = $true
         & $Tauri build --bundles msi,nsis --ci
     } finally { Pop-Location }

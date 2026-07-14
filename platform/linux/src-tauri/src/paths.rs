@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use liveblock_config::{validate_managed_file_path, ManagedPathMode};
 use std::fs::File;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -91,6 +92,32 @@ pub fn create_private_file(path: &Path) -> Result<File> {
 
 pub fn new_screenshot_stem() -> String {
     Utc::now().format("%Y%m%d-%H%M%S-%3f").to_string() + "Z"
+}
+
+pub fn validate_screenshot_path(path: &Path) -> Result<PathBuf> {
+    ensure_directories()?;
+    validate_managed_file_path(
+        path,
+        &screenshots_dir(),
+        "png",
+        ManagedPathMode::ExistingRegularFile,
+    )
+    .context("validate managed screenshot path")
+}
+
+pub fn validate_label_path(path: &Path, must_exist: bool) -> Result<PathBuf> {
+    ensure_directories()?;
+    validate_managed_file_path(
+        path,
+        &labels_dir(),
+        "json",
+        if must_exist {
+            ManagedPathMode::ExistingRegularFile
+        } else {
+            ManagedPathMode::ExistingOrNewRegularFile
+        },
+    )
+    .context("validate managed label path")
 }
 
 pub fn label_path_for(screenshot: &Path) -> PathBuf {

@@ -62,10 +62,6 @@ fn main() {
     );
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_os::init())
         .setup(move |app| {
             let handle = app.handle().clone();
             let state = AppState::new(handle.clone(), regions.clone());
@@ -699,9 +695,26 @@ fn capture_screenshot_for_labeling_inner(state: &AppState) -> Result<Option<Path
     for c in frame.bytes.chunks_exact(4) {
         rgba.extend_from_slice(&[c[2], c[1], c[0], c[3]]);
     }
-    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(frame.width, frame.height, rgba)
+    let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(frame.width, frame.height, rgba)
         .ok_or("invalid frame")?;
-    img.save(&dst).map_err(|e| e.to_string())?;
+    let write_result = (|| -> Result<(), String> {
+        use std::io::Write;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dst)
+            .map_err(|error| error.to_string())?;
+        let mut writer = std::io::BufWriter::new(file);
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut writer, image::ImageFormat::Png)
+            .map_err(|error| error.to_string())?;
+        writer.flush().map_err(|error| error.to_string())?;
+        writer.get_ref().sync_all().map_err(|error| error.to_string())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&dst);
+        return Err(error);
+    }
     Ok(Some(dst))
 }
 
@@ -715,9 +728,7 @@ fn list_screenshots() -> Vec<ScreenshotEntry> {
     let mut out: Vec<ScreenshotEntry> = entries
         .flatten()
         .filter_map(|e| {
-            let p = e.path();
-            let ext = p.extension().and_then(|x| x.to_str())?;
-            if !ext.eq_ignore_ascii_case("png") { return None; }
+            let p = paths::validate_screenshot_path(&e.path()).ok()?;
             let stem = p.file_stem()?.to_string_lossy().into_owned();
             let label = paths::label_path_for(&p);
             Some(ScreenshotEntry { path: p, stem, labeled: label.exists() })
@@ -739,6 +750,7 @@ struct ScreenshotData {
 #[tauri::command]
 fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let path = paths::validate_screenshot_path(&path).map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
     Ok(ScreenshotData {
@@ -750,20 +762,41 @@ fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
 
 #[tauri::command]
 fn save_label(path: PathBuf, doc: LabelDocument) -> Result<(), String> {
+    let path = paths::validate_label_path(&path, false).map_err(|e| e.to_string())?;
+    validate_label_binding(&path, &doc)?;
     doc.save(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
-    if !path.exists() { return Ok(None); }
+    if !path.exists() {
+        // Even a missing path must point to the fixed labels directory.
+        paths::validate_label_path(&path, false).map_err(|e| e.to_string())?;
+        return Ok(None);
+    }
+    let path = paths::validate_label_path(&path, true).map_err(|e| e.to_string())?;
     LabelDocument::load(&path).map(Some).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn discard_screenshot(path: PathBuf) -> Result<(), String> {
-    let _ = paths::ensure_directories();
+    let path = paths::validate_screenshot_path(&path).map_err(|e| e.to_string())?;
     let dst = paths::trash_dir().join(path.file_name().ok_or("no name")?);
-    std::fs::rename(&path, &dst).map_err(|e| e.to_string())
+    liveblock_config::move_regular_file_no_replace(&path, &dst).map_err(|e| e.to_string())
+}
+
+fn validate_label_binding(path: &std::path::Path, doc: &LabelDocument) -> Result<(), String> {
+    let label_stem = path.file_stem().and_then(|value| value.to_str()).ok_or("invalid label name")?;
+    let image = std::path::Path::new(&doc.image);
+    if image.parent().is_some_and(|parent| !parent.as_os_str().is_empty())
+        || image.extension().and_then(|value| value.to_str()) != Some("png")
+        || image.file_stem().and_then(|value| value.to_str()) != Some(label_stem)
+    {
+        return Err("label image must be the matching managed screenshot filename".into());
+    }
+    let screenshot = paths::screenshots_dir().join(&doc.image);
+    paths::validate_screenshot_path(&screenshot).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

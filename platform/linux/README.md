@@ -11,10 +11,13 @@ Liquid Glass aesthetic.
 dedicated PipeWire loop with capacity-one newest-frame delivery and BGRA/BGRx,
 NV12, and YUY2 conversion. X11 captures the virtual root through XComposite and
 fd-backed MIT-SHM, converting padded 24/32-bit server pixels to packed BGRA.
-Both paths feed local ONNX detection, CPU inpainting, patch rendering,
-telemetry, and labeling screenshots. Native CI proves compilation and format
-unit tests; real compositor/server, multi-output, GPU, overlay, hotkey, and
-lifecycle certification remain open.
+Both paths feed local ONNX detection, bounded wgpu/WGSL mirror-blend
+inpainting when Vulkan/GL initialization succeeds, explicit CPU fallback,
+webview patch compositing, telemetry, and labeling screenshots. GPU output is
+read back for PNG patch transport; this is not DMA-BUF or zero-copy rendering.
+Native CI proves compilation, WGSL parsing, CPU policy tests, and opportunistic
+software-adapter parity where available; real compositor/server, multi-output,
+GPU, overlay, hotkey, and lifecycle certification remain open.
 
 ## Distribution-server matrix
 
@@ -123,8 +126,23 @@ Schema is byte-compatible with macOS + Windows so labels round-trip.
 cargo tauri build --features cuda
 ```
 
-Production packages must bundle or declare a trusted local ONNX Runtime CPU
-library. LiveBlock does not download runtimes, code, or replacement weights.
+Production packages must bundle `resources/onnxruntime/libonnxruntime.so` as a
+real non-symlink 64-bit target-architecture ELF shared object beside a nonempty
+`THIRD-PARTY-NOTICES.txt`; runtime initialization is pinned to that package
+resource before any detector session opens and checks the ONNX Runtime API.
+Optional
+provider packages additionally require `libonnxruntime_providers_shared.so` and
+the one selected provider library. Every transitive vendor library and notice
+must be included in the final artifact inventory/SBOM. The EP registration is
+preferred with ONNX Runtime's explicit CPU fallback; capability output reports
+configuration, not proof that a GPU EP actually executed. LiveBlock does not
+download runtimes, code, or replacement weights.
+
+Release builds reject an unpackaged runtime. The
+`LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1` escape hatch is compile-only for source/CI,
+is accepted only alongside the actually empty development keyring override,
+and must never be used to create a distributed package. It cannot accompany
+production trust roots.
 
 ## Known limitations
 
@@ -156,9 +174,10 @@ flatpak run com.adamnolle.LiveBlock
 1. **PipeWire SPA pod negotiation** — BGRA/BGRx, YUY2, and NV12 conversion is
    implemented and unit-tested, but DMA-BUF-only portals, plane metadata, color
    range, resize, revocation, and compositor-specific negotiation need devices.
-2. **Wayland layer-shell click-through with wgpu surface** — the empty
-   input region must be re-applied after every `wl_surface::commit` and
-   resize. KWin in particular re-asserts the input region on commit.
+2. **wgpu dispatch and layer-shell click-through** — validate mirror-blend
+   output/250 ms fallback on Vulkan and GL drivers, then confirm the empty input
+   region remains effective after every `wl_surface::commit` and resize. KWin
+   in particular re-asserts the input region on commit.
 3. **ort EP shared-library discovery in Flatpak** — `libonnxruntime_providers_*.so`
    must be reachable inside the sandbox. The default `cpu` feature avoids
    this; CUDA/ROCm/OpenVINO need explicit `--filesystem` permissions.

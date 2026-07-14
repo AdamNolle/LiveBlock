@@ -59,8 +59,10 @@ No current platform profile reports `releaseReady: true`.
 
 - Wayland ScreenCast portal plus PipeWire capture for mapped BGRA/BGRx, NV12,
   and YUY2 buffers; X11 virtual-root XComposite/MIT-SHM capture.
-- Local ONNX CPU processing, CPU inpainting, private screenshot paths, and
-  fail-closed capture state.
+- Local ONNX processing with CPU default/fallback, bounded wgpu/WGSL
+  mirror-blend patch generation when Vulkan/GL initializes, private screenshot
+  paths, and fail-closed capture state. GPU patches are read back for webview
+  compositing; zero-copy rendering is not implemented or certified.
 - Permissioned Wayland GlobalShortcuts and X11 passive grabs with runtime
   availability.
 - KDE/wlroots GTK layer-shell and X11 XFixes click-through plumbing; GNOME uses

@@ -53,6 +53,20 @@ fn get_capabilities(
         session::SessionType::Unknown => return Err("unknown desktop session".into()),
     };
     let mut profile = DesktopCapabilityProfile::linux(platform);
+    profile.inference_backends = detection::configured_inference_backends()
+        .iter()
+        .map(|backend| (*backend).to_string())
+        .collect();
+    let inpainting_backend = state.inpainter.lock().backend_status().to_string();
+    if inpainting_backend.starts_with("wgpu_") && !inpainting_backend.contains("failed") {
+        profile.limitations.push(format!(
+            "{inpainting_backend} initialized for bounded mirror-blend dispatch; real-device GPU certification is pending"
+        ));
+    } else {
+        profile.limitations.push(format!(
+            "wgpu inpainting is unavailable or failed; {inpainting_backend} is active"
+        ));
+    }
     if !state.hotkeys_initialized.load(Ordering::SeqCst)
         || !state.hotkeys_available.load(Ordering::SeqCst)
     {
@@ -544,9 +558,8 @@ async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: A
             }
         }
         hotkeys::HotkeyAction::PanicDisable => {
-            // Clear capture/overlay state before awaiting source teardown.
-            let _ = stop_capture_inner(app.clone(), state).await;
-            for label in ["editor", "render"] {
+            // Clear every privacy-visible window before awaiting source/GPU teardown.
+            for label in ["editor", "render", "labeling", "training"] {
                 if let Some(window) = app.get_webview_window(label) {
                     let _ = window.hide();
                 }
@@ -556,6 +569,7 @@ async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: A
                 let _ = window.set_focus();
             }
             let _ = app.emit("panic-disabled", ());
+            let _ = stop_capture_inner(app.clone(), state).await;
         }
     }
 }
@@ -615,6 +629,23 @@ fn main() {
 
     tauri::Builder::default().manage(app_state)
         .setup(|app| {
+            let runtime_path = app
+                .path()
+                .resolve(
+                    "resources/onnxruntime/libonnxruntime.so",
+                    tauri::path::BaseDirectory::Resource,
+                )
+                .ok();
+            let packaged_runtime = runtime_path
+                .as_deref()
+                .filter(|path| std::fs::symlink_metadata(path).is_ok());
+            if let Err(error) = detection::initialize_runtime(packaged_runtime) {
+                tracing::error!("ONNX Runtime initialization failed: {error}");
+                if packaged_runtime.is_some() || !cfg!(debug_assertions) {
+                    return Err(Box::new(std::io::Error::other(error.to_string())));
+                }
+            }
+
             let detector = match model_updates::load_authenticated_active(app.handle()) {
                 Ok(Some(detector)) => {
                     tracing::info!("loaded authenticated detector update");

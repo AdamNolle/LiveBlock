@@ -9,7 +9,9 @@
 - unsigned macOS 26 Debug tests plus a Release compile, with the `.xcresult` uploaded;
 - Windows library tests plus debug/release all-target compilation on a Windows runner; and
 - Linux library tests plus debug/release all-target compilation after installing
-  Tauri, PipeWire, Wayland, and X11 development headers.
+  Tauri, PipeWire, Wayland, and X11 development headers; Release separately
+  proves that an unpackaged ONNX Runtime is rejected before using explicit
+  compile-only empty-keyring/runtime overrides.
 
 Cargo lockfiles pin `ort`, `ort-sys`, and `ndarray` exactly because mismatched
 prerelease versions do not compile together.

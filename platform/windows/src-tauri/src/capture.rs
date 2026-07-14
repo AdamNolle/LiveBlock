@@ -31,12 +31,13 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Foundation::{BOOL, HMODULE};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
@@ -44,12 +45,36 @@ use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
-/// One CPU-readable BGRA frame.
+/// An application-owned D3D11 copy of a WGC surface. The frame-pool-owned
+/// texture is never retained after its callback returns.
+#[derive(Clone)]
+pub struct GpuFrameResource {
+    pub texture: ID3D11Texture2D,
+    pub device: ID3D11Device,
+    pub context: ID3D11DeviceContext,
+}
+
+/// One packed CPU BGRA frame plus its optional application-owned GPU source.
+/// CPU bytes remain authoritative for protected-frame checks, labeling, and
+/// fallback; the GPU resource allows compute work without re-uploading pixels.
 #[derive(Clone)]
 pub struct FrameView {
     pub width: u32,
     pub height: u32,
     pub bytes: Arc<Vec<u8>>, // tightly packed BGRA, row stride = width * 4
+    pub gpu: Option<Arc<GpuFrameResource>>,
+}
+
+struct PendingGpuFrame {
+    width: u32,
+    height: u32,
+    resource: Arc<GpuFrameResource>,
+}
+
+struct ReadbackStaging {
+    width: u32,
+    height: u32,
+    texture: ID3D11Texture2D,
 }
 
 pub type FrameCallback = Arc<dyn Fn(&FrameView) + Send + Sync + 'static>;
@@ -102,6 +127,13 @@ impl CaptureSession {
         }
         let d3d_device = d3d_device.context("D3D11CreateDevice returned None")?;
         let d3d_context = d3d_context.context("D3D11CreateDevice returned None context")?;
+        // The callback submits a fast copy while the frame worker performs the
+        // staging readback and optional compute work. Protect the immediate
+        // context because those calls can occur on different threads.
+        let multithread: ID3D11Multithread = d3d_context.cast()?;
+        unsafe {
+            let _ = multithread.SetMultithreadProtected(BOOL(1));
+        }
 
         // 2. WinRT IDirect3DDevice wrapper.
         let dxgi_device: IDXGIDevice = d3d_device.cast().context("cast to IDXGIDevice")?;
@@ -124,35 +156,53 @@ impl CaptureSession {
         )?;
         let session = pool.CreateCaptureSession(&item)?;
 
-        // 5. The WGC callback performs only the unavoidable GPU→CPU copy and
-        // newest-frame enqueue. Detection/inpainting runs on one worker so slow
-        // inference never stalls frame-pool delivery.
+        // 5. The WGC callback copies the pool-owned surface into an
+        // application-owned shader-readable texture and enqueues only the
+        // newest texture. GPU→CPU staging, protected checks, detection, and
+        // inpainting all run on the worker, so Map/readback cannot stall WGC.
         let latest = Arc::new(ArcSwapOption::<FrameView>::from(None));
         let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
         let stop_worker = Arc::new(AtomicBool::new(false));
         let first_frame_seen = Arc::new(AtomicBool::new(false));
-        let (frame_sender, frame_receiver) = bounded::<FrameView>(1);
+        let (frame_sender, frame_receiver) = bounded::<PendingGpuFrame>(1);
         let eviction_receiver = frame_receiver.clone();
         let worker_stop = stop_worker.clone();
         let worker_telemetry = telemetry.clone();
         let worker_error = on_error.clone();
+        let worker_latest = latest.clone();
+        let worker_first_frame = first_frame_seen.clone();
+        let worker_failure_gate = Arc::new(Mutex::new(ConsecutiveFailureGate::default()));
+        let failure_gate_for_worker = worker_failure_gate.clone();
         let worker = thread::Builder::new()
             .name("liveblock-frame-processor".into())
             .spawn(move || {
+                let mut staging = None;
                 while !worker_stop.load(Ordering::Acquire) {
                     match frame_receiver.recv_timeout(Duration::from_millis(100)) {
-                        Ok(frame) => {
-                            let result =
+                        Ok(pending) => {
+                            let result = readback_frame(&pending, &mut staging).and_then(|frame| {
+                                worker_first_frame.store(true, Ordering::Release);
+                                worker_latest.store(Some(Arc::new(frame.clone())));
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     on_frame(&frame)
-                                }));
-                            if result.is_err() {
-                                worker_error(
-                                    "frame processor panicked; capture stopped processing".into(),
-                                );
-                                break;
+                                }))
+                                .map_err(|_| anyhow!("frame processor panicked"))?;
+                                Ok(())
+                            });
+                            match result {
+                                Ok(()) => {
+                                    failure_gate_for_worker.lock().success();
+                                    worker_telemetry.processed();
+                                }
+                                Err(error) => {
+                                    worker_telemetry.copy_error();
+                                    if failure_gate_for_worker.lock().failure() {
+                                        worker_error(format!(
+                                            "three consecutive capture-frame failures: {error}"
+                                        ));
+                                    }
+                                }
                             }
-                            worker_telemetry.processed();
                         }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -164,20 +214,17 @@ impl CaptureSession {
         let device_clone = d3d_device.clone();
         let direct3d_agile = AgileReference::new(&direct3d_device)?;
         let context_clone = d3d_context.clone();
-        let latest_clone = latest.clone();
         let last_emit_clone = last_emit.clone();
         let telemetry_clone = telemetry.clone();
         let error_clone = on_error.clone();
-        let failure_gate = Arc::new(Mutex::new(ConsecutiveFailureGate::default()));
-        let failure_gate_clone = failure_gate.clone();
+        let failure_gate_clone = worker_failure_gate.clone();
         let current_size = Arc::new(AtomicU64::new(pack_size(size.Width, size.Height)));
         let current_size_clone = current_size.clone();
-        let first_frame_for_callback = first_frame_seen.clone();
 
         let frame_token = pool.FrameArrived(&TypedEventHandler::new(
             move |sender: &Option<Direct3D11CaptureFramePool>, _: &Option<IInspectable>| {
-                // SAFETY: the immediate context is touched only by this free-threaded
-                // callback. The downstream worker receives packed CPU bytes.
+                // The immediate context is multithread-protected: this callback
+                // submits only the owned-texture copy while the worker stages it.
                 let Some(pool_ref) = sender else {
                     return Ok(());
                 };
@@ -192,9 +239,7 @@ impl CaptureSession {
                     drop(last);
 
                     let content_size = frame.ContentSize()?;
-                    let view = process_frame(&device_clone, &context_clone, &frame)?;
-                    first_frame_for_callback.store(true, Ordering::Release);
-                    latest_clone.store(Some(Arc::new(view.clone())));
+                    let pending = copy_frame_to_owned(&device_clone, &context_clone, &frame)?;
 
                     let next_size = pack_size(content_size.Width, content_size.Height);
                     if current_size_clone.load(Ordering::Acquire) != next_size {
@@ -208,8 +253,7 @@ impl CaptureSession {
                         current_size_clone.store(next_size, Ordering::Release);
                     }
 
-                    enqueue_latest(&frame_sender, &eviction_receiver, view, &telemetry_clone);
-                    failure_gate_clone.lock().success();
+                    enqueue_latest(&frame_sender, &eviction_receiver, pending, &telemetry_clone);
                     Ok(())
                 })();
                 if let Err(error) = result {
@@ -281,13 +325,13 @@ fn pack_size(width: i32, height: i32) -> u64 {
     (width as u32 as u64) << 32 | height as u32 as u64
 }
 
-/// Copy WGC frame to a CPU-readable staging texture, map, and produce a packed
-/// BGRA buffer (stride = width*4). Respects D3D11_MAPPED_SUBRESOURCE.RowPitch.
-fn process_frame(
+/// Copy a frame-pool-owned WGC texture into an application-owned texture. This
+/// deliberately avoids Map/readback in the WGC callback.
+fn copy_frame_to_owned(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
-) -> Result<FrameView> {
+) -> Result<PendingGpuFrame> {
     use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 
     let surface = frame.Surface()?;
@@ -297,8 +341,15 @@ fn process_frame(
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     unsafe { frame_tex.GetDesc(&mut desc) };
 
-    // Build a staging texture of the same shape.
-    let staging_desc = D3D11_TEXTURE2D_DESC {
+    if desc.Width == 0
+        || desc.Height == 0
+        || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+        || desc.SampleDesc.Count != 1
+    {
+        return Err(anyhow!("unsupported WGC texture descriptor"));
+    }
+
+    let owned_desc = D3D11_TEXTURE2D_DESC {
         Width: desc.Width,
         Height: desc.Height,
         MipLevels: 1,
@@ -308,29 +359,83 @@ fn process_frame(
             Count: 1,
             Quality: 0,
         },
-        Usage: D3D11_USAGE_STAGING,
-        BindFlags: 0,
-        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        CPUAccessFlags: 0,
         MiscFlags: 0,
     };
-    let mut staging: Option<ID3D11Texture2D> = None;
+    let mut owned = None;
     unsafe {
-        device.CreateTexture2D(&staging_desc, None, Some(&mut staging))?;
+        device.CreateTexture2D(&owned_desc, None, Some(&mut owned))?;
     }
-    let staging = staging.context("CreateTexture2D returned None")?;
+    let owned = owned.context("CreateTexture2D returned no owned frame")?;
+    unsafe {
+        context.CopyResource(&owned, &frame_tex);
+    }
+
+    Ok(PendingGpuFrame {
+        width: desc.Width,
+        height: desc.Height,
+        resource: Arc::new(GpuFrameResource {
+            texture: owned,
+            device: device.clone(),
+            context: context.clone(),
+        }),
+    })
+}
+
+/// Stage and map one application-owned texture on the processor worker. The
+/// staging allocation is reused while dimensions remain stable.
+fn readback_frame(
+    pending: &PendingGpuFrame,
+    staging: &mut Option<ReadbackStaging>,
+) -> Result<FrameView> {
+    let device = &pending.resource.device;
+    let context = &pending.resource.context;
+    let needs_staging = staging
+        .as_ref()
+        .map(|value| value.width != pending.width || value.height != pending.height)
+        .unwrap_or(true);
+    if needs_staging {
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Width: pending.width,
+            Height: pending.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut texture = None;
+        unsafe {
+            device.CreateTexture2D(&staging_desc, None, Some(&mut texture))?;
+        }
+        *staging = Some(ReadbackStaging {
+            width: pending.width,
+            height: pending.height,
+            texture: texture.context("CreateTexture2D returned no staging frame")?,
+        });
+    }
+    let staging_texture = &staging.as_ref().context("staging texture missing")?.texture;
 
     unsafe {
-        context.CopyResource(&staging, &frame_tex);
+        context.CopyResource(staging_texture, &pending.resource.texture);
     }
 
-    // Map.
+    // Map only on the worker.
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
     unsafe {
-        context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+        context.Map(staging_texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
     }
 
-    let width = desc.Width;
-    let height = desc.Height;
+    let width = pending.width;
+    let height = pending.height;
     let row_bytes = (width as usize) * 4;
     let mut packed = vec![0u8; row_bytes * height as usize];
     unsafe {
@@ -341,13 +446,14 @@ fn process_frame(
             let dst = packed.as_mut_ptr().add(row * row_bytes);
             std::ptr::copy_nonoverlapping(src, dst, row_bytes);
         }
-        context.Unmap(&staging, 0);
+        context.Unmap(staging_texture, 0);
     }
 
     Ok(FrameView {
         width,
         height,
         bytes: Arc::new(packed),
+        gpu: Some(pending.resource.clone()),
     })
 }
 

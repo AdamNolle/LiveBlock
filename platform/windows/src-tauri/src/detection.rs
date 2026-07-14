@@ -75,7 +75,13 @@ impl Detector {
         })
     }
 
-    pub fn detect(&mut self, bgra: &[u8], width: u32, height: u32) -> Result<Vec<DetBox>> {
+    pub fn detect(
+        &mut self,
+        bgra: &[u8],
+        width: u32,
+        height: u32,
+        run_options: &ort::RunOptions,
+    ) -> Result<Vec<DetBox>> {
         let preprocessed = preprocess_bgra_letterbox(bgra, width, height, self.processing)
             .map_err(|error| anyhow!(error))?;
         let tensor = Array4::from_shape_vec(
@@ -89,7 +95,7 @@ impl Detector {
         )
         .context("build detector input tensor")?;
         let inputs = ort::inputs![self.input_name.as_str() => tensor.view()]?;
-        let outputs = self.session.run(inputs)?;
+        let outputs = self.session.run_with_options(inputs, run_options)?;
         let prediction = outputs
             .get(self.output_name.as_str())
             .context("model output missing")?

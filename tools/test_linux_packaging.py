@@ -17,6 +17,8 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.tauri = json.loads(
             (ROOT / "platform/linux/src-tauri/tauri.conf.json").read_text()
         )
+        self.workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.packaging_docs = (ROOT / "docs/LINUX_PACKAGING.md").read_text()
 
     def test_runtime_permissions_are_portal_and_dri_minimized(self):
         finish = set(self.flatpak["finish-args"])
@@ -65,6 +67,27 @@ class LinuxPackagingContractTests(unittest.TestCase):
             "cd ../_shared-frontend && npm ci && npm run build",
         )
         self.assertNotIn("npm install", self.tauri["build"]["beforeBuildCommand"])
+
+    def test_native_ci_builds_and_closes_all_package_bytes(self):
+        self.assertIn("tauri build --bundles deb,rpm,appimage --ci", self.workflow)
+        self.assertIn("rpm2cpio", self.workflow)
+        self.assertIn("--appimage-extract", self.workflow)
+        self.assertIn("--artifact-type native-packages-build-only", self.workflow)
+        self.assertIn("for format in deb rpm appimage", self.workflow)
+        self.assertIn(
+            '--output "$evidence/$format-payload-inventory.json"', self.workflow
+        )
+        self.assertIn("runtime-staging-manifest.json", self.workflow)
+        self.assertIn("packages.sha256", self.workflow)
+
+    def test_hosted_lifecycle_evidence_is_bounded_and_build_only(self):
+        self.assertIn("Exercise build-only deb and AppImage lifecycle", self.workflow)
+        self.assertIn("timeout --kill-after=5s 12s", self.workflow)
+        self.assertIn("debCleanInstall", self.workflow)
+        self.assertIn("debUninstallRemovedSystemPayload", self.workflow)
+        self.assertIn('"rpmLifecycle": "not-run-on-ubuntu"', self.workflow)
+        self.assertIn('"productionModelAndTrustRoots": False', self.workflow)
+        self.assertIn("RPM install/launch/uninstall remains untested", self.packaging_docs)
 
 
 if __name__ == "__main__":

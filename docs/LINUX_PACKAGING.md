@@ -46,7 +46,7 @@ cd platform/_shared-frontend
 npm ci
 cd ../linux/src-tauri
 LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 \
-  ../../_shared-frontend/node_modules/.bin/tauri build --bundles deb
+  ../../_shared-frontend/node_modules/.bin/tauri build --bundles deb,rpm,appimage --ci
 ```
 
 The override above is allowed only for CI/source build evidence. A production
@@ -54,15 +54,33 @@ package must replace `resources/trusted-model-keys.json` with a protected,
 nonempty schema-1 ring and include an authenticated packaged detector manifest
 and artifact. Never set `LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1` for a package.
 
-CI extracts the `.deb`, verifies the canonical `/usr/bin/liveblock-linux` and
-`/usr/lib/LiveBlock/resources/onnxruntime/` paths, creates and immediately
-re-verifies a schema-1 artifact inventory, and uploads the exact package,
-extracted inventory, runtime staging manifest, and SHA-256. That proves package
-construction and byte/mode identity only. It does not prove installation,
-startup, model authentication, signatures, updates, or hardware behavior.
+Native Ubuntu CI builds `.deb`, `.rpm`, and `.AppImage` from one Release binary
+and the same checksum-pinned runtime staging directory. It closes the three
+package bytes in one schema-1 inventory, writes basename-rerunnable SHA-256
+checksums, and inspects each extracted payload for the canonical
+`/usr/bin/liveblock-linux` and
+`/usr/lib/LiveBlock/resources/onnxruntime/` paths. The complete deb and rpm
+extractions are immediately inventoried and reverified. Because AppImage
+internals contain bundler-created links, CI inventories a mode-preserving copy
+of the application binary and complete `LiveBlock/resources` subtree while the
+closed outer package inventory binds all remaining AppImage bytes.
 
-RPM and AppImage remain declared targets but are not called complete until CI
-builds, inventories, installs/runs, upgrades, and uninstalls each format.
+On the clean hosted Ubuntu runner, CI then installs the local build-only deb,
+requires the installed UI process to remain alive for a bounded 12-second Xvfb
+smoke window, uninstalls it, and checks that the system executable and resource
+tree were removed. It also extracts the AppImage without FUSE and requires its
+`AppRun` process to remain alive for the same bounded Xvfb window. Exact package
+bytes, payload inventories, runtime staging manifest, install/launch/uninstall
+logs, and a machine-readable lifecycle summary are preserved together.
+
+This proves build-only package construction, payload placement, a Debian package
+transaction, and bounded X11 startup on the hosted Ubuntu image. It does not
+prove promoted-model authentication, production trust roots, signatures,
+updates, capture, compositor/portal behavior, GPUs, accessibility, or sustained
+operation. RPM install/launch/uninstall remains untested because Ubuntu is not a
+Fedora/RHEL package-manager environment. Native upgrade testing also remains
+open until a prior installable version is available. None of these empty-keyring,
+no-model artifacts is distributable.
 
 ## Flatpak boundary
 

@@ -38,13 +38,15 @@ Every packaging pipeline must:
 
 An inventory labeled `build-only` or `webview-payload-build-only` is not a
 signature, distributable release, or release-readiness claim. Current CI exercises
-the contract against the deterministic webview payload, an extracted Linux `.deb`,
-and final unsigned Windows MSI/NSIS package bytes. Their trusted-key rings are
-intentionally empty because production model keys/artifacts and signing credentials
-do not exist yet. Windows evidence inventories both final installer bytes and a
-non-installing MSI administrative extraction requiring the executable, ONNX Runtime
-DLL, and keyring. It does not claim the payload was installed, launched, or executed.
-CI preserves the
+the contract against the deterministic webview payload, Linux deb/rpm/AppImage
+package bytes and application payloads, and final unsigned Windows MSI/NSIS
+package bytes. Their trusted-key rings are intentionally empty because production
+model keys/artifacts and signing credentials do not exist yet. Linux hosted CI
+installs, bounded-smoke-launches, and removes the deb and launches the extracted
+AppImage; RPM is extraction-only on Ubuntu. Windows evidence inventories both
+final installer bytes and a non-installing MSI administrative extraction requiring
+the executable, ONNX Runtime DLL, and keyring. It does not claim the Windows
+payload was installed, launched, or executed. CI preserves the
 exact webview payload as a normalized tar plus SHA-256 beside its inventory, so an operator can
 extract it and rerun `verify` without rebuilding.
 
@@ -93,8 +95,9 @@ used. Linux production builds now fail unless packaging stages a regular non-sym
 `resources/onnxruntime/libonnxruntime.so` and `THIRD-PARTY-NOTICES.txt`.
 The CPU staging helper pins official ONNX Runtime archives by complete SHA-256,
 verifies target ELF identity, preserves license/notices, and records every output
-hash. CI inventories the extracted `.deb` under `deb-build-only`; see
-[`LINUX_PACKAGING.md`](LINUX_PACKAGING.md).
+hash. CI closes all three native package bytes and inventories the deb/rpm
+extractions plus a mode-preserving AppImage application payload under explicit
+build-only artifact types; see [`LINUX_PACKAGING.md`](LINUX_PACKAGING.md).
 Optional CUDA/ROCm/OpenVINO/TensorRT builds may select only one provider and
 also require the shared provider library plus its selected provider library.
 Their exact binaries, transitive vendor libraries, licenses, and notices must be
@@ -119,10 +122,14 @@ python3 tools/release_evidence.py sbom \
 
 The shared job also reruns focused legacy-schema migrations, atomic installer
 behavior, signed CoreML bundle tamper rejection, and ONNX update rollback/crash
-recovery tests. These are deterministic implementation tests. The Linux `.deb`
-is extracted and inventoried but not installed or launched. Windows CI builds and
-inventories unsigned MSI/NSIS bytes under `windows-installers-build-only` and the
-administratively extracted MSI payload under a separate build-only inventory, but
-does not install or launch them. CI does not test an MSI/NSIS/RPM/Flatpak/AppImage install,
-package signing, OS upgrade/uninstall, power loss, model parity, or hardware execution. Those remain open until exact
-production artifacts and suitable hosts/credentials exist.
+recovery tests. These are deterministic implementation tests. Linux hosted CI
+extracts/inventories all three native formats, clean-installs and removes the deb,
+and bounded-smoke-launches both installed deb and extracted AppImage payloads.
+It does not run a native RPM transaction, Flatpak build/install, prior-version
+upgrade, portal/compositor flow, or production model authentication. Windows CI
+builds and inventories unsigned MSI/NSIS bytes under
+`windows-installers-build-only` and the administratively extracted MSI payload
+under a separate build-only inventory, but does not install or launch them. CI
+does not test production package signing, OS upgrade, power loss, model parity,
+or hardware execution. Those remain open until exact production artifacts and
+suitable hosts/credentials exist.

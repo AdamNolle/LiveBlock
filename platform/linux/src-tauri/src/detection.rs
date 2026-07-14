@@ -15,6 +15,16 @@ use ndarray::Array4;
 use ort::{Session, SessionBuilder, Value};
 use std::path::Path;
 
+#[cfg(any(
+    all(feature = "cuda", feature = "rocm"),
+    all(feature = "cuda", feature = "openvino"),
+    all(feature = "cuda", feature = "tensorrt"),
+    all(feature = "rocm", feature = "openvino"),
+    all(feature = "rocm", feature = "tensorrt"),
+    all(feature = "openvino", feature = "tensorrt"),
+))]
+compile_error!("select at most one optional Linux ONNX Runtime execution provider");
+
 pub const MODEL_FILE_NAME: &str = "liveblock-detector.onnx";
 const DEFAULT_VOCAB_JSON: &str = include_str!("../../../../tools/vocab/liveblock-vocab.json");
 
@@ -37,6 +47,47 @@ pub struct Detector {
     score_threshold: f32,
     iou_threshold: f32,
     class_names: Vec<String>,
+}
+
+pub fn initialize_runtime(runtime_library: Option<&Path>) -> Result<()> {
+    let Some(path) = runtime_library else {
+        if cfg!(debug_assertions) {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "release package is missing resources/onnxruntime/libonnxruntime.so"
+        ));
+    };
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect packaged ONNX Runtime {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(anyhow!(
+            "packaged ONNX Runtime must be a regular non-symlink file"
+        ));
+    }
+    ort::init_from(path.to_string_lossy())
+        .with_name("LiveBlock")
+        .commit()
+        .context("initialize packaged ONNX Runtime")?;
+    Ok(())
+}
+
+pub fn configured_inference_backends() -> &'static [&'static str] {
+    #[cfg(feature = "cuda")]
+    return &["onnx_cuda_preferred_experimental", "onnx_cpu_fallback"];
+    #[cfg(feature = "rocm")]
+    return &["onnx_rocm_preferred_experimental", "onnx_cpu_fallback"];
+    #[cfg(feature = "openvino")]
+    return &["onnx_openvino_preferred_experimental", "onnx_cpu_fallback"];
+    #[cfg(feature = "tensorrt")]
+    return &["onnx_tensorrt_preferred_experimental", "onnx_cpu_fallback"];
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "rocm",
+        feature = "openvino",
+        feature = "tensorrt"
+    )))]
+    return &["onnx_cpu"];
 }
 
 fn vocab_class_names() -> Vec<String> {
@@ -170,4 +221,22 @@ fn configure_execution_providers(b: SessionBuilder) -> Result<SessionBuilder> {
 )))]
 fn configure_execution_providers(b: SessionBuilder) -> Result<SessionBuilder> {
     Ok(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_debug_allows_explicit_system_runtime_fallback() {
+        assert!(cfg!(debug_assertions));
+        initialize_runtime(None).unwrap();
+    }
+
+    #[test]
+    fn configured_backends_always_include_cpu() {
+        assert!(configured_inference_backends()
+            .iter()
+            .any(|backend| backend.contains("cpu")));
+    }
 }

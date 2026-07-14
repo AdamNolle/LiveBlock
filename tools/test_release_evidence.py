@@ -118,16 +118,16 @@ class ReleasePackagingPolicyTests(unittest.TestCase):
     def test_tauri_package_targets_and_resources_are_explicit(self):
         root = Path(__file__).resolve().parents[1]
         expectations = {
-            "windows": {"msi", "nsis"},
-            "linux": {"deb", "rpm", "appimage"},
+            "windows": ({"msi", "nsis"}, ["resources/*"]),
+            "linux": ({"deb", "rpm", "appimage"}, ["resources/**/*"]),
         }
-        for platform, targets in expectations.items():
+        for platform, (targets, resources) in expectations.items():
             with self.subTest(platform=platform):
                 config = json.loads((root / f"platform/{platform}/src-tauri/tauri.conf.json").read_text())
                 bundle = config["bundle"]
                 self.assertTrue(bundle["active"])
                 self.assertEqual(set(bundle["targets"]), targets)
-                self.assertEqual(bundle["resources"], ["resources/*"])
+                self.assertEqual(bundle["resources"], resources)
                 serialized = json.dumps(bundle)
                 self.assertNotIn("tools/requirements.txt", serialized)
                 self.assertNotIn("tools/", serialized)

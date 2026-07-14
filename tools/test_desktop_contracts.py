@@ -10,6 +10,11 @@ IPC = (ROOT / "platform/_shared-frontend/src/ipc.ts").read_text()
 WINDOWS_UPDATES = (ROOT / "platform/windows/src-tauri/src/model_updates.rs").read_text()
 WINDOWS_LIFECYCLE = (ROOT / "platform/windows/src-tauri/src/lifecycle.rs").read_text()
 LINUX_UPDATES = (ROOT / "platform/linux/src-tauri/src/model_updates.rs").read_text()
+LINUX_DETECTION = (ROOT / "platform/linux/src-tauri/src/detection.rs").read_text()
+LINUX_INPAINTING = (ROOT / "platform/linux/src-tauri/src/inpainting.rs").read_text()
+LINUX_WGSL = (ROOT / "platform/linux/src-tauri/src/inpainting.wgsl").read_text()
+LINUX_BUILD = (ROOT / "platform/linux/src-tauri/build.rs").read_text()
+CI = (ROOT / ".github/workflows/ci.yml").read_text()
 
 EXPECTED_COMMANDS = {
     "get_capabilities",
@@ -132,6 +137,36 @@ class DesktopAdapterContractTests(unittest.TestCase):
             self.assertIn("LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING", build)
         self.assertIn('invoke<ModelUpdateReceipt>("install_model_update"', IPC)
         self.assertNotIn('Detector::load(&candidate)', WINDOWS)
+
+    def test_linux_gpu_inpainting_is_bounded_and_fails_to_cpu(self):
+        self.assertIn('include_str!("inpainting.wgsl")', LINUX_INPAINTING)
+        self.assertIn("dispatch_workgroups", LINUX_INPAINTING)
+        self.assertIn("wgpu readback exceeded 250 ms", LINUX_INPAINTING)
+        self.assertIn("wgpu dispatch/readback worker exceeded 300 ms", LINUX_INPAINTING)
+        self.assertIn("wgpu initialization exceeded 750 ms", LINUX_INPAINTING)
+        self.assertIn('self.backend_status = "cpu_fallback_after_gpu_error"', LINUX_INPAINTING)
+        self.assertIn("max_storage_buffer_binding_size", LINUX_INPAINTING)
+        self.assertIn("@compute @workgroup_size(8, 8, 1)", LINUX_WGSL)
+        self.assertIn("inpainting_backend", LINUX)
+
+    def test_linux_release_runtime_and_provider_contract_is_fail_closed(self):
+        self.assertIn("select at most one optional Linux ONNX Runtime", LINUX_DETECTION)
+        self.assertIn("configured_inference_backends", LINUX_DETECTION)
+        self.assertIn("initialize_runtime(packaged_runtime)", LINUX)
+        for required in (
+            "libonnxruntime.so",
+            "THIRD-PARTY-NOTICES.txt",
+            "libonnxruntime_providers_shared.so",
+            "libonnxruntime_providers_cuda.so",
+            "libonnxruntime_providers_rocm.so",
+            "libonnxruntime_providers_openvino.so",
+            "libonnxruntime_providers_tensorrt.so",
+        ):
+            self.assertIn(required, LINUX_BUILD)
+        self.assertIn("LIVEBLOCK_ALLOW_UNPACKAGED_ORT", LINUX_BUILD)
+        self.assertIn("cannot accompany production trust roots", LINUX_BUILD)
+        self.assertIn('"resources": ["resources/**/*"]', (ROOT / "platform/linux/src-tauri/tauri.conf.json").read_text())
+        self.assertIn("unpackaged ONNX Runtime was accepted", CI)
 
     def test_html_consumers_only_call_exported_ipc_methods(self):
         exported = set(re.findall(r"^  ([A-Za-z][A-Za-z0-9]+):", IPC, re.M))

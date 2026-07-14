@@ -85,3 +85,6 @@ pollster = "0.3"
 
 # Async runtime — ashpd + pipewire + ort all want one
 tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+naga = { version = "22", features = ["wgsl-in"] }

@@ -84,9 +84,13 @@ resolved and required notices bundled.
 training environment and production packages are inference-only. OS shared
 libraries/drivers and Apple system frameworks are platform prerequisites rather
 than bundled dependencies. No Swift Package Manager dependencies are currently
-used. When an ONNX Runtime binary/provider is packaged, its exact binary,
-license, notices, and provider libraries must be present in the package
-inventory and final SBOM; source metadata alone is insufficient.
+used. Linux production builds now fail unless packaging stages a regular non-symlink
+`resources/onnxruntime/libonnxruntime.so` and `THIRD-PARTY-NOTICES.txt`.
+Optional CUDA/ROCm/OpenVINO/TensorRT builds may select only one provider and
+also require the shared provider library plus its selected provider library.
+Their exact binaries, transitive vendor libraries, licenses, and notices must be
+present in the package inventory and final SBOM; source metadata and the
+compile-only `LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1` override are insufficient.
 
 Reproduce CI evidence from the repository root after creating the three Cargo
 metadata files:

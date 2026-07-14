@@ -1,55 +1,77 @@
-// Mirror-blend inpainter — WGSL compute shader.
-// One workgroup per region. Each thread fills one output pixel with a
-// cross-faded mirror sample from the surrounding bands.
-
-struct RegionUniform {
-    rect_min: vec2<f32>,    // pixel coords, top-left
-    rect_size: vec2<f32>,   // width, height
-    frame_size: vec2<f32>,  // frame width, height
-    axis: u32,              // 0 = vertical mirror, 1 = horizontal mirror
-    _pad: u32,
+struct Params {
+    frame_width: u32,
+    frame_height: u32,
+    region_count: u32,
+    _padding: u32,
 };
 
-@group(0) @binding(0) var src_tex: texture_2d<f32>;
-@group(0) @binding(1) var src_samp: sampler;
-@group(0) @binding(2) var<uniform> region: RegionUniform;
-@group(0) @binding(3) var dst_tex: texture_storage_2d<rgba8unorm, write>;
+struct Region {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    output_offset: u32,
+    axis: u32,
+    far_available: u32,
+    _padding: u32,
+};
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> source_pixels: array<u32>;
+@group(0) @binding(2) var<storage, read> regions: array<Region>;
+@group(0) @binding(3) var<storage, read_write> output_pixels: array<u32>;
+
+fn channel(pixel: u32, shift: u32) -> f32 {
+    return f32((pixel >> shift) & 0xffu);
+}
+
+fn blend_pixel(near: u32, far: u32, amount: f32) -> u32 {
+    let inverse = 1.0 - amount;
+    let blue = u32(clamp(channel(near, 0u) * amount + channel(far, 0u) * inverse, 0.0, 255.0));
+    let green = u32(clamp(channel(near, 8u) * amount + channel(far, 8u) * inverse, 0.0, 255.0));
+    let red = u32(clamp(channel(near, 16u) * amount + channel(far, 16u) * inverse, 0.0, 255.0));
+    return blue | (green << 8u) | (red << 16u) | 0xff000000u;
+}
+
+fn sample_source(x: u32, y: u32) -> u32 {
+    return source_pixels[y * params.frame_width + x] | 0xff000000u;
+}
 
 @compute @workgroup_size(8, 8, 1)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let local = vec2<f32>(f32(gid.x), f32(gid.y));
-    if (local.x >= region.rect_size.x || local.y >= region.rect_size.y) {
+fn inpaint(@builtin(global_invocation_id) invocation: vec3<u32>) {
+    if (invocation.z >= params.region_count) {
         return;
     }
-    let pix = region.rect_min + local;
-
-    // Two reflection samples — "near" and "far" sides of the region.
-    var near_uv: vec2<f32>;
-    var far_uv: vec2<f32>;
-    var t: f32;
-
-    if (region.axis == 0u) {
-        // Vertical mirror: sample from above (y < rect_min.y) and below
-        // (y > rect_min.y + rect_size.y), reflected across each adjacent edge.
-        let dy = local.y;                            // distance from top of rect
-        let dy_far = region.rect_size.y - local.y;   // distance from bottom of rect
-        near_uv = vec2<f32>(pix.x, region.rect_min.y - dy);
-        far_uv = vec2<f32>(pix.x, region.rect_min.y + region.rect_size.y + dy_far);
-        t = local.y / region.rect_size.y;            // 0 at top → near, 1 at bottom → far
-    } else {
-        let dx = local.x;
-        let dx_far = region.rect_size.x - local.x;
-        near_uv = vec2<f32>(region.rect_min.x - dx, pix.y);
-        far_uv = vec2<f32>(region.rect_min.x + region.rect_size.x + dx_far, pix.y);
-        t = local.x / region.rect_size.x;
+    let region = regions[invocation.z];
+    let dx = invocation.x;
+    let dy = invocation.y;
+    if (dx >= region.width || dy >= region.height) {
+        return;
     }
 
-    let near_norm = near_uv / region.frame_size;
-    let far_norm = far_uv / region.frame_size;
+    var near_x = region.x + dx;
+    var near_y = region.y - region.height + (region.height - 1u - dy);
+    var far_x = region.x + dx;
+    var far_y = region.y + region.height + (region.height - 1u - dy);
+    var blend_axis_offset = dy;
+    var blend_axis_size = region.height;
 
-    let near_color = textureSampleLevel(src_tex, src_samp, near_norm, 0.0);
-    let far_color = textureSampleLevel(src_tex, src_samp, far_norm, 0.0);
+    if (region.axis == 1u) {
+        near_x = region.x - region.width + (region.width - 1u - dx);
+        near_y = region.y + dy;
+        far_x = region.x + region.width + (region.width - 1u - dx);
+        far_y = region.y + dy;
+        blend_axis_offset = dx;
+        blend_axis_size = region.width;
+    }
 
-    let color = mix(near_color, far_color, t);
-    textureStore(dst_tex, vec2<i32>(i32(local.x), i32(local.y)), color);
+    let near = sample_source(near_x, near_y);
+    var result = near;
+    if (region.far_available == 1u) {
+        let far = sample_source(far_x, far_y);
+        let denominator = max(f32(blend_axis_size) - 1.0, 1.0);
+        let amount = 1.0 - f32(blend_axis_offset) / denominator;
+        result = blend_pixel(near, far, amount);
+    }
+    output_pixels[region.output_offset + dy * region.width + dx] = result;
 }

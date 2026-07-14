@@ -220,9 +220,26 @@ jobs:
         run: |
           cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets
           cargo test --manifest-path platform/linux/src-tauri/Cargo.toml --locked --lib
+          for provider in cuda rocm openvino tensorrt; do
+            cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked \
+              --lib --no-default-features --features "$provider"
+          done
+          if cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked \
+            --lib --no-default-features --features cuda,rocm 2>multiple-provider.log; then
+            echo "multiple optional ONNX Runtime providers were accepted" >&2
+            exit 1
+          fi
+          grep -q "select at most one optional Linux ONNX Runtime" multiple-provider.log
           if cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release 2>empty-ring.log; then
             echo "empty production model keyring was accepted" >&2
             exit 1
           fi
           grep -q "release packages require a nonempty" empty-ring.log
-          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release
+          if LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 \
+            cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release 2>missing-ort.log; then
+            echo "unpackaged ONNX Runtime was accepted" >&2
+            exit 1
+          fi
+          grep -q "release package runtime file is missing" missing-ort.log
+          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1 \
+            cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release

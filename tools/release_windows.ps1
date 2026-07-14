@@ -126,11 +126,14 @@ try {
     try { & $Tauri build --bundles msi,nsis --ci } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw "Tauri Windows bundle build failed" }
 
-    $BundleRoot = Join-Path $Root "platform\windows\target\release\bundle"
-    $packages = @(Get-ChildItem -Path $BundleRoot -Recurse -File |
-        Where-Object { $_.Extension -eq ".msi" -or ($_.Extension -eq ".exe" -and $_.Directory.Name -eq "nsis") })
-    if (($packages | Where-Object Extension -eq ".msi").Count -ne 1 -or
-        ($packages | Where-Object { $_.Extension -eq ".exe" -and $_.Directory.Name -eq "nsis" }).Count -ne 1) {
+    $TargetRoot = Join-Path $Root "platform\windows\target"
+    $packages = @(Get-ChildItem -Path $TargetRoot -Recurse -File |
+        Where-Object {
+            ($_.Extension -eq ".msi" -and $_.Directory.Name -eq "msi") -or
+            ($_.Extension -eq ".exe" -and $_.Directory.Name -eq "nsis")
+        })
+    if (@($packages | Where-Object Extension -eq ".msi").Count -ne 1 -or
+        @($packages | Where-Object { $_.Extension -eq ".exe" -and $_.Directory.Name -eq "nsis" }).Count -ne 1) {
         throw "Expected exactly one MSI and one NSIS installer"
     }
     New-Item -ItemType Directory -Path $PackageDir -Force | Out-Null

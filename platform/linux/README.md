@@ -20,10 +20,10 @@ lifecycle certification remain open.
 
 | Compositor | Capture | Overlay | Notes |
 |---|---|---|---|
-| Sway / Hyprland / river / wlroots | Portal + PipeWire (experimental) | layer-shell incomplete | Target full support; not certified |
-| KDE Plasma (Wayland) | Portal + PipeWire (experimental) | layer-shell incomplete | Target full support; not certified |
-| GNOME / Mutter (Wayland) | Portal + PipeWire (experimental) | **limited preview window** | No global click-through overlay |
-| X11 (any) | XComposite + XShm (experimental) | override-redirect incomplete | Target full support; not certified |
+| Sway / Hyprland / river / wlroots | Portal + PipeWire (experimental) | GTK layer-shell click-through (experimental) | Target full support; not certified |
+| KDE Plasma (Wayland) | Portal + PipeWire (experimental) | GTK layer-shell click-through (experimental) | Target full support; not certified |
+| GNOME / Mutter (Wayland) | Portal + PipeWire (experimental) | **limited decorated preview window** | No global click-through overlay |
+| X11 (any) | XComposite + XShm (experimental) | override-redirect + XFixes click-through (experimental) | Target full support; not certified |
 
 Picked at runtime from `XDG_SESSION_TYPE` and `XDG_CURRENT_DESKTOP`.
 
@@ -78,11 +78,20 @@ cargo tauri build         # produces .deb, .rpm, .AppImage in src-tauri/target/r
 
 ## Hotkeys
 
-**Global hotkeys are not available in the current Linux build.** The capability
-profile reports `globalHotkeys: false`, and the backend installers fail rather
-than claiming registration. In particular, do not rely on the planned
-Ctrl+Shift+Alt+Period panic shortcut; stop capture from the control panel.
-Wayland GlobalShortcuts portal and X11 `XGrabKey` integration remain open.
+Global hotkeys are implemented through the permissioned Wayland
+GlobalShortcuts portal and passive X11 `XGrabKey` registrations:
+
+| Combo | Action |
+|---|---|
+| Ctrl+Shift+L | Toggle capture |
+| Ctrl+Shift+B | Toggle region editor |
+| Ctrl+Shift+S | Save a labeling frame |
+| Ctrl+Shift+Alt+. | Panic disable |
+
+Availability is runtime state, not assumed: the capability response and control
+panel report unavailable until every binding succeeds. Portal denial, shortcut
+conflicts, or an unsupported environment fail closed. Always retain control-panel
+access as the fallback until the target compositor is certified.
 
 ## Data layout
 
@@ -120,8 +129,8 @@ library. LiveBlock does not download runtimes, code, or replacement weights.
 ## Known limitations
 
 - **GNOME mode is not click-through.** Mutter does not implement
-  `wlr-layer-shell`, so the overlay is a normal always-on-top window. Move
-  it out of the way when not editing.
+  `wlr-layer-shell`, so rendering is confined to a bounded decorated preview
+  window. Move or close it when necessary.
 - **DRM-protected windows on Wayland** may return black frames depending on
   the compositor's portal implementation.
 - **Anti-cheat tooling** in some games will treat any overlay as suspicious.

@@ -156,7 +156,7 @@ jobs:
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
             libpipewire-0.3-dev libspa-0.2-dev \
             libx11-xcb-dev libxcomposite-dev libxfixes-dev libxinerama-dev \
-            libxkbcommon-dev libwayland-dev
+            libxkbcommon-dev libwayland-dev libgtk-layer-shell-dev
       - name: Build shared frontend
         working-directory: platform/_shared-frontend
         run: npm ci && npm run build

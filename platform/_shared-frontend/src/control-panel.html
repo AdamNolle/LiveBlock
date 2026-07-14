@@ -151,6 +151,11 @@
         power.dataset.on = "false";
         renderStatus();
       });
+      events.onHotkeyAvailability((available) => {
+        document.getElementById("hotkeyHint").textContent = available
+          ? "Ctrl+Shift+B"
+          : "Global hotkeys unavailable";
+      });
 
       // Refresh counters periodically. Values come from native telemetry; no
       // synthetic frame-time claim is shown.

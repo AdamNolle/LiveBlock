@@ -103,16 +103,16 @@ impl DesktopCapabilityProfile {
                 support_mode: SupportMode::Limited,
                 capture_backend: "pipewire_portal_bgra_nv12_yuy2_experimental".into(),
                 inference_backends: vec!["onnx_cpu_experimental".into()],
-                overlay_backend: "layer_shell_wgpu_not_implemented".into(),
-                click_through_overlay: false,
+                overlay_backend: "gtk_layer_shell_experimental".into(),
+                click_through_overlay: true,
                 capture_exclusion: false,
-                global_hotkeys: false,
+                global_hotkeys: true,
                 local_frame_processing: true,
                 telemetry_enabled: false,
                 production_training_runtime: false,
                 release_ready: false,
                 limitations: vec![
-                    "PipeWire capture is implemented but lacks real-compositor certification; layer-shell overlay and global hotkeys are not end-to-end".into(),
+                    "PipeWire capture, layer-shell overlay, and portal shortcuts are implemented but lack real-compositor certification".into(),
                 ],
             },
             DesktopPlatform::LinuxX11 => Self {
@@ -121,16 +121,16 @@ impl DesktopCapabilityProfile {
                 support_mode: SupportMode::Limited,
                 capture_backend: "xcomposite_xshm_experimental".into(),
                 inference_backends: vec!["onnx_cpu_experimental".into()],
-                overlay_backend: "x11_wgpu_not_implemented".into(),
-                click_through_overlay: false,
+                overlay_backend: "x11_xfixes_clickthrough_experimental".into(),
+                click_through_overlay: true,
                 capture_exclusion: false,
-                global_hotkeys: false,
+                global_hotkeys: true,
                 local_frame_processing: true,
                 telemetry_enabled: false,
                 production_training_runtime: false,
                 release_ready: false,
                 limitations: vec![
-                    "XComposite/XShm capture is implemented but lacks real-server certification; overlay and hotkeys are not end-to-end".into(),
+                    "XComposite/XShm capture, XFixes overlay, and XGrabKey shortcuts are implemented but lack real-server certification".into(),
                 ],
             },
             DesktopPlatform::LinuxGnomeWayland => Self {
@@ -142,7 +142,7 @@ impl DesktopCapabilityProfile {
                 overlay_backend: "tauri_preview_window_limited".into(),
                 click_through_overlay: false,
                 capture_exclusion: false,
-                global_hotkeys: false,
+                global_hotkeys: true,
                 local_frame_processing: true,
                 telemetry_enabled: false,
                 production_training_runtime: false,
@@ -317,7 +317,7 @@ mod tests {
             let profile = DesktopCapabilityProfile::linux(platform);
             assert_eq!(profile.support_mode, SupportMode::Limited);
             assert!(!profile.release_ready);
-            assert!(!profile.global_hotkeys);
+            assert!(profile.global_hotkeys);
             assert!(profile.capture_backend.contains("experimental"));
         }
     }

@@ -151,4 +151,6 @@ export const events = {
     listen<boolean>("protected-content-changed", (e) => cb(e.payload)),
   onCaptureError: (cb: (message: string) => void) =>
     listen<string>("capture-runtime-error", (e) => cb(e.payload)),
+  onHotkeyAvailability: (cb: (available: boolean) => void) =>
+    listen<boolean>("hotkey-availability-changed", (e) => cb(e.payload)),
 };

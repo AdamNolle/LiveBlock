@@ -4,7 +4,6 @@ use crate::capture::CaptureSession;
 use crate::detection::Detector;
 use crate::inpainting::Inpainter;
 use crate::regions::SharedRegionStore;
-use crate::training::TrainingJob;
 
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize};
@@ -34,7 +33,6 @@ pub struct AppState {
     pub detector_run: Arc<Mutex<Option<Arc<ort::RunOptions>>>>,
     pub model_update: Mutex<()>,
     pub inpainter: Arc<Mutex<Inpainter>>,
-    pub training: Arc<Mutex<Option<TrainingJob>>>,
     pub app: AppHandle,
 }
 
@@ -63,7 +61,6 @@ impl AppState {
             detector_run: Arc::new(Mutex::new(None)),
             model_update: Mutex::new(()),
             inpainter: Arc::new(Mutex::new(Inpainter::new())),
-            training: Arc::new(Mutex::new(None)),
             app,
         }
     }

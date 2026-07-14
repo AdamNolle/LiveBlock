@@ -7,6 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = (ROOT / "platform/windows/src-tauri/src/main.rs").read_text()
 LINUX = (ROOT / "platform/linux/src-tauri/src/main.rs").read_text()
 IPC = (ROOT / "platform/_shared-frontend/src/ipc.ts").read_text()
+REGION_EDITOR = (ROOT / "platform/_shared-frontend/src/region-editor.html").read_text()
+LABELING = (ROOT / "platform/_shared-frontend/src/labeling.html").read_text()
+TRAINING_UI = (ROOT / "platform/_shared-frontend/src/training.html").read_text()
+MAC_CONTROLLER = (ROOT / "Sources/AppController.swift").read_text()
 WINDOWS_UPDATES = (ROOT / "platform/windows/src-tauri/src/model_updates.rs").read_text()
 WINDOWS_LIFECYCLE = (ROOT / "platform/windows/src-tauri/src/lifecycle.rs").read_text()
 LINUX_UPDATES = (ROOT / "platform/linux/src-tauri/src/model_updates.rs").read_text()
@@ -18,6 +22,7 @@ CI = (ROOT / ".github/workflows/ci.yml").read_text()
 
 EXPECTED_COMMANDS = {
     "get_capabilities",
+    "get_behavior_contract",
     "begin_user_action",
     "start_capture",
     "stop_capture",
@@ -115,10 +120,43 @@ class DesktopAdapterContractTests(unittest.TestCase):
         self.assertIn("lifecycle_observer_available", WINDOWS)
 
     def test_release_training_uses_shared_fail_closed_gate(self):
-        for source in (WINDOWS, LINUX):
+        for platform, source in (("Windows", WINDOWS), ("Linux", LINUX)):
             self.assertIn("developer_training_runtime_available()", source)
             self.assertIn("release builds are inference-only", source)
-        self.assertIn('Err("Linux source training dispatch is not implemented"', LINUX)
+            self.assertIn(f'Err("{platform} source training dispatch is not implemented', source)
+        self.assertIn("Inference-only package", TRAINING_UI)
+        self.assertIn("never install Python", TRAINING_UI)
+        self.assertNotIn("auto.ps1", TRAINING_UI)
+
+    def test_shared_frontend_workflows_are_native_and_fail_visible(self):
+        self.assertIn("getBehaviorContract", IPC)
+        self.assertNotIn('capture_screenshot_for_labeling\").catch', IPC)
+        self.assertIn("pointerdown", REGION_EDITOR)
+        self.assertIn("lb.addRegion", REGION_EDITOR)
+        self.assertIn("lb.deleteRegion", REGION_EDITOR)
+        self.assertIn("lb.clearRegions", REGION_EDITOR)
+        self.assertNotIn("TODO(windows-port / linux-port)", REGION_EDITOR)
+        self.assertIn("lb.loadLabel(entry.labelPath)", LABELING)
+        self.assertIn("lb.saveLabel(entry.labelPath", LABELING)
+        self.assertIn("lb.discardScreenshot(entry.path)", LABELING)
+        self.assertIn("Label is read-only because its sidecar is incompatible", LABELING)
+        for source in (WINDOWS, LINUX):
+            self.assertIn("label_path: label.clone()", source)
+            self.assertIn("if path.exists()", source)
+            self.assertIn("LabelDocument::load(&path)", source)
+            self.assertIn("move_regular_file_no_replace(&destination, &label)", source)
+
+    def test_ui_name_panic_and_local_data_policy_are_consistent(self):
+        frontend_sources = [IPC] + [
+            path.read_text() for path in (ROOT / "platform/_shared-frontend/src").glob("*.html")
+        ]
+        self.assertFalse(any("LiveBlocker" in source for source in frontend_sources))
+        for forbidden in ("fetch(", "XMLHttpRequest", "new WebSocket", "navigator.sendBeacon"):
+            self.assertFalse(any(forbidden in source for source in frontend_sources))
+        for window in ("labelingWindow", "trainingDashboardWindow", "miniHUDWindow"):
+            self.assertIn(f"{window}?.orderOut(nil)", MAC_CONTROLLER)
+        self.assertIn('for label in ["editor", "render", "labeling", "training"]', WINDOWS)
+        self.assertIn('for label in ["editor", "render", "labeling", "training"]', LINUX)
 
     def test_model_update_adapters_share_fail_closed_contract(self):
         for platform, source in (("windows", WINDOWS_UPDATES), ("linux", LINUX_UPDATES)):
@@ -180,6 +218,8 @@ class DesktopAdapterContractTests(unittest.TestCase):
         self.assertIn("schemaVersion: 1", IPC)
         self.assertIn("releaseReady: boolean", IPC)
         self.assertIn('invoke<DesktopCapabilityProfile>("get_capabilities")', IPC)
+        self.assertIn('invoke<DesktopBehaviorContract>("get_behavior_contract")', IPC)
+        self.assertIn('runtimeClasses: ["Logo", "Ad banner", "Sponsored"]', IPC)
 
 
 if __name__ == "__main__":

@@ -1,73 +1,14 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8"/>
-    <title>LiveBlocker — Training</title>
-    <link rel="stylesheet" href="./tokens.css"/>
-    <link rel="stylesheet" href="./primitives.css"/>
-    <style>
-      .layout { display: flex; flex-direction: column; height: 100vh; }
-      .head {
-        padding: 14px 20px;
-        background: linear-gradient(180deg,#cdcce8,#b9b8d8);
-        border-bottom: 1px solid rgba(0,0,0,0.07);
-      }
-      .body { flex: 1; padding: 20px; overflow: auto; display: flex; flex-direction: column; gap: 16px; }
-      .stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; }
-      .stat { padding: 16px; border-radius: 16px; }
-      .stat .l { font:600 10px var(--lb-font-ui); letter-spacing: 0.06em; text-transform: uppercase; color: var(--lb-ink-muted); }
-      .stat .v { font: 700 28px var(--lb-font-display); line-height: 1; margin-top: 6px; }
-      .train-card { padding: 18px; border-radius: 22px; }
-      .stage { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-      .actions { display: flex; gap: 8px; }
-      .log { padding: 14px; border-radius: 16px; height: 200px; overflow: auto; }
-      .log pre { margin: 0; white-space: pre-wrap; font: 500 11px var(--lb-font-mono); color: var(--lb-ink); }
-    </style>
+    <meta charset="utf-8"/><title>LiveBlock — Label & Train</title><link rel="stylesheet" href="./tokens.css"/><link rel="stylesheet" href="./primitives.css"/>
+    <style>.layout{display:flex;flex-direction:column;height:100vh}.head{padding:14px 20px;background:linear-gradient(180deg,#cdcce8,#b9b8d8);border-bottom:1px solid rgba(0,0,0,.07)}.body{flex:1;padding:20px;overflow:auto;display:flex;flex-direction:column;gap:16px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.stat{padding:16px;border-radius:16px}.stat .l{font:600 10px var(--lb-font-ui);letter-spacing:.06em;text-transform:uppercase;color:var(--lb-ink-muted)}.stat .v{font:700 28px var(--lb-font-display);line-height:1;margin-top:6px}.card{padding:18px;border-radius:22px}.stage{display:flex;align-items:center;justify-content:space-between;gap:16px}.actions{display:flex;gap:8px}.notice{padding:14px;border-radius:14px;background:rgba(224,148,42,.13);font:500 12px/1.5 var(--lb-font-ui)}.classes{font:600 11px var(--lb-font-mono);color:var(--lb-ink-muted);margin-top:8px}.error{color:var(--lb-block);font:600 11px var(--lb-font-ui)}</style>
   </head>
-  <body>
-    <div class="layout">
-      <div class="head">
-        <span id="brand"></span>
-        <div style="margin-top:6px">
-          <div class="lb-display" style="font-size:22px">Training Dashboard</div>
-          <div style="font: 500 12px var(--lb-font-ui); color: var(--lb-ink-muted)">Build your own ad detector from your labeled screenshots.</div>
-        </div>
-      </div>
-      <div class="body">
-        <div class="stats">
-          <div class="stat lb-raised"><div class="l">Screenshots</div><div class="v" style="color:var(--lb-block)" id="statShots">0</div></div>
-          <div class="stat lb-raised"><div class="l">Labeled</div><div class="v" style="color:var(--lb-success)" id="statLabeled">0</div></div>
-          <div class="stat lb-raised"><div class="l">Remaining</div><div class="v" style="color:var(--lb-train)" id="statRem">0</div></div>
-          <div class="stat lb-raised"><div class="l">Regions</div><div class="v" style="color:var(--lb-detect)" id="statRegions">0</div></div>
-        </div>
-
-        <div class="train-card lb-raised">
-          <div class="stage">
-            <div>
-              <div class="lb-uppercase">Training</div>
-              <div style="font:600 14px var(--lb-font-ui);margin-top:2px">Idle</div>
-            </div>
-            <div class="actions">
-              <button class="lb-pill lb-train" id="trainBtn">▶ Train Now</button>
-              <button class="lb-pill" id="labelBtn">✎ Label more</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="log lb-inset"><pre id="logTail">Logs will appear here while training runs.</pre></div>
-      </div>
-    </div>
-    <script type="module">
-      import { wordmark } from "./primitives.ts";
-      import { lb } from "./ipc.ts";
-
-      document.getElementById("brand").appendChild(wordmark(14));
-
-      document.getElementById("labelBtn").addEventListener("click", () => lb.showWindow("labeling"));
-      document.getElementById("trainBtn").addEventListener("click", () => {
-        const tail = document.getElementById("logTail");
-        tail.textContent += "\nTraining queue is platform-side — check the README for the auto.sh / auto.ps1 invocation.";
-      });
-    </script>
+  <body><div class="layout"><div class="head"><span id="brand"></span><div style="margin-top:6px"><div class="lb-display" style="font-size:22px">Label &amp; Train</div><div style="font:500 12px var(--lb-font-ui);color:var(--lb-ink-muted)">Frames and labels stay local. Release packages are inference-only.</div></div></div><div class="body">
+    <div class="stats"><div class="stat lb-raised"><div class="l">Screenshots</div><div class="v" style="color:var(--lb-block)" id="statShots">0</div></div><div class="stat lb-raised"><div class="l">Labeled</div><div class="v" style="color:var(--lb-success)" id="statLabeled">0</div></div><div class="stat lb-raised"><div class="l">Pending</div><div class="v" style="color:var(--lb-train)" id="statRem">0</div></div></div>
+    <div class="card lb-raised"><div class="stage"><div><div class="lb-uppercase">Local labeling workflow</div><div style="font:600 14px var(--lb-font-ui);margin-top:3px">Review captured frames before source training</div><div class="classes" id="classes"></div></div><div class="actions"><button class="lb-pill lb-train" id="trainBtn" disabled>Inference-only package</button><button class="lb-pill" id="labelBtn">✎ Open labeling</button></div></div></div>
+    <div class="notice" id="notice">Signed desktop packages never install Python, download training code, train replacement weights, or activate candidates. Use the documented source companion workflow to train a candidate; promotion still requires the complete schema-5 gate, equivalent CoreML/ONNX evidence, authentication, and the atomic installer.</div><div class="error" id="error" role="alert"></div>
+  </div></div>
+  <script type="module">import{wordmark}from"./primitives.ts";import{lb}from"./ipc.ts";document.getElementById("brand").appendChild(wordmark(14));const error=document.getElementById("error");document.getElementById("labelBtn").addEventListener("click",()=>lb.showWindow("labeling").catch((value)=>error.textContent=String(value)));async function refresh(){try{const[entries,capabilities,behavior]=await Promise.all([lb.listScreenshots(),lb.getCapabilities(),lb.getBehaviorContract()]);const labeled=entries.filter((entry)=>entry.labeled).length;document.getElementById("statShots").textContent=String(entries.length);document.getElementById("statLabeled").textContent=String(labeled);document.getElementById("statRem").textContent=String(entries.length-labeled);document.getElementById("classes").textContent=`Runtime classes: ${behavior.runtimeClasses.join(" · ")}`;if(capabilities.productionTrainingRuntime){throw new Error("Invalid capability contract: production training must be disabled")}}catch(value){error.textContent=String(value)}}refresh();</script>
   </body>
 </html>

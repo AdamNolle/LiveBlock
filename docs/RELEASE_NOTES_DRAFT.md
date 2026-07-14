@@ -100,7 +100,10 @@ No current platform profile reports `releaseReady: true`.
 - Native power/session/display observation and 0.5/1/2/4-second bounded recovery
   are implemented, including first-frame gating. Real sleep, lock, hot-plug,
   driver-reset, and observer-failure execution remains uncertified.
-- Region editor and labeling UI are not complete end-to-end workflows.
+- Region editing and labeling are implemented against native managed-path IPC,
+  but their real mixed-DPI, hot-plug, keyboard, and accessibility matrices remain
+  uncertified. Windows/Linux package training stays deliberately unavailable;
+  source companion outputs are candidates only.
 - DirectML/CPU provider execution, NVIDIA/AMD/Intel performance, mixed-DPI
   overlays, capture exclusion, games, DRM, and anti-cheat behavior lack
   real-device evidence.

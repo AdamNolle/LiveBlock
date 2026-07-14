@@ -15,7 +15,6 @@ mod paths;
 mod regions;
 mod state;
 mod tray;
-mod training;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -94,6 +93,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_capabilities,
+            get_behavior_contract,
             begin_user_action,
             start_capture,
             stop_capture,
@@ -668,6 +668,13 @@ fn try_load_default_detector(app: &AppHandle) {
 // ===== Tauri commands =====
 
 #[tauri::command]
+fn get_behavior_contract() -> Result<liveblock_config::DesktopBehaviorContract, String> {
+    let contract = liveblock_config::DesktopBehaviorContract::default();
+    contract.validate().map_err(|error| error.to_owned())?;
+    Ok(contract)
+}
+
+#[tauri::command]
 fn get_capabilities(
     state: State<'_, AppState>,
 ) -> Result<liveblock_config::DesktopCapabilityProfile, String> {
@@ -1187,7 +1194,12 @@ fn list_screenshots() -> Vec<ScreenshotEntry> {
             let p = paths::validate_screenshot_path(&e.path()).ok()?;
             let stem = p.file_stem()?.to_string_lossy().into_owned();
             let label = paths::label_path_for(&p);
-            Some(ScreenshotEntry { path: p, stem, labeled: label.exists() })
+            Some(ScreenshotEntry {
+                path: p,
+                label_path: label.clone(),
+                stem,
+                labeled: label.exists(),
+            })
         })
         .collect();
     out.sort_by(|a, b| a.stem.cmp(&b.stem));
@@ -1219,6 +1231,11 @@ fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
 #[tauri::command]
 fn save_label(path: PathBuf, doc: LabelDocument) -> Result<(), String> {
     let path = paths::validate_label_path(&path, false).map_err(|e| e.to_string())?;
+    if path.exists() {
+        // Validate the existing discriminator before replacement. Unknown future
+        // sidecars remain byte-for-byte untouched even if IPC is invoked directly.
+        LabelDocument::load(&path).map_err(|e| e.to_string())?;
+    }
     validate_label_binding(&path, &doc)?;
     doc.save(&path).map_err(|e| e.to_string())
 }
@@ -1238,7 +1255,23 @@ fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
 fn discard_screenshot(path: PathBuf) -> Result<(), String> {
     let path = paths::validate_screenshot_path(&path).map_err(|e| e.to_string())?;
     let dst = paths::trash_dir().join(path.file_name().ok_or("no name")?);
-    liveblock_config::move_regular_file_no_replace(&path, &dst).map_err(|e| e.to_string())
+    let label = paths::label_path_for(&path);
+    let label_move = if label.exists() {
+        let label = paths::validate_label_path(&label, true).map_err(|e| e.to_string())?;
+        let destination = paths::trash_dir().join(label.file_name().ok_or("no label name")?);
+        liveblock_config::move_regular_file_no_replace(&label, &destination)
+            .map_err(|error| error.to_string())?;
+        Some((label, destination))
+    } else {
+        None
+    };
+    if let Err(error) = liveblock_config::move_regular_file_no_replace(&path, &dst) {
+        if let Some((label, destination)) = label_move {
+            let _ = liveblock_config::move_regular_file_no_replace(&destination, &label);
+        }
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 fn validate_label_binding(path: &std::path::Path, doc: &LabelDocument) -> Result<(), String> {
@@ -1256,21 +1289,15 @@ fn validate_label_binding(path: &std::path::Path, doc: &LabelDocument) -> Result
 }
 
 #[tauri::command]
-fn start_training(epochs: u32, batch: u32, imgsz: u32, state: State<'_, AppState>) -> Result<(), String> {
+fn start_training(_epochs: u32, _batch: u32, _imgsz: u32) -> Result<(), String> {
     if !liveblock_config::developer_training_runtime_available() {
         return Err("release builds are inference-only; use the source training workflow".into());
     }
-    let job = training::TrainingJob::start(state.app.clone(), epochs, batch, imgsz)
-        .map_err(|e| e.to_string())?;
-    *state.training.lock() = Some(job);
-    Ok(())
+    Err("Windows source training dispatch is not implemented; use the documented source companion workflow".into())
 }
 
 #[tauri::command]
-fn cancel_training(state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(job) = state.training.lock().take() {
-        job.cancel();
-    }
+fn cancel_training() -> Result<(), String> {
     Ok(())
 }
 

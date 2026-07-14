@@ -19,6 +19,5 @@ pub mod paths;
 pub mod regions;
 #[cfg(windows)]
 pub mod state;
-pub mod training;
 #[cfg(windows)]
 pub mod tray;

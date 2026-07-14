@@ -32,10 +32,12 @@ system and compositor permit capture and overlay behavior.
   and Linux. Frames stay local; hardware-provider certification is pending.
 - Native macOS 26 chrome. SwiftUI Liquid Glass — `.glassEffect`,
   `.glassProminent` buttons, system Toggle.
-- Manual regions. The macOS editor supports draw/drag/resize/delete and
-  persistence; Windows/Linux editor workflows remain incomplete.
-- Source training workflow. Debug/source builds can capture, label, and train
-  candidates; production packages are inference-only and never auto-install them.
+- Manual regions. macOS supports draw/drag/resize/delete; the shared Windows/Linux
+  editor supports drag, centered presets, delete, clear, and normalized persistence.
+- Local labeling and source training. All adapters capture and label managed local
+  screenshots. Production packages are inference-only; candidate training runs only
+  from the documented source companion workflow (with an in-app dashboard on macOS)
+  and never auto-installs outputs.
 - Mirror-blend inpainter. Fill is computed from surrounding pixels without
   additional model weights; stale frame work is bounded rather than queued.
 - Cross-platform contracts. The macOS app and experimental Rust/Tauri ports

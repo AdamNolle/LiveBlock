@@ -161,7 +161,7 @@ struct SettingsView: View {
                        size: .sm, dot: true, pulse: controller.isRunning)
                 Spacer()
                 LBButton(title: "Mark region", variant: .primary, size: .sm,
-                         systemIcon: "plus", kbd: "⌘⇧K") {
+                         systemIcon: "plus", kbd: "⌘⇧B") {
                     controller.openEditor()
                 }
             }

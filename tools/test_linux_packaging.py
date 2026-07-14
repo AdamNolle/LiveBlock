@@ -45,7 +45,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
         by_arch = {
             source["only-arches"][0]: source
             for source in sources
-            if source["type"] == "file"
+            if isinstance(source, dict) and source.get("type") == "file"
         }
         for architecture, spec in staging.SPECS.items():
             source = by_arch[architecture]
@@ -57,6 +57,19 @@ class LinuxPackagingContractTests(unittest.TestCase):
         commands = "\n".join(self.flatpak["modules"][0]["build-commands"])
         self.assertIn("stage_linux_onnxruntime.py", commands)
         self.assertIn("--architecture ${FLATPAK_ARCH}", commands)
+
+    def test_flatpak_build_inputs_are_lock_derived_and_offline(self):
+        module = self.flatpak["modules"][0]
+        self.assertIn("cargo-sources.json", module["sources"])
+        self.assertIn("node-sources.json", module["sources"])
+        environment = self.flatpak["build-options"]["env"]
+        self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
+        self.assertEqual(environment["npm_config_offline"], "true")
+        self.assertEqual(
+            environment["npm_config_cache"],
+            "/run/build/liveblock-linux/flatpak-node/npm-cache",
+        )
+        self.assertIn("npm ci --offline", "\n".join(module["build-commands"]))
 
     def test_native_bundle_is_recursive_and_targets_expected_formats(self):
         bundle = self.tauri["bundle"]

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "generator": {
+    "repository": "https://github.com/flatpak/flatpak-builder-tools.git",
+    "commit": "737c0085912f9f7dabf9341d4608e2a77a51a73a"
+  },
+  "cargo": {
+    "input": "../Cargo.lock",
+    "inputSha256": "de665f2ccf1039cbdf76643a1aa0b94889376983b3e8965d1a3c1cb37991d01c",
+    "output": "cargo-sources.json",
+    "outputSha256": "6e0c8188fa041601b643d1599a143759c4dfa82d8ca734bee760ffa52af32e9a",
+    "command": "python3 cargo/flatpak-cargo-generator.py platform/linux/Cargo.lock -o platform/linux/flatpak/cargo-sources.json"
+  },
+  "node": {
+    "input": "../../_shared-frontend/package-lock.json",
+    "inputSha256": "1c358413cebb014b3b4d6e3f513e1c94ba8d321910710a806d7866831f55af63",
+    "output": "node-sources.json",
+    "outputSha256": "f69d650d555cfb8c9aaf84d2db288c673d2d39328bebd2e19fa3e572735d08b9",
+    "command": "flatpak-node-generator npm platform/_shared-frontend/package-lock.json -o platform/linux/flatpak/node-sources.json --node-sdk-extension org.freedesktop.Sdk.Extension.node20//47 --no-requests-cache"
+  }
+}

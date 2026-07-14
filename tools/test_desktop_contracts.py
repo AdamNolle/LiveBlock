@@ -13,6 +13,8 @@ TRAINING_UI = (ROOT / "platform/_shared-frontend/src/training.html").read_text()
 MAC_CONTROLLER = (ROOT / "Sources/AppController.swift").read_text()
 WINDOWS_UPDATES = (ROOT / "platform/windows/src-tauri/src/model_updates.rs").read_text()
 WINDOWS_LIFECYCLE = (ROOT / "platform/windows/src-tauri/src/lifecycle.rs").read_text()
+WINDOWS_DETECTION = (ROOT / "platform/windows/src-tauri/src/detection.rs").read_text()
+WINDOWS_DIRECTML_DOC = (ROOT / "docs/WINDOWS_DIRECTML.md").read_text()
 LINUX_UPDATES = (ROOT / "platform/linux/src-tauri/src/model_updates.rs").read_text()
 LINUX_DETECTION = (ROOT / "platform/linux/src-tauri/src/detection.rs").read_text()
 LINUX_INPAINTING = (ROOT / "platform/linux/src-tauri/src/inpainting.rs").read_text()
@@ -101,6 +103,19 @@ class DesktopAdapterContractTests(unittest.TestCase):
         self.assertIn('for label in ["editor", "render", "labeling", "training"]', WINDOWS)
         self.assertIn("dispatch_hotkey", LINUX)
         self.assertIn("PanicDisable", LINUX)
+
+    def test_windows_directml_registration_and_cpu_fallback_are_truthful(self):
+        self.assertIn("with_parallel_execution(false)", WINDOWS_DETECTION)
+        self.assertIn("with_memory_pattern(false)", WINDOWS_DETECTION)
+        self.assertGreaterEqual(WINDOWS_DETECTION.count("error_on_failure()"), 2)
+        self.assertIn("cpu_after_directml_load_failure", WINDOWS_DETECTION)
+        self.assertIn("directml_registered_cpu_uploaded_tensor", WINDOWS_DETECTION)
+        self.assertIn("detector.backend_status()", WINDOWS)
+        self.assertIn("registration/load status is not proof", WINDOWS)
+        self.assertIn("ID3D12Resource", WINDOWS_DIRECTML_DOC)
+        self.assertIn("CreateGPUAllocationFromD3DResource", WINDOWS_DIRECTML_DOC)
+        self.assertIn("D3D11On12", WINDOWS_DIRECTML_DOC)
+        self.assertIn("leave the texture-transport checklist item open", WINDOWS_DIRECTML_DOC)
 
     def test_windows_lifecycle_recovery_is_fail_closed_and_bounded(self):
         for event in (

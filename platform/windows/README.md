@@ -17,9 +17,12 @@ explicit physical-monitor selection; render/editor windows follow negative
 origins and PerMonitorV2 pixel geometry. Global hotkeys and tray actions dispatch
 natively, including panic teardown. The render HWND is click-through, top-most,
 and `WDA_EXCLUDEFROMCAPTURE`. Deterministic tests cover queue, monitor ordering,
-and conservative unavailable/protected-black-frame policy. DirectML/CPU ORT
-providers remain configured for CPU-uploaded tensors; zero-copy D3D texture
-inference is still open. Mirror-blend patches now dispatch through a bounded,
+and conservative unavailable/protected-black-frame policy. DirectML is attempted
+with required sequential/no-memory-pattern options; registration/model-load failure
+constructs a separate CPU session. Inputs remain CPU-uploaded tensors and registration
+is not physical-GPU execution evidence. The version-pinned D3D11/D3D12/ORT boundary is
+in [`docs/WINDOWS_DIRECTML.md`](../../docs/WINDOWS_DIRECTML.md); texture transport remains
+open. Mirror-blend patches now dispatch through a bounded,
 isolated D3D11 compute device when available, then read back for PNG/webview
 composition; setup, dispatch, or timeout failure permanently falls back to CPU.
 Native power/session/display

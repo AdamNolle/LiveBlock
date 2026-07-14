@@ -23,6 +23,7 @@ from sign_model_manifest import (
 )
 from validate_model_keyring import validate as validate_keyring
 from verify_signed_model_bundle import verify as verify_signed_bundle
+from verify_signed_onnx_bundle import verify as verify_signed_onnx_bundle
 from promotion_contract import (
     GATE_SCHEMA,
     REQUIRED_MAX_FALSE_POSITIVES,
@@ -290,6 +291,47 @@ class ModelDistributionTests(unittest.TestCase):
         (artifact / "model.bin").write_bytes(b"tampered")
         with self.assertRaisesRegex(ValueError, "fingerprint"):
             verify_signed_bundle(bundle)
+
+    def test_signed_onnx_bundle_verifier_binds_exact_regular_artifact(self):
+        bundle = self.root / "onnx-release-bundle"
+        bundle.mkdir()
+        artifact = bundle / "liveblock-detector.onnx"
+        artifact.write_bytes(b"onnx-candidate")
+        private_key = Ed25519PrivateKey.from_private_bytes(self.seed)
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+        (bundle / "trusted-model-keys.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "keys": [{"keyId": "release", "publicKeyBase64": base64.b64encode(public_key).decode()}],
+        }))
+        manifest = {
+            "schemaVersion": MODEL_MANIFEST_SCHEMA,
+            "modelId": "liveblock-detector",
+            "modelVersion": "1.0.0",
+            "artifactFormat": "onnx",
+            "artifactHashAlgorithm": "sha256-file-or-tree-v1",
+            "artifactSha256": artifact_sha256(artifact),
+            "runtimeClasses": ["Logo", "Ad banner", "Sponsored"],
+            "inputWidth": 640,
+            "inputHeight": 640,
+            "nmsEmbedded": False,
+            "releaseSequence": 2,
+            "promotionGateSchema": GATE_SCHEMA,
+            "promotionReportSha256": "cd" * 32,
+            "createdAt": "2026-07-14T00:00:00Z",
+            "keyId": "release",
+            "signature": "",
+        }
+        manifest["signature"] = base64.b64encode(
+            private_key.sign(_signing_bytes(manifest))
+        ).decode()
+        (bundle / "liveblock-detector.manifest.json").write_text(json.dumps(manifest))
+        self.assertEqual(verify_signed_onnx_bundle(bundle)["releaseSequence"], 2)
+        artifact.write_bytes(b"tampered")
+        with self.assertRaisesRegex(ValueError, "fingerprint"):
+            verify_signed_onnx_bundle(bundle)
 
     def test_release_keyring_validator_is_strict_and_empty_is_explicit(self):
         keyring = self.root / "trusted-model-keys.json"

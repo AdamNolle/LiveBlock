@@ -43,7 +43,7 @@ jobs:
       - name: Label and desktop adapter contract tests
         env:
           PYTHONPATH: tools
-        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_linux_runtime_staging tools.test_linux_packaging
       - name: Explicit migration, installer, and update recovery gates
         env:
           PYTHONPATH: tools
@@ -243,3 +243,49 @@ jobs:
           grep -q "release package runtime file is missing" missing-ort.log
           LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1 \
             cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release
+      - name: Stage pinned ONNX Runtime and build build-only deb
+        run: |
+          python3 tools/stage_linux_onnxruntime.py --architecture x86_64
+          cd platform/linux/src-tauri
+          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 \
+            ../../_shared-frontend/node_modules/.bin/tauri build --bundles deb --ci
+      - name: Inventory exact build-only deb payload
+        run: |
+          mkdir -p tools/runs/ci-linux-package/extracted
+          mapfile -t packages < <(find platform/linux/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -print)
+          test "${#packages[@]}" -eq 1
+          package="${packages[0]}"
+          package_name="$(basename "$package")"
+          cp "$package" "tools/runs/ci-linux-package/$package_name"
+          dpkg-deb --extract "$package" tools/runs/ci-linux-package/extracted
+          test -x tools/runs/ci-linux-package/extracted/usr/bin/liveblock-linux
+          test -f tools/runs/ci-linux-package/extracted/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so
+          test ! -L tools/runs/ci-linux-package/extracted/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so
+          test -s tools/runs/ci-linux-package/extracted/usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt
+          python3 tools/release_evidence.py inventory \
+            --root tools/runs/ci-linux-package/extracted \
+            --output tools/runs/ci-linux-package/inventory.json \
+            --platform linux-x86_64 \
+            --artifact-type deb-build-only \
+            --commit "$GITHUB_SHA" \
+            --require usr/bin/liveblock-linux \
+            --require usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so \
+            --require usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt \
+            --require usr/lib/LiveBlock/resources/onnxruntime/STAGING-MANIFEST.json \
+            --require usr/lib/LiveBlock/resources/trusted-model-keys.json
+          python3 tools/release_evidence.py verify \
+            --root tools/runs/ci-linux-package/extracted \
+            --manifest tools/runs/ci-linux-package/inventory.json
+          cp platform/linux/src-tauri/resources/onnxruntime/STAGING-MANIFEST.json \
+            tools/runs/ci-linux-package/runtime-staging-manifest.json
+          (cd tools/runs/ci-linux-package && sha256sum "$package_name" > package.sha256)
+      - name: Preserve Linux build-only package evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build-only-package-evidence
+          path: |
+            tools/runs/ci-linux-package/*.deb
+            tools/runs/ci-linux-package/inventory.json
+            tools/runs/ci-linux-package/runtime-staging-manifest.json
+            tools/runs/ci-linux-package/package.sha256
+          if-no-files-found: error

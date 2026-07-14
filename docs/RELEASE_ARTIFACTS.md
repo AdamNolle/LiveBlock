@@ -37,10 +37,11 @@ Every packaging pipeline must:
 7. verify the published download against its final inventory before release.
 
 An inventory labeled `build-only` or `webview-payload-build-only` is not a
-package, installer, signature, or release-readiness claim. Current CI exercises
-the contract against the deterministic webview payload because production model
-keys/artifacts and signing credentials do not exist yet. CI preserves that exact
-payload as a normalized tar plus SHA-256 beside its inventory, so an operator can
+signature, distributable release, or release-readiness claim. Current CI exercises
+the contract against both the deterministic webview payload and an extracted
+Linux `.deb` whose trusted-key ring is intentionally empty because production
+model keys/artifacts and signing credentials do not exist yet. CI preserves the
+exact webview payload as a normalized tar plus SHA-256 beside its inventory, so an operator can
 extract it and rerun `verify` without rebuilding.
 
 Example from the repository root:
@@ -86,6 +87,10 @@ libraries/drivers and Apple system frameworks are platform prerequisites rather
 than bundled dependencies. No Swift Package Manager dependencies are currently
 used. Linux production builds now fail unless packaging stages a regular non-symlink
 `resources/onnxruntime/libonnxruntime.so` and `THIRD-PARTY-NOTICES.txt`.
+The CPU staging helper pins official ONNX Runtime archives by complete SHA-256,
+verifies target ELF identity, preserves license/notices, and records every output
+hash. CI inventories the extracted `.deb` under `deb-build-only`; see
+[`LINUX_PACKAGING.md`](LINUX_PACKAGING.md).
 Optional CUDA/ROCm/OpenVINO/TensorRT builds may select only one provider and
 also require the shared provider library plus its selected provider library.
 Their exact binaries, transitive vendor libraries, licenses, and notices must be
@@ -110,7 +115,8 @@ python3 tools/release_evidence.py sbom \
 
 The shared job also reruns focused legacy-schema migrations, atomic installer
 behavior, signed CoreML bundle tamper rejection, and ONNX update rollback/crash
-recovery tests. These are deterministic implementation tests. They do not test
-an MSI/NSIS/Flatpak/AppImage install, package signing, OS upgrade/uninstall,
+recovery tests. These are deterministic implementation tests. The Linux `.deb`
+is extracted and inventoried but not installed or launched. CI does not test an
+MSI/NSIS/RPM/Flatpak/AppImage install, package signing, OS upgrade/uninstall,
 power loss, model parity, or hardware execution. Those remain open until exact
 production artifacts and suitable hosts/credentials exist.

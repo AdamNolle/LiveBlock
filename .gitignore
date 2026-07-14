@@ -98,6 +98,7 @@ platform/windows/Release/
 # Linux port
 platform/linux/target/
 platform/linux/build/
+platform/linux/src-tauri/resources/onnxruntime/
 
 # Editors / IDEs
 .idea/

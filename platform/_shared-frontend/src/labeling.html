@@ -2,68 +2,59 @@
 <html lang="en">
   <head>
     <meta charset="utf-8"/>
-    <title>LiveBlocker — Labeling</title>
+    <title>LiveBlock — Labeling</title>
     <link rel="stylesheet" href="./tokens.css"/>
     <link rel="stylesheet" href="./primitives.css"/>
     <style>
-      .layout { display: flex; flex-direction: column; height: 100vh; }
-      .head {
-        padding: 14px 20px;
-        background: linear-gradient(180deg,#cdcce8,#b9b8d8);
-        border-bottom: 1px solid rgba(0,0,0,0.07);
-        display: flex; align-items: center; gap: 14px;
-      }
-      .body { flex: 1; display: flex; min-height: 0; }
-      .canvas { flex: 1; padding: 18px; display: grid; place-items: center; background: var(--lb-bg); }
-      .canvasInner {
-        width: 100%; height: 100%;
-        background: var(--lb-bg);
-        border-radius: 18px;
-        box-shadow:
-          inset 4.4px 4.4px 12.6px var(--lb-shadow-dark),
-          inset -4.4px -4.4px 12.6px var(--lb-shadow-light);
-        position: relative;
-      }
-      .footer {
-        padding: 12px 20px; display: flex; align-items: center; gap: 10px;
-        background: var(--lb-bg); border-top: 1px solid rgba(0,0,0,0.05);
-      }
-      .footer .legend { font: 500 11px var(--lb-font-mono); color: var(--lb-ink-faint); margin-left: auto; }
+      .layout{display:flex;flex-direction:column;height:100vh}.head{padding:14px 20px;background:linear-gradient(180deg,#cdcce8,#b9b8d8);border-bottom:1px solid rgba(0,0,0,.07);display:flex;align-items:center;gap:14px}.body{flex:1;display:flex;min-height:0}.canvas{flex:1;padding:18px;display:grid;place-items:center;background:var(--lb-bg);overflow:hidden}.canvasInner{width:100%;height:100%;display:grid;place-items:center;background:var(--lb-bg);border-radius:18px;box-shadow:inset 4.4px 4.4px 12.6px var(--lb-shadow-dark),inset -4.4px -4.4px 12.6px var(--lb-shadow-light);overflow:hidden}.imageStage{position:relative;cursor:crosshair;touch-action:none}.imageStage img{display:block;width:100%;height:100%;pointer-events:none}.box,.preview{position:absolute;box-sizing:border-box;border:2px solid var(--lb-block);background:rgba(255,74,46,.14);border-radius:5px}.box button{position:absolute;right:-10px;top:-10px;width:20px;height:20px;border:0;border-radius:50%;background:var(--lb-block);color:#fff;font-weight:700;cursor:pointer}.preview{border-style:dashed;pointer-events:none}.empty{color:var(--lb-ink-muted);font:600 13px var(--lb-font-ui);text-align:center;padding:30px}.footer{padding:12px 20px;display:flex;align-items:center;gap:10px;background:var(--lb-bg);border-top:1px solid rgba(0,0,0,.05)}.footer .legend{font:500 11px var(--lb-font-mono);color:var(--lb-ink-faint);margin-left:auto}.message{font:600 11px var(--lb-font-ui);color:var(--lb-block);max-width:360px}.readonly{background:rgba(224,148,42,.13);padding:5px 8px;border-radius:7px;color:var(--lb-ink)}
     </style>
   </head>
   <body>
     <div class="layout">
       <div class="head">
-        <span id="brand"></span>
-        <div>
-          <div style="font:600 13px var(--lb-font-ui);color:var(--lb-ink)">Labeling</div>
-          <div id="status" style="font:500 11px var(--lb-font-ui);color:var(--lb-ink-muted)">No screenshots yet</div>
-        </div>
-        <div style="flex:1"></div>
-        <button class="lb-pill lb-sm" id="captureBtn">📷 Capture</button>
-        <button class="lb-pill lb-sm lb-block" id="acceptAllBtn" hidden>✓ Accept all</button>
+        <span id="brand"></span><div><div style="font:600 13px var(--lb-font-ui);color:var(--lb-ink)">Labeling</div><div id="status" style="font:500 11px var(--lb-font-ui);color:var(--lb-ink-muted)">Loading…</div></div>
+        <div style="flex:1"></div><span id="message" class="message" role="alert"></span><button class="lb-pill lb-sm" id="captureBtn">📷 Capture current frame</button>
       </div>
-      <div class="body">
-        <div class="canvas"><div class="canvasInner" id="canvas"></div></div>
-      </div>
+      <div class="body"><div class="canvas" id="canvas"><div class="canvasInner" id="canvasInner"><div class="empty" id="empty">No screenshots yet.<br/>Start capture, then capture a frame here or with the global labeling shortcut.</div><div class="imageStage" id="imageStage" hidden><img id="image" alt="Screenshot being labeled"/></div></div></div></div>
       <div class="footer">
-        <button class="lb-pill lb-sm" id="prevBtn">← Prev</button>
-        <button class="lb-pill lb-block" id="nextBtn">Save & Next →</button>
-        <button class="lb-pill lb-sm lb-train" id="noAdsBtn">✓ No ads (N)</button>
-        <button class="lb-pill lb-sm lb-ghost" id="discardBtn">🗑 Discard</button>
-        <span class="legend">drag to draw · ⌫ del last · → next · ← prev · ⌘S save · ⌘⌫ discard</span>
+        <button class="lb-pill lb-sm" id="prevBtn">← Prev</button><button class="lb-pill lb-block" id="nextBtn">Save &amp; Next →</button><button class="lb-pill lb-sm lb-train" id="noAdsBtn">✓ No sponsor target (N)</button><button class="lb-pill lb-sm lb-ghost" id="discardBtn">🗑 Discard</button><span class="legend">drag sponsor targets · ⌫ delete last · ←/→ navigate · Ctrl+S save</span>
       </div>
     </div>
-
     <script type="module">
       import { wordmark } from "./primitives.ts";
       import { lb } from "./ipc.ts";
-
       document.getElementById("brand").appendChild(wordmark(16));
 
-      document.getElementById("captureBtn").addEventListener("click", async () => {
-        await lb.captureScreenshotForLabeling();
-      });
+      const imageStage=document.getElementById("imageStage"), image=document.getElementById("image"), canvasInner=document.getElementById("canvasInner"), empty=document.getElementById("empty"), status=document.getElementById("status"), message=document.getElementById("message");
+      const mutating=["nextBtn","noAdsBtn"].map((id)=>document.getElementById(id));
+      let entries=[], index=0, imageData=null, boxes=[], drag=null, readOnly=false;
+      const current=()=>entries[index]??null;
+      const fail=(error)=>{message.textContent=String(error)}; const clearMessage=()=>{message.textContent=""};
+      const imageFilename=(entry)=>entry.path.split(/[\\/]/).pop();
+      function setReadOnly(value){readOnly=value;mutating.forEach((button)=>button.disabled=value);imageStage.style.cursor=value?"not-allowed":"crosshair"}
+      function fitImage(){if(!imageData)return;const maxW=canvasInner.clientWidth,maxH=canvasInner.clientHeight,scale=Math.min(maxW/imageData.width,maxH/imageData.height);imageStage.style.width=`${Math.max(1,imageData.width*scale)}px`;imageStage.style.height=`${Math.max(1,imageData.height*scale)}px`}
+      function styleBox(node,box){node.style.left=`${box.x*100}%`;node.style.top=`${box.y*100}%`;node.style.width=`${box.width*100}%`;node.style.height=`${box.height*100}%`}
+      function renderBoxes(){imageStage.querySelectorAll(".box").forEach((node)=>node.remove());for(const box of boxes){const node=document.createElement("div");node.className="box";styleBox(node,box);const remove=document.createElement("button");remove.textContent="×";remove.ariaLabel="Delete label box";remove.addEventListener("pointerdown",(event)=>event.stopPropagation());remove.addEventListener("click",(event)=>{event.stopPropagation();if(readOnly)return;boxes=boxes.filter((candidate)=>candidate.id!==box.id);renderBoxes()});node.appendChild(remove);imageStage.appendChild(node)}}
+      const point=(event)=>{const rect=imageStage.getBoundingClientRect();return{x:Math.min(1,Math.max(0,(event.clientX-rect.left)/rect.width)),y:Math.min(1,Math.max(0,(event.clientY-rect.top)/rect.height))}};
+      const rectFrom=(a,b)=>({id:crypto.randomUUID(),x:Math.min(a.x,b.x),y:Math.min(a.y,b.y),width:Math.abs(b.x-a.x),height:Math.abs(b.y-a.y)});
+      imageStage.addEventListener("pointerdown",(event)=>{if(readOnly||event.button!==0||event.target!==imageStage)return;imageStage.setPointerCapture(event.pointerId);const preview=document.createElement("div");preview.className="preview";imageStage.appendChild(preview);drag={pointerId:event.pointerId,start:point(event),preview}});
+      imageStage.addEventListener("pointermove",(event)=>{if(!drag||drag.pointerId!==event.pointerId)return;styleBox(drag.preview,rectFrom(drag.start,point(event)))});
+      imageStage.addEventListener("pointerup",(event)=>{if(!drag||drag.pointerId!==event.pointerId)return;const active=drag;drag=null;active.preview.remove();const box=rectFrom(active.start,point(event));if(box.width>=.005&&box.height>=.005){boxes.push(box);renderBoxes()}});
+      imageStage.addEventListener("pointercancel",()=>{drag?.preview.remove();drag=null});
+
+      async function refreshEntries(preferredPath=null){entries=await lb.listScreenshots();if(preferredPath){const next=entries.findIndex((entry)=>entry.path===preferredPath);if(next>=0)index=next}else index=Math.min(index,Math.max(0,entries.length-1));await loadCurrent()}
+      async function loadCurrent(){clearMessage();boxes=[];imageData=null;setReadOnly(false);const entry=current();if(!entry){empty.hidden=false;imageStage.hidden=true;status.textContent="No screenshots yet";updateButtons();return}try{imageData=await lb.loadScreenshot(entry.path);image.src=imageData.pngDataUrl;empty.hidden=true;imageStage.hidden=false;fitImage();if(entry.labeled){try{const doc=await lb.loadLabel(entry.labelPath);if(doc)boxes=doc.boxes}catch(error){setReadOnly(true);fail(`Label is read-only because its sidecar is incompatible: ${error}`)}}renderBoxes();status.textContent=`${index+1} of ${entries.length} · ${entry.labeled?"labeled":"pending"}${readOnly?" · read-only":""}`;updateButtons()}catch(error){fail(error);empty.hidden=false;imageStage.hidden=true}}
+      function updateButtons(){const has=Boolean(current());document.getElementById("prevBtn").disabled=!has||index===0;document.getElementById("nextBtn").disabled=!has||readOnly;document.getElementById("noAdsBtn").disabled=!has||readOnly;document.getElementById("discardBtn").disabled=!has}
+      async function save(){const entry=current();if(!entry||!imageData||readOnly)return false;await lb.saveLabel(entry.labelPath,{schemaVersion:1,image:imageFilename(entry),imageWidth:imageData.width,imageHeight:imageData.height,boxes,labeledAt:new Date().toISOString().replace(/\.\d{3}Z$/,"Z")});entry.labeled=true;return true}
+      async function saveAndAdvance(){try{clearMessage();if(!await save())return;if(index<entries.length-1)index+=1;await loadCurrent()}catch(error){fail(error)}}
+      document.getElementById("captureBtn").addEventListener("click",async()=>{try{clearMessage();const path=await lb.captureScreenshotForLabeling();if(!path)throw new Error("No current frame is available; start capture and wait for the first frame");await refreshEntries(path)}catch(error){fail(error)}});
+      document.getElementById("prevBtn").addEventListener("click",async()=>{if(index>0){index-=1;await loadCurrent()}});
+      document.getElementById("nextBtn").addEventListener("click",saveAndAdvance);
+      document.getElementById("noAdsBtn").addEventListener("click",async()=>{if(readOnly)return;boxes=[];await saveAndAdvance()});
+      document.getElementById("discardBtn").addEventListener("click",async()=>{const entry=current();if(!entry)return;try{clearMessage();await lb.discardScreenshot(entry.path);await refreshEntries()}catch(error){fail(error)}});
+      window.addEventListener("keydown",async(event)=>{if(event.key==="ArrowLeft"&&!document.getElementById("prevBtn").disabled){index-=1;await loadCurrent()}else if(event.key==="ArrowRight"){await saveAndAdvance()}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="s"){event.preventDefault();try{await save();await loadCurrent()}catch(error){fail(error)}}else if((event.key==="Backspace"||event.key==="Delete")&&!readOnly&&boxes.length){boxes.pop();renderBoxes()}else if(event.key.toLowerCase()==="n"&&!readOnly){boxes=[];await saveAndAdvance()}});
+      new ResizeObserver(()=>fitImage()).observe(canvasInner);
+      refreshEntries().catch(fail);
     </script>
   </body>
 </html>

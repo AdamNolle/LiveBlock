@@ -10,4 +10,3 @@ pub mod paths;
 pub mod regions;
 pub mod session;
 pub mod state;
-pub mod training;

@@ -42,6 +42,7 @@ export interface ScreenshotData {
 
 export interface ScreenshotEntry {
   path: string;
+  labelPath: string;
   stem: string;
   labeled: boolean;
 }
@@ -82,6 +83,30 @@ export interface CaptureTelemetry {
   lastFrameUnixMs: number;
 }
 
+export type DesktopAction =
+  | "toggle_capture"
+  | "toggle_region_editor"
+  | "capture_for_labeling"
+  | "panic_disable";
+
+export interface HotkeyContract {
+  action: DesktopAction;
+  macos: string;
+  windowsLinux: string;
+}
+
+export interface DesktopBehaviorContract {
+  contractVersion: number;
+  runtimeClasses: ["Logo", "Ad banner", "Sponsored"];
+  hotkeys: HotkeyContract[];
+  panicClearsCaptureIntent: boolean;
+  panicCancelsRecovery: boolean;
+  panicClearsOverlays: boolean;
+  panicClosesEditor: boolean;
+  runtimeInferenceLocal: boolean;
+  frameTelemetryNetworked: boolean;
+}
+
 export interface DesktopCapabilityProfile {
   contractVersion: number;
   platform: string;
@@ -102,6 +127,7 @@ export interface DesktopCapabilityProfile {
 export const lb = {
   // Capture / detection lifecycle.
   getCapabilities: () => invoke<DesktopCapabilityProfile>("get_capabilities"),
+  getBehaviorContract: () => invoke<DesktopBehaviorContract>("get_behavior_contract"),
   startCapture: async (monitorId: string) => {
     const actionSequence = await invoke<number>("begin_user_action");
     return invoke<void>("start_capture", { monitorId, actionSequence });
@@ -126,7 +152,7 @@ export const lb = {
 
   // Labeling pipeline.
   captureScreenshotForLabeling: () =>
-    invoke<string | null>("capture_screenshot_for_labeling").catch(() => null),
+    invoke<string | null>("capture_screenshot_for_labeling"),
   listScreenshots: () => invoke<ScreenshotEntry[]>("list_screenshots"),
   loadScreenshot: (path: string) => invoke<ScreenshotData>("load_screenshot", { path }),
   saveLabel: (path: string, doc: LabelDocument) =>

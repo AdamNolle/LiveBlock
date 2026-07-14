@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8"/>
-    <title>LiveBlocker — Control Panel</title>
+    <title>LiveBlock — Control Panel</title>
     <link rel="stylesheet" href="./tokens.css"/>
     <link rel="stylesheet" href="./primitives.css"/>
     <style>
@@ -44,7 +44,7 @@
       <div class="head">
         <span id="logo"></span>
         <div class="col">
-          <div class="name">LiveBlocker</div>
+          <div class="name">LiveBlock</div>
           <div class="meta"><span id="statusDot" class="lb-dot"></span><span id="status">Stopped · 0 regions</span></div>
         </div>
         <span id="powerToggle"></span>
@@ -54,7 +54,7 @@
 
       <div class="actions">
         <button class="lb-pill lb-block" id="blockBtn">⌧ Block</button>
-        <button class="lb-pill lb-train" id="trainBtn">⊕ Train</button>
+        <button class="lb-pill lb-train" id="trainBtn">⊕ Label &amp; train</button>
       </div>
 
       <div class="stats">
@@ -91,6 +91,12 @@
       let regionCount = 0;
       let capabilitiesLoaded = false;
       let capabilitiesEpoch = 0;
+      let editorHotkey = "Ctrl+Shift+B";
+      lb.getBehaviorContract().then((contract) => {
+        const binding = contract.hotkeys.find((item) => item.action === "toggle_region_editor");
+        if (binding) editorHotkey = binding.windowsLinux;
+        document.getElementById("hotkeyHint").textContent = editorHotkey;
+      }).catch(() => {});
       const power = toggle({
         value: false,
         accent: "success",
@@ -172,7 +178,7 @@
       });
       events.onHotkeyAvailability((available) => {
         document.getElementById("hotkeyHint").textContent = available
-          ? "Ctrl+Shift+B"
+          ? editorHotkey
           : "Global hotkeys unavailable";
       });
 

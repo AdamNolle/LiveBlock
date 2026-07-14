@@ -1,4 +1,4 @@
-// LiveBlocker — vanilla TypeScript ports of the design's React primitives.
+// LiveBlock — vanilla TypeScript ports of the design's React primitives.
 // Each function returns an HTMLElement so window TS can compose UIs without
 // pulling in a framework.
 

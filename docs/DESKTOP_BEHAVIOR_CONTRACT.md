@@ -24,8 +24,18 @@ Panic disable must clear capture intent, cancel recovery, clear overlays, and
 close the editor. Runtime inference and frame processing stay local; frame
 telemetry is not networked. Production packages are inference-only.
 
-Windows and Linux expose their validated profile through the
-`get_capabilities` Tauri command. Profiles report current software state, not
+Windows and Linux expose their validated runtime profile through the
+`get_capabilities` Tauri command and the immutable vocabulary/hotkey/panic/local-data
+contract through `get_behavior_contract`. The shared frontend consumes the returned
+shortcut strings rather than defining a second binding table. Its region editor
+persists normalized native regions, and its labeling workflow reads/writes only
+backend-issued managed screenshot and sidecar paths. Incompatible future label
+sidecars are shown read-only; capture, load, save, discard, and path failures remain
+visible rather than being converted to success or an empty result. Production
+training controls are disabled and direct operators to the source companion workflow;
+source outputs remain non-installable candidates.
+
+Profiles report current software state, not
 the target roadmap: incomplete Windows/Linux paths are `limited`, experimental
 or not implemented backends are named explicitly, and `releaseReady` remains
 false. Unknown Linux sessions/compositors fail the capability check. GNOME

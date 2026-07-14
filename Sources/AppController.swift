@@ -447,6 +447,9 @@ final class AppController: ObservableObject {
             await captureManager.stop()
             renderLayer?.orderOut(nil)
             if isEditorOpen { closeEditor() }
+            labelingWindow?.orderOut(nil)
+            trainingDashboardWindow?.orderOut(nil)
+            miniHUDWindow?.orderOut(nil)
             showControlPanel()
         }
     }

@@ -79,6 +79,8 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn('"/x"', LIFECYCLE)
         self.assertIn('ArgumentList "/S"', LIFECYCLE)
         self.assertIn("Invoke-BoundedLaunch", LIFECYCLE)
+        self.assertIn("trusted model keyring is empty", LIFECYCLE)
+        self.assertIn("emptyDevelopmentKeyringRejected = $true", LIFECYCLE)
         self.assertIn("Stop-Process", LIFECYCLE)
         self.assertIn("Wait-Removed", LIFECYCLE)
         self.assertIn("windows-build-only-msi-installed", LIFECYCLE)

@@ -58,8 +58,9 @@ untimestamped, no-model `windows-installers-build-only` manifest. The script:
 
 1. requires that no LiveBlock uninstall registration exists;
 2. silently installs the MSI, inventories and reverifies the installed
-   executable/runtime/license/notices/keyring tree, and requires the UI process
-   to remain alive for a bounded 12-second window;
+   executable/runtime/license/notices/keyring tree, requires the UI process to
+   remain alive for a bounded 12-second window, and confirms the expected empty
+   development keyring rejection was logged;
 3. force-stops that process, silently uninstalls the MSI, and waits for both the
    payload and uninstall registration to disappear;
 4. repeats clean install, installed-payload inventory, bounded launch, and

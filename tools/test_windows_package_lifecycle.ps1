@@ -157,10 +157,14 @@ function Invoke-BoundedLaunch(
     $processName = $process.ProcessName
     Stop-Process -Id $process.Id -Force -ErrorAction Stop
     $process.WaitForExit(5000) | Out-Null
-    Add-Progress "$Prefix launch remained active for $Seconds seconds and was terminated"
+    if (-not (Select-String -LiteralPath $stdout -SimpleMatch "trusted model keyring is empty" -Quiet)) {
+        throw "$Prefix launch did not preserve the expected empty-development-keyring rejection"
+    }
+    Add-Progress "$Prefix launch remained active for $Seconds seconds, rejected the empty keyring, and was terminated"
     return [ordered]@{
         survivedSeconds = $Seconds
         processName = $processName
+        emptyDevelopmentKeyringRejected = $true
         terminatedAfterGate = $true
     }
 }

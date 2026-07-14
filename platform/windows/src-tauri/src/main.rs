@@ -33,7 +33,7 @@ use crate::capture_policy::{
     CaptureTelemetrySnapshot, ProtectedFrameDetector, SuspensionTransition,
     FIRST_FRAME_TIMEOUT_MS, RECOVERY_DELAYS_MS, SUSPENSION_POWER, SUSPENSION_SESSION_LOCK,
 };
-use crate::detection::{DetBox, Detector};
+use crate::detection::DetBox;
 use crate::inpainting::PatchPayload;
 use crate::labels::{LabelDocument, ScreenshotEntry};
 use crate::regions::{NormalizedRegion, RegionStore};
@@ -305,7 +305,7 @@ fn update_windows_suspension(app: &AppHandle, reason: u8, active: bool) {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RecoveryAttemptEvent {
     attempt: usize,

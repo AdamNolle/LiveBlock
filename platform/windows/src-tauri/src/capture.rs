@@ -63,8 +63,6 @@ pub struct CaptureSession {
     _d3d_context: ID3D11DeviceContext,
     /// Latest frame; drained by `latest_frame()` for the labeling screenshot path.
     pub latest: Arc<ArcSwapOption<FrameView>>,
-    /// 30-Hz throttle; mirrors macOS `lastEmitClock`.
-    last_emit: Arc<Mutex<Instant>>,
     frame_token: EventRegistrationToken,
     closed_token: EventRegistrationToken,
     stop_worker: Arc<AtomicBool>,
@@ -240,7 +238,6 @@ impl CaptureSession {
             _d3d_device: d3d_device,
             _d3d_context: d3d_context,
             latest,
-            last_emit,
             frame_token,
             closed_token,
             stop_worker,

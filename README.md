@@ -4,15 +4,15 @@
 
 # LiveBlock
 
-On-device, neural ad blocker for your screen. Captures display frames in
-real time, detects advertisements with a local CoreML model, and replaces
-them with content-aware fill before they reach your eyes. No frames leave
-the machine.
+Experimental on-device ad blocking for your screen. LiveBlock captures display
+frames, runs a local detector, and replaces selected regions with local
+content-aware fill. Frames are not uploaded. No production-ready package or
+promoted detector is available yet.
 
 [![Status](https://img.shields.io/badge/status-active-success)]()
 [![Platform](https://img.shields.io/badge/macOS-26-blue)]()
-[![Platform](https://img.shields.io/badge/Windows-10%2B-blue)]()
-[![Platform](https://img.shields.io/badge/Linux-Wayland%20%7C%20X11-blue)]()
+[![Platform](https://img.shields.io/badge/Windows-11%20experimental-blue)]()
+[![Platform](https://img.shields.io/badge/Linux-experimental-blue)]()
 
 </div>
 
@@ -20,24 +20,26 @@ the machine.
 
 ## Why
 
-Browser ad-blockers stop at the page. LiveBlock works at the display
-layer, so it covers in-app ads, streaming overlays, and sponsored sections
-of feeds — wherever pixels are drawn.
+Browser ad-blockers stop at the page. LiveBlock experiments at the display
+capture layer, so it can cover content outside browsers where the operating
+system and compositor permit capture and overlay behavior.
 
 ## Features
 
-- Screen-level blocking. Operates on every app, not just browsers.
-- On-device inference. CoreML on macOS, DirectML / ONNX Runtime on Windows
-  and Linux. Frames stay local.
+- Screen-level regions. Works outside browsers where capture is available;
+  protected content, games, and restricted compositors may be unavailable.
+- On-device inference. CoreML on macOS and ONNX Runtime adapters on Windows
+  and Linux. Frames stay local; hardware-provider certification is pending.
 - Native macOS 26 chrome. SwiftUI Liquid Glass — `.glassEffect`,
   `.glassProminent` buttons, system Toggle.
-- Manual region editor. Draw, drag, resize, delete. Persisted across launches.
-- In-app training loop. Capture, label, train, ship a personal model
-  without leaving the app.
-- Mirror-blend inpainter. Content-aware fill computed from the region's
-  surrounding pixels. No model weights, runs at frame rate.
-- Cross-platform. macOS native; Rust + Tauri ports for Windows and Linux
-  share data types and IPC vocabulary via the `core/` crates.
+- Manual regions. The macOS editor supports draw/drag/resize/delete and
+  persistence; Windows/Linux editor workflows remain incomplete.
+- Source training workflow. Debug/source builds can capture, label, and train
+  candidates; production packages are inference-only and never auto-install them.
+- Mirror-blend inpainter. Fill is computed from surrounding pixels without
+  additional model weights; stale frame work is bounded rather than queued.
+- Cross-platform contracts. The macOS app and experimental Rust/Tauri ports
+  share data types and IPC vocabulary via `core/`; feature parity is not claimed.
 
 ## Quick start
 
@@ -71,15 +73,14 @@ Requires macOS 26 (Tahoe). Older releases are not supported.
    - **Screen Recording** — required for capture. Click "Open System Settings",
      enable LiveBlock, then return to the app.
    - **Accessibility** — required for global hotkeys (⌘⇧L, ⌘⇧B, ⌘⇧S).
-3. Click **Start** in the Control Panel (or ⌘⇧L).
+3. Click **Start** in the Control Panel (or ⌘⇧L) in a source/Debug build.
 4. Press **⌘⇧B** to open the Region Editor. The render layer hides automatically
    while the editor is open — drag a rectangle around something you want
    blocked. Press **Esc** when done.
-5. Capture is now blocking that region with the selected fill style. The
-   bundled detector is an experimental three-concept YOLO-World export for
-   logos, ad banners, and sponsored content. It generalizes beyond fixed brand
-   classes, but it is not a guarantee that every ad will be found; use manual
-   regions and the labeling/training loop for misses.
+5. Capture now applies the selected fill style to that manual region. Source
+   builds include experimental detector candidate material for `Logo`,
+   `Ad banner`, and `Sponsored`; it is not promoted or release evidence. Use
+   manual regions and the source labeling workflow for misses.
 
 #### When permissions get stuck
 
@@ -149,29 +150,33 @@ Windows and Linux mirror the same shortcuts with `Ctrl` instead of `⌘`.
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│        Capture (60 Hz)                                     │
+│        Local display capture                               │
 │  macOS: ScreenCaptureKit · Win: WGC · Linux: PipeWire/X11  │
 └──────────────────────────┬─────────────────────────────────┘
                            │
             ┌──────────────┼──────────────┐
             ▼              ▼              ▼
-   Detection (15 Hz)  Region Store   Inpainting (60 Hz)
+   Periodic detection  Region Store   Bounded inpainting
    YOLOv8 → mask cache    │           Mirror-blend, content-aware
             └──────────────┼──────────────┘
                            ▼
               Render Layer · click-through overlay
 ```
 
-- Capture pulls display frames into a CV pixel buffer / D3D11 texture / DMA-BUF.
-- Detection runs on every Nth frame on the GPU/ANE; results are cached.
+- Capture produces local BGRA frame data. Windows currently copies D3D textures
+  to CPU memory; Linux supports mapped PipeWire buffers and X11 shared memory,
+  not DMA-BUF-only portals.
+- Detection runs periodically and results are cached. CoreML chooses available
+  macOS compute units; Windows/Linux hardware-provider execution is uncertified.
 - Region store holds user-drawn rectangles in normalized [0..1] coords —
   portable across resolutions and platforms.
 - Inpainting picks an axis from the region's aspect ratio, samples a band
   of pixels above and below (or left and right), reflects each band across
   the region's adjacent edge, and cross-fades the two with a linear
   gradient. No model weights, runs at frame rate.
-- Render layer is a click-through overlay that paints only the inpainted
-  patches.
+- The render layer paints only generated patches. Supported macOS, Windows, and
+  KDE/wlroots/X11 paths target click-through; GNOME Wayland uses a movable,
+  non-click-through limited preview.
 
 ## Train your own detector (source workflow)
 
@@ -218,20 +223,19 @@ LiveBlock/
 | Component            | Status                                                |
 |----------------------|-------------------------------------------------------|
 | macOS app            | Capture, region editor, labeling, training dashboard, ML detector tuning. Native macOS 26 Liquid Glass UI. Linked against the Rust core via swift-bridge. |
-| Rust core            | Five crates (regions, labels, detection, bridge, core). 33 unit tests. JSON byte-compatible across all platforms. |
-| Windows port         | Experimental scaffold. WGC/DirectML code exists, but the locked dependency graph and callback integration are not yet release-verified. |
-| Linux port           | Experimental scaffold. Capture, global hotkeys, and click-through overlays still contain platform TODOs and are not functional end to end. |
-| Bundled detector     | Experimental YOLO-World model for Logo / Ad banner / Sponsored; fixture-based precision/recall validation is still required. |
+| Rust core            | Shared versioned persistence, detector processing, behavior, and authenticated model-update contracts with cross-platform tests. |
+| Windows port         | Experimental WGC frame loop, local ONNX/CPU processing, physical-display overlay geometry, runtime hotkeys, and authenticated updates. DirectML texture transport, D3D11 compute, bounded device recovery, packaging, and hardware certification remain open. |
+| Linux port           | Experimental portal/PipeWire mapped-buffer and X11 frame loops, local ONNX/CPU processing, runtime hotkeys, supported overlay plumbing, and GNOME limited preview. GPU compositing, provider packaging, distribution, and compositor certification remain open. |
+| Detector             | Runtime taxonomy is Logo / Ad banner / Sponsored, but human review is 0/21 and no candidate passes schema-5; nothing is promotable or distributable. |
 | Code signing         | Stable self-signed development identity plus a fail-closed Developer ID/notarization runbook in [`docs/MACOS_RELEASE.md`](docs/MACOS_RELEASE.md); production execution still requires genuine credentials. |
 
 ## Roadmap
 
 - Build and gate a representative detector evaluation corpus with per-class precision/recall targets.
-- LaMa generative inpainting via Metal Performance Shaders for textured backgrounds.
-- Wrap the Windows/Linux pipelines in the shared `Capture` / `Detector` /
-  `Inpainter` traits from `liveblock-core`.
-- Linux GPU inpainter (wgpu/Vulkan compute pipeline).
-- Sparkle auto-update + Developer ID signing + notarization.
+- Complete attributable human corpus review and exact CoreML/ONNX parity.
+- Add Windows DirectML texture transport, D3D11 compute, and bounded recovery.
+- Add Linux wgpu/WGSL compositing and provider/package distribution.
+- Execute signed installers, update delivery, and real-device release matrices.
 
 ## Documentation
 
@@ -239,6 +243,9 @@ LiveBlock/
 - [`docs/DESKTOP_RELEASE_MATRIX.md`](docs/DESKTOP_RELEASE_MATRIX.md) — supported desktop tiers and measurable release gates.
 - [`docs/SHARED_CONTRACTS.md`](docs/SHARED_CONTRACTS.md) — versioned persistence and authenticated model contracts.
 - [`docs/MODEL_DISTRIBUTION_SECURITY.md`](docs/MODEL_DISTRIBUTION_SECURITY.md) — promotion-bound signing, rollback, and platform adoption status.
+- [`docs/DESKTOP_VALIDATION_RUNBOOKS.md`](docs/DESKTOP_VALIDATION_RUNBOOKS.md) — clean-install, upgrade, permission, display, lifecycle, and crash evidence procedures.
+- [`docs/PRIVACY_SECURITY_REVIEW.md`](docs/PRIVACY_SECURITY_REVIEW.md) — local frame/data flow and authenticated update boundary review.
+- [`docs/RELEASE_NOTES_DRAFT.md`](docs/RELEASE_NOTES_DRAFT.md) — unreleased scope, implemented behavior, and known limitations.
 - [`ASSESSMENT.md`](ASSESSMENT.md) — standing audit and prioritized roadmap.
 - [`AI.md`](AI.md) — guide for AI agents working on this codebase.
 - [`tools/README.md`](tools/README.md) — training-pipeline walkthrough.

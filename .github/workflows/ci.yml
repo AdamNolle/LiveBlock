@@ -43,7 +43,7 @@ jobs:
       - name: Label and desktop adapter contract tests
         env:
           PYTHONPATH: tools
-        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence
       - name: Release profile stays inference-only
         run: cargo test --manifest-path core/Cargo.toml -p liveblock-config --lib --release build_profile_controls_training_runtime
       - name: Parse published JSON Schemas

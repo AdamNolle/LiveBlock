@@ -156,8 +156,13 @@ try {
 
     $msi = $copied | Where-Object Extension -eq ".msi" | Select-Object -First 1
     New-Item -ItemType Directory -Path $MsiExtracted | Out-Null
-    & msiexec.exe /a $msi.FullName /qn "TARGETDIR=$MsiExtracted" /L*V $MsiExtractLog
-    if ($LASTEXITCODE -ne 0) { throw "MSI administrative extraction failed with exit code $LASTEXITCODE" }
+    $msiArguments = @(
+        "/a", "`"$($msi.FullName)`"",
+        "/qn", "TARGETDIR=`"$MsiExtracted`"",
+        "/L*V", "`"$MsiExtractLog`""
+    )
+    $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArguments -Wait -PassThru
+    if ($msiProcess.ExitCode -ne 0) { throw "MSI administrative extraction failed with exit code $($msiProcess.ExitCode)" }
     $payloadRequirements = @()
     $executables = @(Get-ChildItem -LiteralPath $MsiExtracted -Recurse -File -Filter "*.exe")
     if ($executables.Count -ne 1) {

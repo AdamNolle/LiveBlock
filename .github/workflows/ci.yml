@@ -229,6 +229,7 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
             libpipewire-0.3-dev libspa-0.2-dev \
+            rpm cpio xvfb dbus-x11 \
             libx11-xcb-dev libxcomposite-dev libxfixes-dev libxinerama-dev \
             libxkbcommon-dev libwayland-dev libgtk-layer-shell-dev
       - name: Build shared frontend
@@ -261,49 +262,147 @@ jobs:
           grep -q "release package runtime file is missing" missing-ort.log
           LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1 \
             cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release
-      - name: Stage pinned ONNX Runtime and build build-only deb
+      - name: Stage pinned ONNX Runtime and build native build-only bundles
         run: |
           python3 tools/stage_linux_onnxruntime.py --architecture x86_64
           cd platform/linux/src-tauri
           LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 \
-            ../../_shared-frontend/node_modules/.bin/tauri build --bundles deb --ci
-      - name: Inventory exact build-only deb payload
+            ../../_shared-frontend/node_modules/.bin/tauri build --bundles deb,rpm,appimage --ci
+      - name: Extract and inventory exact native bundle payloads
         run: |
-          mkdir -p tools/runs/ci-linux-package/extracted
-          mapfile -t packages < <(find platform/linux/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -print)
-          test "${#packages[@]}" -eq 1
-          package="${packages[0]}"
-          package_name="$(basename "$package")"
-          cp "$package" "tools/runs/ci-linux-package/$package_name"
-          dpkg-deb --extract "$package" tools/runs/ci-linux-package/extracted
-          test -x tools/runs/ci-linux-package/extracted/usr/bin/liveblock-linux
-          test -f tools/runs/ci-linux-package/extracted/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so
-          test ! -L tools/runs/ci-linux-package/extracted/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so
-          test -s tools/runs/ci-linux-package/extracted/usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt
+          evidence=tools/runs/ci-linux-packages
+          mkdir -p "$evidence/packages" "$evidence/deb-root" "$evidence/rpm-root" "$evidence/appimage-extract"
+          mapfile -t debs < <(find platform/linux/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -print)
+          mapfile -t rpms < <(find platform/linux/target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' -print)
+          mapfile -t appimages < <(find platform/linux/target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -print)
+          test "${#debs[@]}" -eq 1
+          test "${#rpms[@]}" -eq 1
+          test "${#appimages[@]}" -eq 1
+          deb="${debs[0]}"; rpm="${rpms[0]}"; appimage="${appimages[0]}"
+          deb_name="$(basename "$deb")"; rpm_name="$(basename "$rpm")"; appimage_name="$(basename "$appimage")"
+          cp "$deb" "$rpm" "$appimage" "$evidence/packages/"
+          dpkg-deb --extract "$deb" "$evidence/deb-root"
+          (cd "$evidence/rpm-root" && rpm2cpio "$GITHUB_WORKSPACE/$rpm" | cpio -idm --quiet)
+          chmod +x "$evidence/packages/$appimage_name"
+          (cd "$evidence/appimage-extract" && ../packages/"$appimage_name" --appimage-extract > ../appimage-extraction.log)
+          for root in "$evidence/deb-root" "$evidence/rpm-root" "$evidence/appimage-extract/squashfs-root"; do
+            test -x "$root/usr/bin/liveblock-linux"
+            test -f "$root/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so"
+            test ! -L "$root/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so"
+            test -s "$root/usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt"
+            test -s "$root/usr/lib/LiveBlock/resources/onnxruntime/LICENSE.txt"
+            test -f "$root/usr/lib/LiveBlock/resources/trusted-model-keys.json"
+          done
+          mkdir -p "$evidence/appimage-payload/usr/bin" "$evidence/appimage-payload/usr/lib/LiveBlock"
+          cp --preserve=all "$evidence/appimage-extract/squashfs-root/usr/bin/liveblock-linux" \
+            "$evidence/appimage-payload/usr/bin/liveblock-linux"
+          cp -a "$evidence/appimage-extract/squashfs-root/usr/lib/LiveBlock/resources" \
+            "$evidence/appimage-payload/usr/lib/LiveBlock/resources"
+          for format in deb rpm appimage; do
+            case "$format" in
+              deb) root="$evidence/deb-root" ;;
+              rpm) root="$evidence/rpm-root" ;;
+              appimage) root="$evidence/appimage-payload" ;;
+            esac
+            python3 tools/release_evidence.py inventory \
+              --root "$root" \
+              --output "$evidence/$format-payload-inventory.json" \
+              --platform linux-x86_64 \
+              --artifact-type "$format-build-only" \
+              --commit "$GITHUB_SHA" \
+              --require usr/bin/liveblock-linux \
+              --require usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so \
+              --require usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt \
+              --require usr/lib/LiveBlock/resources/onnxruntime/LICENSE.txt \
+              --require usr/lib/LiveBlock/resources/onnxruntime/STAGING-MANIFEST.json \
+              --require usr/lib/LiveBlock/resources/trusted-model-keys.json
+            python3 tools/release_evidence.py verify \
+              --root "$root" \
+              --manifest "$evidence/$format-payload-inventory.json"
+          done
           python3 tools/release_evidence.py inventory \
-            --root tools/runs/ci-linux-package/extracted \
-            --output tools/runs/ci-linux-package/inventory.json \
+            --root "$evidence/packages" \
+            --output "$evidence/package-inventory.json" \
             --platform linux-x86_64 \
-            --artifact-type deb-build-only \
+            --artifact-type native-packages-build-only \
             --commit "$GITHUB_SHA" \
-            --require usr/bin/liveblock-linux \
-            --require usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so \
-            --require usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt \
-            --require usr/lib/LiveBlock/resources/onnxruntime/STAGING-MANIFEST.json \
-            --require usr/lib/LiveBlock/resources/trusted-model-keys.json
+            --require "$deb_name" --require "$rpm_name" --require "$appimage_name"
           python3 tools/release_evidence.py verify \
-            --root tools/runs/ci-linux-package/extracted \
-            --manifest tools/runs/ci-linux-package/inventory.json
+            --root "$evidence/packages" \
+            --manifest "$evidence/package-inventory.json"
           cp platform/linux/src-tauri/resources/onnxruntime/STAGING-MANIFEST.json \
-            tools/runs/ci-linux-package/runtime-staging-manifest.json
-          (cd tools/runs/ci-linux-package && sha256sum "$package_name" > package.sha256)
+            "$evidence/runtime-staging-manifest.json"
+          (cd "$evidence/packages" && sha256sum "$deb_name" "$rpm_name" "$appimage_name" > ../packages.sha256)
+      - name: Exercise build-only deb and AppImage lifecycle
+        run: |
+          evidence=tools/runs/ci-linux-packages
+          deb="$(find "$evidence/packages" -maxdepth 1 -type f -name '*.deb' -print)"
+          appimage_root="$evidence/appimage-extract/squashfs-root"
+          package_id="$(dpkg-deb --field "$deb" Package)"
+          test -n "$package_id"
+          test ! -e /usr/bin/liveblock-linux
+          if dpkg-query --show "$package_id" >/dev/null 2>&1; then
+            echo "package unexpectedly installed before clean-install test: $package_id" >&2
+            exit 1
+          fi
+          sudo apt-get install -y "$GITHUB_WORKSPACE/$deb" > "$evidence/deb-install.log" 2>&1
+          test -x /usr/bin/liveblock-linux
+          test -f /usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so
+          mkdir -m 700 "$evidence/deb-home" "$evidence/deb-runtime"
+          set +e
+          timeout --kill-after=5s 12s dbus-run-session -- xvfb-run -a \
+            env HOME="$GITHUB_WORKSPACE/$evidence/deb-home" \
+            XDG_DATA_HOME="$GITHUB_WORKSPACE/$evidence/deb-home/.local/share" \
+            XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/$evidence/deb-runtime" \
+            XDG_SESSION_TYPE=x11 /usr/bin/liveblock-linux \
+            > "$evidence/deb-launch.log" 2>&1
+          deb_launch_status=$?
+          set -e
+          test "$deb_launch_status" -eq 124
+          sudo apt-get remove -y "$package_id" > "$evidence/deb-uninstall.log" 2>&1
+          test ! -e /usr/bin/liveblock-linux
+          test ! -e /usr/lib/LiveBlock
+          mkdir -m 700 "$evidence/appimage-home" "$evidence/appimage-runtime"
+          set +e
+          timeout --kill-after=5s 12s dbus-run-session -- xvfb-run -a \
+            env HOME="$GITHUB_WORKSPACE/$evidence/appimage-home" \
+            XDG_DATA_HOME="$GITHUB_WORKSPACE/$evidence/appimage-home/.local/share" \
+            XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/$evidence/appimage-runtime" \
+            XDG_SESSION_TYPE=x11 "$GITHUB_WORKSPACE/$appimage_root/AppRun" \
+            > "$evidence/appimage-launch.log" 2>&1
+          appimage_launch_status=$?
+          set -e
+          test "$appimage_launch_status" -eq 124
+          python3 - "$evidence/lifecycle-summary.json" "$package_id" "$deb_launch_status" "$appimage_launch_status" <<'PY'
+          import json, sys
+          from pathlib import Path
+          output, package_id, deb_status, appimage_status = sys.argv[1:]
+          Path(output).write_text(json.dumps({
+              "schemaVersion": 1,
+              "evidenceClass": "build-only-hosted-ubuntu",
+              "debPackage": package_id,
+              "debCleanInstall": True,
+              "debLaunchSurvivedSeconds": 12,
+              "debLaunchTimeoutStatus": int(deb_status),
+              "debUninstallRemovedSystemPayload": True,
+              "appImageExtractedLaunchSurvivedSeconds": 12,
+              "appImageLaunchTimeoutStatus": int(appimage_status),
+              "rpmLifecycle": "not-run-on-ubuntu",
+              "productionModelAndTrustRoots": False,
+          }, sort_keys=True, indent=2) + "\n")
+          PY
       - name: Preserve Linux build-only package evidence
         uses: actions/upload-artifact@v4
         with:
           name: linux-build-only-package-evidence
           path: |
-            tools/runs/ci-linux-package/*.deb
-            tools/runs/ci-linux-package/inventory.json
-            tools/runs/ci-linux-package/runtime-staging-manifest.json
-            tools/runs/ci-linux-package/package.sha256
+            tools/runs/ci-linux-packages/packages/*
+            tools/runs/ci-linux-packages/*-inventory.json
+            tools/runs/ci-linux-packages/runtime-staging-manifest.json
+            tools/runs/ci-linux-packages/packages.sha256
+            tools/runs/ci-linux-packages/*-extraction.log
+            tools/runs/ci-linux-packages/*-install.log
+            tools/runs/ci-linux-packages/*-launch.log
+            tools/runs/ci-linux-packages/*-uninstall.log
+            tools/runs/ci-linux-packages/lifecycle-summary.json
           if-no-files-found: error

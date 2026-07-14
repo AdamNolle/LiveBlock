@@ -454,6 +454,7 @@ jobs:
           python3 -m unittest tools.test_flatpak_sources tools.test_linux_packaging
       - name: Build sandboxed build-only Flatpak
         run: |
+          set -o pipefail
           mkdir -p tools/runs/ci-flatpak
           flatpak-builder --user --install-deps-from=flathub --force-clean \
             --disable-rofiles-fuse \

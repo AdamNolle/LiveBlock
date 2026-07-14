@@ -5,7 +5,8 @@
   "sdk": "org.gnome.Sdk",
   "sdk-extensions": [
     "org.freedesktop.Sdk.Extension.rust-stable",
-    "org.freedesktop.Sdk.Extension.node20"
+    "org.freedesktop.Sdk.Extension.node20",
+    "org.freedesktop.Sdk.Extension.llvm18"
   ],
   "command": "liveblock-linux",
   "finish-args": [
@@ -16,8 +17,9 @@
     "--talk-name=org.freedesktop.portal.Desktop"
   ],
   "build-options": {
-    "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin",
+    "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin:/usr/lib/sdk/llvm18/bin",
     "env": {
+      "LIBCLANG_PATH": "/usr/lib/sdk/llvm18/lib",
       "CARGO_HOME": "/run/build/liveblock-linux/cargo",
       "CARGO_NET_OFFLINE": "true",
       "XDG_CACHE_HOME": "/run/build/liveblock-linux/flatpak-node/cache",

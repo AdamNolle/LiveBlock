@@ -76,6 +76,20 @@ class LinuxPackagingContractTests(unittest.TestCase):
         )
         self.assertIn("npm ci --offline", "\n".join(module["build-commands"]))
 
+    def test_flatpak_sdk_includes_libclang_for_pipewire_bindgen(self):
+        self.assertIn(
+            "org.freedesktop.Sdk.Extension.llvm18",
+            self.flatpak["sdk-extensions"],
+        )
+        self.assertEqual(
+            self.flatpak["build-options"]["env"]["LIBCLANG_PATH"],
+            "/usr/lib/sdk/llvm18/lib",
+        )
+        self.assertIn(
+            "/usr/lib/sdk/llvm18/bin",
+            self.flatpak["build-options"]["append-path"],
+        )
+
     def test_flatpak_pins_native_layer_shell_dependency(self):
         module = next(
             module

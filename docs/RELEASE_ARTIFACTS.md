@@ -129,7 +129,9 @@ It does not run a native RPM transaction, Flatpak build/install, prior-version
 upgrade, portal/compositor flow, or production model authentication. Windows CI
 builds and inventories unsigned MSI/NSIS bytes under
 `windows-installers-build-only` and the administratively extracted MSI payload
-under a separate build-only inventory, but does not install or launch them. CI
-does not test production package signing, OS upgrade, power loss, model parity,
-or hardware execution. Those remain open until exact production artifacts and
-suitable hosts/credentials exist.
+under a separate build-only inventory. Hosted Windows then clean-installs,
+inventories, bounded-smoke-launches, and uninstalls each BuildOnly format while
+preserving lifecycle logs and an explicit no-production-model/no-signature
+summary. CI does not test production package signing, repair/prior-version
+upgrade, power loss, model parity, capture, or hardware execution. Those remain
+open until exact production artifacts and suitable hosts/credentials exist.

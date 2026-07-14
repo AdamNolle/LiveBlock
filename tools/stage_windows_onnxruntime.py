@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import os
 import shutil
+import stat
 import struct
 import tempfile
 import urllib.request
@@ -23,14 +24,6 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / "platform/windows/src-tauri/resources/onnxruntime.dll"
 DEFAULT_NOTICES = ROOT / "platform/windows/src-tauri/resources/onnxruntime-THIRD-PARTY-NOTICES.txt"
 DEFAULT_LICENSE = ROOT / "platform/windows/src-tauri/resources/onnxruntime-LICENSE.txt"
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def validate_pe64_x86(data: bytes) -> None:
@@ -67,17 +60,41 @@ def stage_archive(
     *,
     expected_sha256: str = ARCHIVE_SHA256,
 ) -> None:
-    if sha256_file(archive_path) != expected_sha256:
-        raise ValueError("ONNX Runtime DirectML archive SHA-256 mismatch")
-    with archive_path.open("rb") as descriptor:
-        with zipfile.ZipFile(descriptor) as archive:
-            for item in archive.infolist():
-                parts = PurePosixPath(item.filename).parts
-                if item.filename.startswith("/") or ".." in parts:
-                    raise ValueError("archive contains an unsafe member path")
-            dll = _validated_member(archive, DLL_MEMBER)
-            notices = _validated_member(archive, NOTICE_MEMBER)
-            license_text = _validated_member(archive, LICENSE_MEMBER)
+    before = archive_path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("ONNX Runtime DirectML archive must be a regular file")
+    descriptor = os.open(archive_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("ONNX Runtime DirectML archive changed while opening")
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                raise ValueError("ONNX Runtime DirectML archive SHA-256 mismatch")
+            handle.seek(0)
+            with zipfile.ZipFile(handle) as archive:
+                for item in archive.infolist():
+                    parts = PurePosixPath(item.filename).parts
+                    if item.filename.startswith("/") or ".." in parts:
+                        raise ValueError("archive contains an unsafe member path")
+                dll = _validated_member(archive, DLL_MEMBER)
+                notices = _validated_member(archive, NOTICE_MEMBER)
+                license_text = _validated_member(archive, LICENSE_MEMBER)
+        descriptor_after = os.fstat(descriptor)
+        path_after = archive_path.lstat()
+        if (
+            (descriptor_after.st_dev, descriptor_after.st_ino, descriptor_after.st_mode,
+             descriptor_after.st_size, descriptor_after.st_mtime_ns)
+            != (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_size, opened.st_mtime_ns)
+            or not stat.S_ISREG(path_after.st_mode)
+            or (path_after.st_dev, path_after.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise ValueError("ONNX Runtime DirectML archive changed while parsing")
+    finally:
+        os.close(descriptor)
     validate_pe64_x86(dll)
     destinations = ((output, dll), (notices_output, notices), (license_output, license_text))
     if any(path.exists() or path.is_symlink() for path, _ in destinations):

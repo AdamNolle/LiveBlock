@@ -539,7 +539,13 @@ fn start_capture_inner(
     let active_generation = state.capture_generation.clone();
     let failure_reported = Arc::new(AtomicBool::new(false));
     let failure_for_callback = failure_reported.clone();
+    let startup_gate = Arc::new(Mutex::new(()));
+    let startup_gate_for_callback = startup_gate.clone();
     let on_error = Arc::new(move |message: String| {
+        // Serialize first-failure publication with startup's final check. If
+        // failure wins, startup never publishes active; otherwise active is
+        // published first and this callback's stopped event is ordered after it.
+        let _startup_guard = startup_gate_for_callback.lock();
         if active_generation.load(Ordering::SeqCst) != generation
             || failure_for_callback.swap(true, Ordering::SeqCst)
         { return; }
@@ -594,6 +600,7 @@ fn start_capture_inner(
             return Err(error.to_string());
         }
     };
+    let _startup_guard = startup_gate.lock();
     if state.capture_generation.load(Ordering::SeqCst) != generation
         || failure_reported.load(Ordering::SeqCst)
     {

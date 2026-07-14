@@ -92,9 +92,28 @@ runtime archives, and limits runtime permissions to Wayland/fallback X11, DRI,
 IPC, and the desktop portal. It intentionally has no network, all-device, host
 filesystem, FileChooser, Notifications, or RealtimeKit permission.
 
-A clean Flathub build is still blocked: Cargo and npm sources must be converted
-to pinned Flatpak source entries (or reviewed vendored inputs) before the
-manifest can remain offline. The empty keyring in the manifest also makes it
-build-only. Do not publish it or check the Flatpak checklist item until those
-inputs, the promoted model, production trust roots, install/runtime evidence,
-and portal-only behavior are present.
+Cargo and npm build dependencies are committed as
+`cargo-sources.json` and `node-sources.json`, generated twice identically from
+the Linux Cargo lock and frontend npm lock with upstream
+`flatpak-builder-tools` commit
+`737c0085912f9f7dabf9341d4608e2a77a51a73a`. The generator commands, input
+hashes, and output hashes are closed in `generated-sources.lock.json`.
+`tools/verify_flatpak_sources.py` independently requires exact crates.io
+URL/SHA-256 coverage, exact npm registry URL/integrity coverage, HTTPS-only
+downloads, no generated network commands, the Cargo vendor replacement config,
+and the offline Cargo/npm cache environment. Refreshes must use the recorded
+commands from a checkout of that exact generator commit, run twice byte-for-byte
+identically, then pass:
+
+```bash
+PYTHONPATH=tools python3 -m unittest tools.test_flatpak_sources
+python3 tools/verify_flatpak_sources.py
+```
+
+The committed manifest can therefore fetch every hash-pinned dependency before
+the sandbox build and run `npm ci --offline` plus Cargo offline inside the build.
+It remains build-only: its source is a local `type: dir`, its embedded keyring is
+empty, and it has no promoted model or signed repository metadata. Do not publish
+it or check the broad Flatpak checklist item until a pinned release source,
+production trust/model inputs, install/runtime evidence, and portal-only
+compositor behavior are present.

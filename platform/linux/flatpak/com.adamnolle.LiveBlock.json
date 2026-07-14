@@ -20,6 +20,9 @@
     "env": {
       "CARGO_HOME": "/run/build/liveblock-linux/cargo",
       "CARGO_NET_OFFLINE": "true",
+      "XDG_CACHE_HOME": "/run/build/liveblock-linux/flatpak-node/cache",
+      "npm_config_cache": "/run/build/liveblock-linux/flatpak-node/npm-cache",
+      "npm_config_offline": "true",
       "LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING": "1",
       "RUSTFLAGS": "--remap-path-prefix =../"
     }
@@ -43,6 +46,8 @@
           "type": "dir",
           "path": "../../.."
         },
+        "cargo-sources.json",
+        "node-sources.json",
         {
           "type": "file",
           "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-x64-1.18.1.tgz",

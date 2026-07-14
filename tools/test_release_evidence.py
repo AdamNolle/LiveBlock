@@ -206,6 +206,12 @@ class ReleaseSbomTests(unittest.TestCase):
                     dependency = next(item for item in _sbom["components"] if item["name"] == "dependency")
                     self.assertEqual(dependency["licenses"], [{"license": {"name": license_name}}])
 
+    def test_cdla_permissive_is_recognized_spdx(self):
+        self.write_inputs(cargo_license="CDLA-Permissive-2.0")
+        _sbom, report = create_sbom([self.cargo], self.npm, commit=COMMIT)
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["failures"], [])
+
     def test_dual_permissive_lgpl_choice_passes_with_review_notice(self):
         self.write_inputs(cargo_license="MIT OR Apache-2.0 OR LGPL-2.1-or-later")
         sbom, report = create_sbom([self.cargo], self.npm, commit=COMMIT)

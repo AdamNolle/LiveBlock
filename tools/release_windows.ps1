@@ -131,8 +131,8 @@ try {
     try {
         cargo build --release
         if ($LASTEXITCODE -ne 0) { throw "Windows release runtime build failed" }
-        $releaseTarget = Join-Path $Root "platform\windows\target\x86_64-pc-windows-msvc\release"
-        $runtimeCandidates = @(Get-ChildItem -LiteralPath $releaseTarget -Recurse -File -Filter "onnxruntime.dll")
+        $windowsTarget = Join-Path $Root "platform\windows\target"
+        $runtimeCandidates = @(Get-ChildItem -LiteralPath $windowsTarget -Recurse -File -Filter "onnxruntime.dll")
         if ($runtimeCandidates.Count -eq 0) { throw "Windows release build did not produce onnxruntime.dll" }
         foreach ($candidate in $runtimeCandidates) {
             if ($candidate.LinkType) { throw "Built onnxruntime.dll must be a regular non-symlink file" }

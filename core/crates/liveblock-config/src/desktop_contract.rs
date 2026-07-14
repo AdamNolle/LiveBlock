@@ -81,7 +81,7 @@ impl DesktopCapabilityProfile {
             support_mode: SupportMode::Limited,
             capture_backend: "windows_graphics_capture_experimental".into(),
             inference_backends: vec!["directml_experimental".into(), "cpu_experimental".into()],
-            overlay_backend: "d3d11_layered_window_experimental".into(),
+            overlay_backend: "layered_webview_capture_excluded_experimental".into(),
             click_through_overlay: false,
             capture_exclusion: false,
             global_hotkeys: false,
@@ -90,7 +90,7 @@ impl DesktopCapabilityProfile {
             production_training_runtime: false,
             release_ready: false,
             limitations: vec![
-                "capture, overlay, hotkey, and hardware lifecycle validation incomplete".into(),
+                "capture, overlay, and hotkeys are implemented but real-device GPU, DPI, lifecycle, and anti-cheat validation is incomplete".into(),
             ],
         }
     }
@@ -307,6 +307,8 @@ mod tests {
         assert_eq!(windows.support_mode, SupportMode::Limited);
         assert!(!windows.release_ready);
         assert!(!windows.click_through_overlay);
+        assert!(!windows.capture_exclusion);
+        assert!(!windows.global_hotkeys);
         assert!(windows.capture_backend.contains("experimental"));
 
         for platform in [

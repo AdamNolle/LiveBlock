@@ -33,6 +33,7 @@
         padding: 8px 10px; border-radius: 10px;
       }
       .row.active { background: rgba(255,255,255,0.5); }
+      .monitor-select { max-width:190px;border:0;border-radius:8px;padding:5px 7px;background:var(--lb-bg);color:var(--lb-ink);font:500 11px var(--lb-font-ui); }
       .footer { display:flex; align-items:center; gap:8px; }
       .notice { padding:9px 10px;border-radius:10px;background:rgba(224,148,42,.12);color:var(--lb-ink);font:500 11px/1.35 var(--lb-font-ui); }
       .swatch { width:16px; height:16px; border-radius:4px; }
@@ -66,9 +67,8 @@
       <div style="border-radius:14px;padding:4px;background:var(--lb-bg);box-shadow:inset 4.4px 4.4px 12.6px var(--lb-shadow-dark),inset -4.4px -4.4px 12.6px var(--lb-shadow-light)">
         <div class="row active">
           <div class="swatch" style="background:#3da6ff"></div>
-          <div style="flex:1;font-size:12px;font-weight:500">Foreground app</div>
-          <span class="lb-mono" style="font-size:11px;color:var(--lb-ink-muted)">—</span>
-          <span id="appToggle"></span>
+          <div style="flex:1;font-size:12px;font-weight:500">Protected display</div>
+          <select id="monitorSelect" class="monitor-select" aria-label="Protected display"></select>
         </div>
       </div>
 
@@ -110,7 +110,21 @@
         },
       });
       document.getElementById("powerToggle").appendChild(power);
-      document.getElementById("appToggle").appendChild(toggle({ value: true, accent: "block" }));
+      const monitorSelect = document.getElementById("monitorSelect");
+      monitorSelect.addEventListener("change", async () => {
+        const next = monitorSelect.value || null;
+        if (next === selectedMonitorId) return;
+        selectedMonitorId = next;
+        if (running) {
+          try {
+            if (!selectedMonitorId) throw new Error("No capture monitor is available");
+            await lb.startCapture(selectedMonitorId);
+          } catch (error) {
+            captureError = String(error);
+            renderStatus();
+          }
+        }
+      });
 
       document.getElementById("blockBtn").addEventListener("click", () => lb.showWindow("editor"));
       document.getElementById("trainBtn").addEventListener("click", () => lb.showWindow("training"));
@@ -174,9 +188,26 @@
               notice.hidden = false;
             }
           }
-          if (!selectedMonitorId) {
-            const monitors = await lb.listMonitors();
+          const monitors = await lb.listMonitors();
+          const previousSelection = selectedMonitorId;
+          if (!selectedMonitorId || !monitors.some((monitor) => monitor.id === selectedMonitorId)) {
             selectedMonitorId = monitors.find((monitor) => monitor.isPrimary)?.id ?? monitors[0]?.id ?? null;
+          }
+          const optionSignature = monitors.map((monitor) => `${monitor.id}:${monitor.name}`).join("|");
+          if (monitorSelect.dataset.signature !== optionSignature) {
+            monitorSelect.dataset.signature = optionSignature;
+            monitorSelect.replaceChildren(...monitors.map((monitor) => {
+              const option = document.createElement("option");
+              option.value = monitor.id;
+              option.textContent = `${monitor.name}${monitor.isPrimary ? " (Primary)" : ""}`;
+              return option;
+            }));
+          }
+          monitorSelect.value = selectedMonitorId ?? "";
+          monitorSelect.disabled = monitors.length === 0;
+          if (running && previousSelection && previousSelection !== selectedMonitorId) {
+            await lb.stopCapture();
+            captureError = "Selected display was removed; capture stopped";
           }
           const [regions, telemetry] = await Promise.all([lb.listRegions(), lb.getCaptureTelemetry()]);
           regionCount = regions.length;

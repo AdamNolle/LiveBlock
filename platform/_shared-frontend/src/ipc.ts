@@ -27,6 +27,11 @@ export interface MonitorInfo {
   id: string;
   name: string;
   isPrimary: boolean;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  scaleFactor?: number;
 }
 
 export interface ScreenshotData {
@@ -97,7 +102,10 @@ export interface DesktopCapabilityProfile {
 export const lb = {
   // Capture / detection lifecycle.
   getCapabilities: () => invoke<DesktopCapabilityProfile>("get_capabilities"),
-  startCapture: (monitorId: string) => invoke<void>("start_capture", { monitorId }),
+  startCapture: async (monitorId: string) => {
+    const actionSequence = await invoke<number>("begin_user_action");
+    return invoke<void>("start_capture", { monitorId, actionSequence });
+  },
   stopCapture: () => invoke<void>("stop_capture"),
   getCaptureTelemetry: () => invoke<CaptureTelemetry>("get_capture_telemetry"),
   setDetectionEnabled: (enabled: boolean) =>

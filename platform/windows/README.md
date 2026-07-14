@@ -11,11 +11,15 @@ Linux port.
 **Experimental, not release-ready.** The Windows.Graphics.Capture path acquires
 BGRA monitor frames, handles size changes and item closure, retains the newest
 labeling frame, and feeds a capacity-one worker so slow CPU inference/inpainting
-drops stale work instead of blocking frame delivery. Deterministic host tests
-cover the queue and conservative unavailable/protected-black-frame policy.
-D3D11 compute inpainting, DirectML activation, bounded automatic lifecycle
-recovery, packaging, and real-device GPU/multi-monitor certification remain
-open.
+drops stale work instead of blocking frame delivery. The control panel exposes
+explicit physical-monitor selection; render/editor windows follow negative
+origins and PerMonitorV2 pixel geometry. Global hotkeys and tray actions dispatch
+natively, including panic teardown. The render HWND is click-through, top-most,
+and `WDA_EXCLUDEFROMCAPTURE`. Deterministic tests cover queue, monitor ordering,
+and conservative unavailable/protected-black-frame policy. DirectML/CPU ORT
+providers are configured for CPU-uploaded tensors; zero-copy D3D texture
+inference, D3D11 compute inpainting, bounded automatic lifecycle recovery,
+packaging, and real-device GPU/DPI/multi-monitor certification remain open.
 
 ## Prerequisites
 
@@ -74,7 +78,9 @@ data round-trips across platforms.
 - Anti-cheat tooling may flag an always-on-top overlay. No process injection,
   game hooks, or anti-cheat bypass is attempted; game/anti-cheat real-device
   behavior remains uncertified.
-- Per-monitor DPI requires the manifest's `PerMonitorV2` declaration.
+- Per-monitor geometry uses the manifest's `PerMonitorV2` declaration and
+  effective monitor DPI, but mixed-scale/hot-plug behavior still needs real
+  Windows certification.
 - Production packages require an authenticated promoted ONNX model and a
   nonempty embedded public-key ring. Source/CI builds use an explicit empty-ring
   override and are not distributable; release packages never train or download

@@ -259,9 +259,10 @@ impl CaptureSession {
         let _ = self._item.RemoveClosed(self.closed_token);
         let _ = self.session.Close();
         let _ = self._frame_pool.Close();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        // Do not block panic/quit on arbitrary ORT or inpainting duration.
+        // Dropping JoinHandle detaches the CPU-only worker; the generation guard
+        // suppresses stale output and stop_worker makes it exit after current work.
+        let _ = self.worker.take();
         self.latest.store(None);
     }
 }
@@ -340,26 +341,114 @@ fn process_frame(
     })
 }
 
-/// Enumerate monitors. Returns (HMONITOR, friendly description). Used by the
-/// control panel to populate a "select display" combo box.
-pub fn enumerate_monitors() -> Vec<(HMONITOR, String)> {
+#[derive(Debug, Clone)]
+pub struct MonitorDescriptor {
+    pub handle: HMONITOR,
+    pub name: String,
+    pub is_primary: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale_factor: f64,
+}
+
+/// Enumerate active monitor rectangles in physical PerMonitorV2 pixels.
+pub fn enumerate_monitors() -> Vec<MonitorDescriptor> {
     use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
-    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, MONITORINFOEXW, MONITORINFOF_PRIMARY,
+    };
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
     extern "system" fn cb(monitor: HMONITOR, _hdc: HDC, _rect: *mut RECT, lparam: LPARAM) -> BOOL {
-        let acc = unsafe { &mut *(lparam.0 as *mut Vec<(HMONITOR, String)>) };
-        acc.push((monitor, format!("Display {}", acc.len() + 1)));
+        let acc = unsafe { &mut *(lparam.0 as *mut Vec<MonitorDescriptor>) };
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if unsafe { GetMonitorInfoW(monitor, &mut info as *mut _ as *mut _) }.as_bool() {
+            let rect = info.monitorInfo.rcMonitor;
+            let device_end = info
+                .szDevice
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(info.szDevice.len());
+            let name = String::from_utf16_lossy(&info.szDevice[..device_end]);
+            let mut dpi_x = 96u32;
+            let mut dpi_y = 96u32;
+            let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+            acc.push(MonitorDescriptor {
+                handle: monitor,
+                name: if name.is_empty() {
+                    "Windows display".into()
+                } else {
+                    name
+                },
+                is_primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
+                x: rect.left,
+                y: rect.top,
+                width: rect.right.saturating_sub(rect.left) as u32,
+                height: rect.bottom.saturating_sub(rect.top) as u32,
+                scale_factor: f64::from(dpi_x) / 96.0,
+            });
+        }
         BOOL(1)
     }
 
-    let mut acc: Vec<(HMONITOR, String)> = Vec::new();
+    let mut monitors = Vec::new();
     unsafe {
         let _ = EnumDisplayMonitors(
             HDC::default(),
             None,
             Some(cb),
-            LPARAM(&mut acc as *mut _ as isize),
+            LPARAM(&mut monitors as *mut _ as isize),
         );
     }
-    acc
+    sort_monitors(&mut monitors);
+    monitors
+}
+
+fn sort_monitors(monitors: &mut [MonitorDescriptor]) {
+    monitors.sort_by_key(|monitor| {
+        (
+            !monitor.is_primary,
+            monitor.y,
+            monitor.x,
+            monitor.name.clone(),
+        )
+    });
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+
+    fn monitor(name: &str, primary: bool, x: i32, y: i32) -> MonitorDescriptor {
+        MonitorDescriptor {
+            handle: HMONITOR::default(),
+            name: name.into(),
+            is_primary: primary,
+            x,
+            y,
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.0,
+        }
+    }
+
+    #[test]
+    fn monitor_order_is_primary_then_stable_geometry() {
+        let mut monitors = [
+            monitor("right", false, 1920, 0),
+            monitor("primary", true, 0, 0),
+            monitor("left", false, -1920, 0),
+        ];
+        sort_monitors(&mut monitors);
+        assert_eq!(
+            monitors
+                .iter()
+                .map(|monitor| monitor.name.as_str())
+                .collect::<Vec<_>>(),
+            ["primary", "left", "right"]
+        );
+    }
 }

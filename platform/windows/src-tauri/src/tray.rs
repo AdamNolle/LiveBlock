@@ -1,5 +1,6 @@
 //! System tray. Mirrors macOS NSStatusItem usage in `LiveBlockApp.swift`.
 
+use crate::hotkeys::next_action_sequence;
 use anyhow::Result;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -13,12 +14,15 @@ pub fn install(app: &AppHandle) -> Result<()> {
     let editor = MenuItem::with_id(app, "open-editor", "Open Region Editor", true, None::<&str>)?;
     let labeling = MenuItem::with_id(app, "open-labeling", "Open Labeling", true, None::<&str>)?;
     let training = MenuItem::with_id(app, "open-training", "Open Training", true, None::<&str>)?;
+    let panic = MenuItem::with_id(app, "panic-disable", "Panic Disable", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit LiveBlock", true, None::<&str>)?;
 
     let menu = Menu::with_items(
         app,
-        &[&show, &toggle, &editor, &labeling, &training, &separator, &quit],
+        &[
+            &show, &toggle, &editor, &labeling, &training, &panic, &separator, &quit,
+        ],
     )?;
 
     let _tray = TrayIconBuilder::new()
@@ -32,7 +36,7 @@ pub fn install(app: &AppHandle) -> Result<()> {
                 }
             }
             "toggle-capture" => {
-                let _ = app.emit("tray-toggle-capture", ());
+                let _ = app.emit("tray-toggle-capture", next_action_sequence());
             }
             "open-editor" => {
                 if let Some(w) = app.get_webview_window("editor") {
@@ -51,8 +55,11 @@ pub fn install(app: &AppHandle) -> Result<()> {
                     let _ = w.set_focus();
                 }
             }
+            "panic-disable" => {
+                let _ = app.emit("hotkey-panic-disable", next_action_sequence());
+            }
             "quit" => {
-                app.exit(0);
+                let _ = app.emit("tray-quit-requested", ());
             }
             _ => {}
         })

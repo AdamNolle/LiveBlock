@@ -23,11 +23,13 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use uuid::Uuid;
 
-use crate::capture::{enumerate_monitors, CaptureSession, FrameView};
-use crate::capture_policy::{CaptureTelemetry, CaptureTelemetrySnapshot, ProtectedFrameDetector};
+use crate::capture::{enumerate_monitors, CaptureSession, FrameView, MonitorDescriptor};
+use crate::capture_policy::{
+    action_is_newer_than_panic, CaptureTelemetry, CaptureTelemetrySnapshot, ProtectedFrameDetector,
+};
 use crate::detection::{DetBox, Detector};
 use crate::inpainting::PatchPayload;
 use crate::labels::{LabelDocument, ScreenshotEntry};
@@ -70,11 +72,20 @@ fn main() {
             app.manage(state);
 
             // Apply per-window native styles after Tauri has created HWNDs.
-            apply_window_styles(&handle);
+            let overlay_available = apply_window_styles(&handle);
+            let runtime_state = handle.state::<AppState>();
+            runtime_state
+                .click_through_available
+                .store(overlay_available, Ordering::SeqCst);
+            runtime_state
+                .capture_exclusion_available
+                .store(overlay_available, Ordering::SeqCst);
+            install_action_listeners(&handle);
 
             // Register tray + global hotkeys.
             tray::install(&handle).ok();
             hotkeys::spawn(handle.clone());
+            spawn_monitor_geometry_watcher(handle.clone());
 
             // Try to load a default detector if the model is present.
             try_load_default_detector(&handle);
@@ -83,6 +94,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_capabilities,
+            begin_user_action,
             start_capture,
             stop_capture,
             get_capture_telemetry,
@@ -111,13 +123,15 @@ fn main() {
 }
 
 #[cfg(windows)]
-fn apply_window_styles(app: &AppHandle) {
+fn apply_window_styles(app: &AppHandle) -> bool {
     use windows::Win32::Foundation::HWND;
+    let mut render_available = false;
     if let Some(w) = app.get_webview_window("render") {
         if let Ok(h) = w.hwnd() {
             let hwnd = HWND(h.0 as *mut _);
-            if let Err(e) = overlay::make_render_overlay(hwnd) {
-                tracing::error!("make_render_overlay: {e}");
+            match overlay::make_render_overlay(hwnd) {
+                Ok(()) => render_available = true,
+                Err(e) => tracing::error!("make_render_overlay: {e}"),
             }
         }
     }
@@ -129,10 +143,193 @@ fn apply_window_styles(app: &AppHandle) {
             }
         }
     }
+    render_available
 }
 
 #[cfg(not(windows))]
-fn apply_window_styles(_: &AppHandle) {}
+fn apply_window_styles(_: &AppHandle) -> bool {
+    false
+}
+
+fn align_windows_to_monitor(app: &AppHandle, monitor: &MonitorDescriptor) -> anyhow::Result<()> {
+    use tauri::{PhysicalPosition, PhysicalSize, Position, Size};
+    for label in ["render", "editor"] {
+        if let Some(window) = app.get_webview_window(label) {
+            window.set_position(Position::Physical(PhysicalPosition::new(monitor.x, monitor.y)))?;
+            window.set_size(Size::Physical(PhysicalSize::new(monitor.width, monitor.height)))?;
+        }
+    }
+    Ok(())
+}
+
+fn install_action_listeners(app: &AppHandle) {
+    for event in ["hotkey-toggle-capture", "tray-toggle-capture"] {
+        let handle = app.clone();
+        app.listen(event, move |event| {
+            let sequence = serde_json::from_str(event.payload()).unwrap_or(0);
+            toggle_capture_action(&handle, sequence);
+        });
+    }
+
+    let handle = app.clone();
+    app.listen("hotkey-availability-changed", move |event| {
+        let available = serde_json::from_str(event.payload()).unwrap_or(false);
+        handle
+            .state::<AppState>()
+            .global_hotkeys_available
+            .store(available, Ordering::SeqCst);
+        let _ = handle.emit("capabilities-changed", ());
+    });
+
+    let handle = app.clone();
+    app.listen("hotkey-toggle-editor", move |event| {
+        let sequence = serde_json::from_str(event.payload()).unwrap_or(0);
+        if !action_sequence_is_allowed(&handle, sequence) {
+            return;
+        }
+        if let Some(window) = handle.get_webview_window("editor") {
+            if window.is_visible().unwrap_or(false) {
+                let _ = window.hide();
+            } else {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            if !action_sequence_is_allowed(&handle, sequence) {
+                let _ = window.hide();
+            }
+        }
+    });
+
+    let handle = app.clone();
+    app.listen("hotkey-capture-screenshot", move |event| {
+        let sequence = serde_json::from_str(event.payload()).unwrap_or(0);
+        let state = handle.state::<AppState>();
+        if !action_sequence_is_allowed(&handle, sequence) {
+            return;
+        }
+        if let Ok(Some(path)) = capture_screenshot_for_labeling_inner(state.inner()) {
+            if action_sequence_is_allowed(&handle, sequence) {
+                if let Some(window) = handle.get_webview_window("labeling") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    if !action_sequence_is_allowed(&handle, sequence) {
+                        let _ = window.hide();
+                    }
+                }
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    });
+
+    let handle = app.clone();
+    app.listen("hotkey-panic-disable", move |event| {
+        let sequence = serde_json::from_str(event.payload()).unwrap_or(u64::MAX);
+        panic_disable_action(&handle, sequence);
+    });
+
+    let handle = app.clone();
+    app.listen("tray-quit-requested", move |_| {
+        panic_disable_action(&handle, hotkeys::next_action_sequence());
+        handle.exit(0);
+    });
+}
+
+fn action_sequence_is_allowed(app: &AppHandle, action_sequence: u64) -> bool {
+    let state = app.state::<AppState>();
+    action_is_newer_than_panic(
+        action_sequence,
+        state.last_panic_action.load(Ordering::SeqCst),
+    )
+}
+
+fn toggle_capture_action(app: &AppHandle, action_sequence: u64) {
+    let state = app.state::<AppState>();
+    if !action_sequence_is_allowed(app, action_sequence) {
+        return;
+    }
+    let running = state.capture.lock().is_some();
+    if running {
+        let _ = stop_capture_inner(state.inner());
+        return;
+    }
+    let selected = state.selected_monitor.load(Ordering::SeqCst);
+    let monitor = enumerate_monitors()
+        .into_iter()
+        .find(|monitor| monitor.handle.0 as usize == selected)
+        .or_else(|| enumerate_monitors().into_iter().find(|monitor| monitor.is_primary));
+    if let Some(monitor) = monitor {
+        if let Err(error) = start_capture_inner(
+            (monitor.handle.0 as usize).to_string(),
+            state.inner(),
+            Some(action_sequence),
+        ) {
+            let _ = app.emit("capture-runtime-error", error);
+        }
+    } else {
+        let _ = app.emit("capture-runtime-error", "no Windows monitor is available");
+    }
+}
+
+fn panic_disable_action(app: &AppHandle, action_sequence: u64) {
+    let state = app.state::<AppState>();
+    state
+        .last_panic_action
+        .fetch_max(action_sequence, Ordering::SeqCst);
+    // Visible privacy state clears before potentially contended native teardown.
+    let _ = app.emit("capture-state-changed", false);
+    let _ = app.emit("protected-content-changed", false);
+    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    for label in ["editor", "render", "labeling", "training"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.hide();
+        }
+    }
+    let _ = stop_capture_inner(state.inner());
+    if let Some(window) = app.get_webview_window("control") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    let _ = app.emit("panic-disabled", ());
+}
+
+fn spawn_monitor_geometry_watcher(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let state = app.state::<AppState>();
+        let _lifecycle_guard = state.capture_lifecycle.lock();
+        if state.capture.lock().is_none() {
+            continue;
+        }
+        let selected = state.selected_monitor.load(Ordering::SeqCst);
+        let stop_reason = if let Some(monitor) = enumerate_monitors()
+            .into_iter()
+            .find(|monitor| monitor.handle.0 as usize == selected)
+        {
+            match align_windows_to_monitor(&app, &monitor) {
+                Ok(()) => continue,
+                Err(error) => {
+                    tracing::error!("monitor geometry refresh failed: {error}");
+                    "selected monitor geometry could not be refreshed; capture stopped"
+                }
+            }
+        } else {
+            "selected monitor was removed; capture stopped"
+        };
+
+        state.capture_generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(session) = state.capture.lock().take() {
+            session.stop();
+        }
+        if let Some(window) = app.get_webview_window("render") {
+            let _ = window.hide();
+        }
+        let _ = app.emit("capture-state-changed", false);
+        let _ = app.emit("protected-content-changed", false);
+        let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+        let _ = app.emit("capture-runtime-error", stop_reason);
+    });
+}
 
 fn try_load_default_detector(app: &AppHandle) {
     let detector = match model_updates::load_authenticated_active(app) {
@@ -166,8 +363,13 @@ fn try_load_default_detector(app: &AppHandle) {
 // ===== Tauri commands =====
 
 #[tauri::command]
-fn get_capabilities() -> Result<liveblock_config::DesktopCapabilityProfile, String> {
-    let profile = liveblock_config::DesktopCapabilityProfile::windows();
+fn get_capabilities(
+    state: State<'_, AppState>,
+) -> Result<liveblock_config::DesktopCapabilityProfile, String> {
+    let mut profile = liveblock_config::DesktopCapabilityProfile::windows();
+    profile.click_through_overlay = state.click_through_available.load(Ordering::SeqCst);
+    profile.capture_exclusion = state.capture_exclusion_available.load(Ordering::SeqCst);
+    profile.global_hotkeys = state.global_hotkeys_available.load(Ordering::SeqCst);
     profile.validate().map_err(str::to_string)?;
     Ok(profile)
 }
@@ -176,11 +378,15 @@ fn get_capabilities() -> Result<liveblock_config::DesktopCapabilityProfile, Stri
 fn list_monitors() -> Vec<MonitorInfo> {
     enumerate_monitors()
         .into_iter()
-        .enumerate()
-        .map(|(index, (handle, name))| MonitorInfo {
-            id: (handle.0 as usize).to_string(),
-            name,
-            is_primary: index == 0,
+        .map(|monitor| MonitorInfo {
+            id: (monitor.handle.0 as usize).to_string(),
+            name: monitor.name,
+            is_primary: monitor.is_primary,
+            x: monitor.x,
+            y: monitor.y,
+            width: monitor.width,
+            height: monitor.height,
+            scale_factor: monitor.scale_factor,
         })
         .collect()
 }
@@ -191,22 +397,52 @@ struct MonitorInfo {
     id: String,
     name: String,
     is_primary: bool,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    scale_factor: f64,
 }
 
 #[tauri::command]
-fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), String> {
+fn begin_user_action() -> u64 {
+    hotkeys::next_action_sequence()
+}
+
+#[tauri::command]
+fn start_capture(
+    monitor_id: String,
+    action_sequence: u64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    start_capture_inner(monitor_id, state.inner(), Some(action_sequence))
+}
+
+fn start_capture_inner(
+    monitor_id: String,
+    state: &AppState,
+    action_sequence: Option<u64>,
+) -> Result<(), String> {
     let monitor_hmonitor = monitor_id
         .parse::<usize>()
         .map_err(|_| "invalid monitor id".to_string())?;
+
+    // Selection revalidation, panic ordering, window movement, teardown, start,
+    // and publication share one lock, so concurrent transitions cannot split
+    // geometry or resurrect a pre-panic action.
+    let _lifecycle_guard = state.capture_lifecycle.lock();
+    if let Some(sequence) = action_sequence {
+        if !action_is_newer_than_panic(
+            sequence,
+            state.last_panic_action.load(Ordering::SeqCst),
+        ) {
+            return Ok(());
+        }
+    }
     let selected = enumerate_monitors()
         .into_iter()
-        .map(|(handle, _)| handle)
-        .find(|handle| handle.0 as usize == monitor_hmonitor)
+        .find(|monitor| monitor.handle.0 as usize == monitor_hmonitor)
         .ok_or_else(|| "selected monitor is no longer available".to_string())?;
-
-    // Start/stop/publication share one lock so a concurrent stop cannot miss a
-    // not-yet-published session and a concurrent start cannot overwrite one.
-    let _lifecycle_guard = state.capture_lifecycle.lock();
     let generation = state
         .capture_generation
         .fetch_add(1, Ordering::SeqCst)
@@ -215,8 +451,18 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
     if let Some(existing) = existing {
         existing.stop();
         let _ = state.app.emit("capture-state-changed", false);
+        let _ = state.app.emit("protected-content-changed", false);
         let _ = state.app.emit("patches-updated", Vec::<PatchPayload>::new());
     }
+    if let Err(error) = align_windows_to_monitor(&state.app, &selected) {
+        if let Some(window) = state.app.get_webview_window("render") {
+            let _ = window.hide();
+        }
+        return Err(error.to_string());
+    }
+    state
+        .selected_monitor
+        .store(monitor_hmonitor, Ordering::SeqCst);
     let app = state.app.clone();
     let regions_arc = state.regions.clone();
     let inpainter_arc = state.inpainter.clone();
@@ -227,9 +473,13 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
     let protected_detector = Arc::new(Mutex::new(ProtectedFrameDetector::default()));
     let telemetry = Arc::new(CaptureTelemetry::default());
     let telemetry_for_frame = telemetry.clone();
+    let frame_generation = state.capture_generation.clone();
 
     let frame_counter = AtomicU64::new(0);
     let on_frame = Arc::new(move |frame: &FrameView| {
+        if frame_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
         let frame_number = frame_counter.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
 
         let mut protected = protected_detector.lock();
@@ -278,7 +528,9 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
             .render(&frame.bytes, frame.width, frame.height, &regions)
             .unwrap_or_default();
 
-        let _ = app.emit("patches-updated", &payloads);
+        if frame_generation.load(Ordering::SeqCst) == generation {
+            let _ = app.emit("patches-updated", &payloads);
+        }
     }) as Arc<dyn Fn(&FrameView) + Send + Sync>;
 
     let error_app = state.app.clone();
@@ -286,22 +538,28 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
     let capture_lifecycle = state.capture_lifecycle.clone();
     let active_generation = state.capture_generation.clone();
     let failure_reported = Arc::new(AtomicBool::new(false));
+    let failure_for_callback = failure_reported.clone();
     let on_error = Arc::new(move |message: String| {
         if active_generation.load(Ordering::SeqCst) != generation
-            || failure_reported.swap(true, Ordering::SeqCst)
+            || failure_for_callback.swap(true, Ordering::SeqCst)
         { return; }
         tracing::error!("capture runtime failure: {message}");
         let _ = error_app.emit("capture-runtime-error", &message);
         let _ = error_app.emit("capture-state-changed", false);
         let _ = error_app.emit("protected-content-changed", false);
         let _ = error_app.emit("patches-updated", Vec::<PatchPayload>::new());
+        if let Some(window) = error_app.get_webview_window("render") {
+            let _ = window.hide();
+        }
 
         // Never tear down from a WGC callback or the frame worker itself. A
         // short-lived cleanup thread waits for start_capture to publish this
-        // generation, then owns deterministic handler/session/worker closure.
+        // generation, then owns deterministic handler/session closure. The
+        // CPU worker is cancellation-signaled and may finish current work.
         let slot = capture_slot.clone();
         let lifecycle = capture_lifecycle.clone();
         let generation_counter = active_generation.clone();
+        let cleanup_app = error_app.clone();
         std::thread::spawn(move || {
             for _ in 0..50 {
                 let lifecycle_guard = lifecycle.lock();
@@ -312,6 +570,12 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
                 };
                 if let Some(session) = failed {
                     session.stop();
+                    let _ = cleanup_app.emit("capture-state-changed", false);
+                    let _ = cleanup_app.emit("protected-content-changed", false);
+                    let _ = cleanup_app.emit("patches-updated", Vec::<PatchPayload>::new());
+                    if let Some(window) = cleanup_app.get_webview_window("render") {
+                        let _ = window.hide();
+                    }
                     drop(lifecycle_guard);
                     return;
                 }
@@ -320,13 +584,27 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
             }
         });
     });
-    let session = CaptureSession::start(selected, on_frame, on_error, telemetry)
-        .map_err(|e| e.to_string())?;
-    if state.capture_generation.load(Ordering::SeqCst) != generation {
+    let session = match CaptureSession::start(selected.handle, on_frame, on_error, telemetry) {
+        Ok(session) => session,
+        Err(error) => {
+            if let Some(window) = state.app.get_webview_window("render") {
+                let _ = window.hide();
+            }
+            let _ = state.app.emit("capture-state-changed", false);
+            return Err(error.to_string());
+        }
+    };
+    if state.capture_generation.load(Ordering::SeqCst) != generation
+        || failure_reported.load(Ordering::SeqCst)
+    {
         session.stop();
-        return Err("capture start was superseded".into());
+        let _ = state.app.emit("capture-state-changed", false);
+        return Err("capture failed during startup".into());
     }
     *state.capture.lock() = Some(session);
+    if let Some(window) = state.app.get_webview_window("render") {
+        let _ = window.show();
+    }
     let _ = state.app.emit("protected-content-changed", false);
     let _ = state.app.emit("capture-state-changed", true);
     Ok(())
@@ -334,6 +612,10 @@ fn start_capture(monitor_id: String, state: State<'_, AppState>) -> Result<(), S
 
 #[tauri::command]
 fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
+    stop_capture_inner(state.inner())
+}
+
+fn stop_capture_inner(state: &AppState) -> Result<(), String> {
     let _lifecycle_guard = state.capture_lifecycle.lock();
     state.capture_generation.fetch_add(1, Ordering::SeqCst);
     let session = { state.capture.lock().take() };
@@ -341,6 +623,9 @@ fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
     let _ = state.app.emit("capture-state-changed", false);
     let _ = state.app.emit("protected-content-changed", false);
     let _ = state.app.emit("patches-updated", Vec::<PatchPayload>::new());
+    if let Some(window) = state.app.get_webview_window("render") {
+        let _ = window.hide();
+    }
     Ok(())
 }
 
@@ -390,6 +675,10 @@ fn clear_regions(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn capture_screenshot_for_labeling(state: State<'_, AppState>) -> Result<Option<PathBuf>, String> {
+    capture_screenshot_for_labeling_inner(state.inner())
+}
+
+fn capture_screenshot_for_labeling_inner(state: &AppState) -> Result<Option<PathBuf>, String> {
     let frame = match state.capture.lock().as_ref() {
         Some(s) => s.latest_frame(),
         None => return Ok(None),

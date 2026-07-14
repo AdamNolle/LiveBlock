@@ -128,6 +128,7 @@ jobs:
       - name: Compile Windows adapter (debug and release, all targets)
         run: |
           cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets
+          cargo test --manifest-path platform/windows/src-tauri/Cargo.toml --locked --lib
           $output = cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets --release 2>&1 | Out-String
           if ($LASTEXITCODE -eq 0 -or $output -notmatch "release packages require a nonempty") {
             throw "empty production model keyring was not rejected as expected`n$output"

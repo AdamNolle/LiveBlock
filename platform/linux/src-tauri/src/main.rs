@@ -21,7 +21,7 @@ mod training;
 
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -67,9 +67,17 @@ fn get_capabilities(
 
 // ---------- Capture / detection lifecycle ----------
 
+static USER_ACTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[tauri::command]
+fn begin_user_action() -> u64 {
+    USER_ACTION_SEQUENCE.fetch_add(1, Ordering::SeqCst).wrapping_add(1)
+}
+
 #[tauri::command]
 async fn start_capture(
     monitor_id: String,
+    _action_sequence: u64,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
@@ -644,6 +652,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_capabilities,
+            begin_user_action,
             start_capture,
             stop_capture,
             get_capture_telemetry,

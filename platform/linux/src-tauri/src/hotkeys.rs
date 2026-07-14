@@ -8,8 +8,10 @@ use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use ashpd::WindowIdentifier;
 use crossbeam_channel::Sender;
 use futures_util::StreamExt;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 use crate::state::AppState;
@@ -17,7 +19,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt as _, GrabMode, ModMask};
 use x11rb::protocol::Event;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HotkeyAction {
     ToggleCapture,
     ToggleEditor,
@@ -98,7 +100,20 @@ async fn run_wayland_portal(
         .context("request GlobalShortcuts bindings")?
         .response()
         .context("GlobalShortcuts binding response")?;
-    if response.shortcuts().len() != shortcuts.len() {
+    let bound: HashSet<&str> = response
+        .shortcuts()
+        .iter()
+        .map(|shortcut| shortcut.id())
+        .collect();
+    let required: HashSet<&str> = [
+        TOGGLE_CAPTURE_ID,
+        TOGGLE_EDITOR_ID,
+        CAPTURE_LABEL_ID,
+        PANIC_ID,
+    ]
+    .into_iter()
+    .collect();
+    if bound != required {
         let _ = session.close().await;
         return Err(anyhow!("portal did not bind every required shortcut"));
     }
@@ -110,8 +125,12 @@ async fn run_wayland_portal(
     set_availability(&app, &state, true);
     // Availability means all bindings succeeded and the activation stream is
     // live. This loop owns proxy + session for the rest of app lifetime.
+    let mut last_dispatch = HashMap::new();
     while let Some(event) = activated.next().await {
         if let Some(action) = action_for_id(event.shortcut_id()) {
+            if !take_debounced(&mut last_dispatch, action, Instant::now()) {
+                continue;
+            }
             if actions.send(action).is_err() {
                 break;
             }
@@ -164,6 +183,7 @@ fn run_x11_grab(
     // dedicated sentinel through tracing for real-time diagnostics.
     tracing::info!("X11 global shortcuts registered");
     on_registered();
+    let mut last_dispatch = HashMap::new();
     while !should_stop() {
         match conn.wait_for_event().context("wait for X11 hotkey event")? {
             Event::KeyPress(event) => {
@@ -179,6 +199,9 @@ fn run_x11_grab(
                     None
                 };
                 if let Some(action) = action {
+                    if !take_debounced(&mut last_dispatch, action, Instant::now()) {
+                        continue;
+                    }
                     if actions.send(action).is_err() {
                         return Ok(());
                     }
@@ -228,6 +251,21 @@ fn find_keycode(first: u8, per_keycode: u8, keysyms: &[u32], target: u32) -> Opt
         .and_then(|index| first.checked_add(index as u8))
 }
 
+fn take_debounced(
+    last_dispatch: &mut HashMap<HotkeyAction, Instant>,
+    action: HotkeyAction,
+    now: Instant,
+) -> bool {
+    if last_dispatch
+        .get(&action)
+        .is_some_and(|last| now.duration_since(*last) < Duration::from_millis(250))
+    {
+        return false;
+    }
+    last_dispatch.insert(action, now);
+    true
+}
+
 fn action_for_id(id: &str) -> Option<HotkeyAction> {
     match id {
         TOGGLE_CAPTURE_ID => Some(HotkeyAction::ToggleCapture),
@@ -250,6 +288,32 @@ mod tests {
         );
         assert_eq!(action_for_id(PANIC_ID), Some(HotkeyAction::PanicDisable));
         assert_eq!(action_for_id("unknown"), None);
+    }
+
+    #[test]
+    fn hotkey_repeat_is_debounced() {
+        let start = Instant::now();
+        let mut last = HashMap::new();
+        assert!(take_debounced(
+            &mut last,
+            HotkeyAction::ToggleCapture,
+            start
+        ));
+        assert!(!take_debounced(
+            &mut last,
+            HotkeyAction::ToggleCapture,
+            start + Duration::from_millis(249)
+        ));
+        assert!(take_debounced(
+            &mut last,
+            HotkeyAction::PanicDisable,
+            start + Duration::from_millis(1)
+        ));
+        assert!(take_debounced(
+            &mut last,
+            HotkeyAction::ToggleCapture,
+            start + Duration::from_millis(250)
+        ));
     }
 
     #[test]

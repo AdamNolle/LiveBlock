@@ -191,25 +191,25 @@ impl Detector {
 
 #[cfg(feature = "cuda")]
 fn configure_execution_providers(b: SessionBuilder) -> Result<SessionBuilder> {
-    use ort::execution_providers::CUDAExecutionProvider;
+    use ort::CUDAExecutionProvider;
     Ok(b.with_execution_providers([CUDAExecutionProvider::default().build()])?)
 }
 
 #[cfg(feature = "rocm")]
 fn configure_execution_providers(b: SessionBuilder) -> Result<SessionBuilder> {
-    use ort::execution_providers::ROCmExecutionProvider;
+    use ort::ROCmExecutionProvider;
     Ok(b.with_execution_providers([ROCmExecutionProvider::default().build()])?)
 }
 
 #[cfg(feature = "openvino")]
 fn configure_execution_providers(b: SessionBuilder) -> Result<SessionBuilder> {
-    use ort::execution_providers::OpenVINOExecutionProvider;
+    use ort::OpenVINOExecutionProvider;
     Ok(b.with_execution_providers([OpenVINOExecutionProvider::default().build()])?)
 }
 
 #[cfg(feature = "tensorrt")]
 fn configure_execution_providers(b: SessionBuilder) -> Result<SessionBuilder> {
-    use ort::execution_providers::TensorRTExecutionProvider;
+    use ort::TensorRTExecutionProvider;
     Ok(b.with_execution_providers([TensorRTExecutionProvider::default().build()])?)
 }
 

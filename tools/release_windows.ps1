@@ -20,20 +20,21 @@ function Require-Command([string]$Name) {
 function Wait-RegularFileStable([string]$Path) {
     $previous = $null
     $stableSamples = 0
-    for ($attempt = 0; $attempt -lt 15; $attempt++) {
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
         $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
         if ($item.PSIsContainer -or $item.LinkType) { throw "Package output must be a regular non-symlink file: $Path" }
-        $fingerprint = "$($item.Length):$($item.LastWriteTimeUtc.Ticks)"
+        $contentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+        $fingerprint = "$($item.Length):$($item.LastWriteTimeUtc.Ticks):$contentHash"
         if ($fingerprint -eq $previous) {
             $stableSamples++
-            if ($stableSamples -ge 2) { return }
+            if ($stableSamples -ge 8) { return }
         } else {
             $stableSamples = 0
             $previous = $fingerprint
         }
         Start-Sleep -Seconds 1
     }
-    throw "Package output did not become stable within 15 seconds: $Path"
+    throw "Package output did not become stable within 30 seconds: $Path"
 }
 
 function Find-SignTool {

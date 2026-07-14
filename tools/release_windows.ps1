@@ -131,11 +131,17 @@ try {
     try {
         cargo build --release
         if ($LASTEXITCODE -ne 0) { throw "Windows release runtime build failed" }
-        $runtimeSource = Join-Path $Root "platform\windows\target\x86_64-pc-windows-msvc\release\onnxruntime.dll"
-        $runtimeItem = Get-Item -LiteralPath $runtimeSource -Force -ErrorAction Stop
-        if ($runtimeItem.PSIsContainer -or $runtimeItem.LinkType) {
-            throw "Built onnxruntime.dll must be a regular non-symlink file"
+        $releaseTarget = Join-Path $Root "platform\windows\target\x86_64-pc-windows-msvc\release"
+        $runtimeCandidates = @(Get-ChildItem -LiteralPath $releaseTarget -Recurse -File -Filter "onnxruntime.dll")
+        if ($runtimeCandidates.Count -eq 0) { throw "Windows release build did not produce onnxruntime.dll" }
+        foreach ($candidate in $runtimeCandidates) {
+            if ($candidate.LinkType) { throw "Built onnxruntime.dll must be a regular non-symlink file" }
         }
+        $runtimeHashes = @($runtimeCandidates | ForEach-Object {
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
+        } | Sort-Object -Unique)
+        if ($runtimeHashes.Count -ne 1) { throw "Windows release build produced conflicting onnxruntime.dll files" }
+        $runtimeSource = ($runtimeCandidates | Sort-Object FullName | Select-Object -First 1).FullName
         Copy-Item -LiteralPath $runtimeSource -Destination $RuntimeStaging
         $stagedRuntime = $true
         & $Tauri build --bundles msi,nsis --ci

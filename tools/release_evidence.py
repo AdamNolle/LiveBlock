@@ -79,14 +79,22 @@ def _regular_file_entry(path: Path, relative: str) -> dict[str, Any]:
         ):
             raise ValueError(f"artifact file changed while opening: {path}")
         digest = hashlib.sha256()
+        verification_digest = hashlib.sha256()
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             while block := handle.read(1024 * 1024):
                 digest.update(block)
-        after = path.lstat()
+            handle.seek(0)
+            while block := handle.read(1024 * 1024):
+                verification_digest.update(block)
+        descriptor_after = os.fstat(descriptor)
+        path_after = path.lstat()
         if (
-            (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns)
+            (descriptor_after.st_dev, descriptor_after.st_ino, descriptor_after.st_mode,
+             descriptor_after.st_size, descriptor_after.st_mtime_ns)
             != (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_size, opened.st_mtime_ns)
-            or not stat.S_ISREG(after.st_mode)
+            or digest.digest() != verification_digest.digest()
+            or not stat.S_ISREG(path_after.st_mode)
+            or (path_after.st_dev, path_after.st_ino) != (opened.st_dev, opened.st_ino)
         ):
             raise ValueError(f"artifact file changed while hashing: {path}")
         return {

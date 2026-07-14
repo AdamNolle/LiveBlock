@@ -246,6 +246,7 @@ LiveBlock/
 - [`docs/DESKTOP_VALIDATION_RUNBOOKS.md`](docs/DESKTOP_VALIDATION_RUNBOOKS.md) — clean-install, upgrade, permission, display, lifecycle, and crash evidence procedures.
 - [`docs/PRIVACY_SECURITY_REVIEW.md`](docs/PRIVACY_SECURITY_REVIEW.md) — local frame/data flow and authenticated update boundary review.
 - [`docs/RELEASE_NOTES_DRAFT.md`](docs/RELEASE_NOTES_DRAFT.md) — unreleased scope, implemented behavior, and known limitations.
+- [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) — artifact inventories, SBOM/license evidence, and package-integrity boundaries.
 - [`ASSESSMENT.md`](ASSESSMENT.md) — standing audit and prioritized roadmap.
 - [`AI.md`](AI.md) — guide for AI agents working on this codebase.
 - [`tools/README.md`](tools/README.md) — training-pipeline walkthrough.

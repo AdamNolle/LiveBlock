@@ -112,6 +112,16 @@ try {
         $env:LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING = "1"
     }
 
+    # Install/build before launching the Tauri CLI. On Windows the running
+    # native CLI module locks itself, so a nested `npm ci` cannot safely unlink it.
+    Push-Location (Join-Path $Root "platform\_shared-frontend")
+    try {
+        npm ci
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw "frontend build failed" }
+    } finally { Pop-Location }
+
     Push-Location (Join-Path $Root "platform\windows\src-tauri")
     try { & $Tauri build --bundles msi,nsis --ci } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw "Tauri Windows bundle build failed" }

@@ -250,6 +250,8 @@ LiveBlock/
 - [`docs/RELEASE_NOTES_DRAFT.md`](docs/RELEASE_NOTES_DRAFT.md) — unreleased scope, implemented behavior, and known limitations.
 - [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) — artifact inventories, SBOM/license evidence, and package-integrity boundaries.
 - [`docs/LINUX_PACKAGING.md`](docs/LINUX_PACKAGING.md) — pinned runtime staging, native build evidence, and Flatpak permission/source boundaries.
+- [`docs/WINDOWS_DIRECTML.md`](docs/WINDOWS_DIRECTML.md) — version-pinned D3D11/D3D12/ORT texture-transport boundary.
+- [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md) — MSI/NSIS build-only and credential-gated Authenticode runbook.
 - [`ASSESSMENT.md`](ASSESSMENT.md) — standing audit and prioritized roadmap.
 - [`AI.md`](AI.md) — guide for AI agents working on this codebase.
 - [`tools/README.md`](tools/README.md) — training-pipeline walkthrough.

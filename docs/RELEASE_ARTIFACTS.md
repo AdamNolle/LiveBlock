@@ -38,9 +38,13 @@ Every packaging pipeline must:
 
 An inventory labeled `build-only` or `webview-payload-build-only` is not a
 signature, distributable release, or release-readiness claim. Current CI exercises
-the contract against both the deterministic webview payload and an extracted
-Linux `.deb` whose trusted-key ring is intentionally empty because production
-model keys/artifacts and signing credentials do not exist yet. CI preserves the
+the contract against the deterministic webview payload, an extracted Linux `.deb`,
+and final unsigned Windows MSI/NSIS package bytes. Their trusted-key rings are
+intentionally empty because production model keys/artifacts and signing credentials
+do not exist yet. Windows evidence inventories both final installer bytes and a
+non-installing MSI administrative extraction requiring the executable, ONNX Runtime
+DLL, and keyring. It does not claim the payload was installed, launched, or executed.
+CI preserves the
 exact webview payload as a normalized tar plus SHA-256 beside its inventory, so an operator can
 extract it and rerun `verify` without rebuilding.
 
@@ -116,7 +120,9 @@ python3 tools/release_evidence.py sbom \
 The shared job also reruns focused legacy-schema migrations, atomic installer
 behavior, signed CoreML bundle tamper rejection, and ONNX update rollback/crash
 recovery tests. These are deterministic implementation tests. The Linux `.deb`
-is extracted and inventoried but not installed or launched. CI does not test an
-MSI/NSIS/RPM/Flatpak/AppImage install, package signing, OS upgrade/uninstall,
-power loss, model parity, or hardware execution. Those remain open until exact
+is extracted and inventoried but not installed or launched. Windows CI builds and
+inventories unsigned MSI/NSIS bytes under `windows-installers-build-only` and the
+administratively extracted MSI payload under a separate build-only inventory, but
+does not install or launch them. CI does not test an MSI/NSIS/RPM/Flatpak/AppImage install,
+package signing, OS upgrade/uninstall, power loss, model parity, or hardware execution. Those remain open until exact
 production artifacts and suitable hosts/credentials exist.

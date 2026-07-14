@@ -48,7 +48,8 @@ No current platform profile reports `releaseReady: true`.
 
 - Windows Graphics Capture monitor frames, application-owned texture handoff,
   worker-side staging/Map, capacity-one processing, latest local labeling frame,
-  shared ONNX processing, bounded D3D11 mirror inpainting with CPU fallback,
+  shared ONNX processing with truthful DirectML-registration/CPU-load fallback,
+  bounded D3D11 mirror inpainting with CPU fallback,
   telemetry, and conservative possible-protected/unavailable black-frame handling.
 - Explicit physical-monitor selection, PerMonitorV2 physical geometry including
   negative origins, active topology refresh, and fail-closed monitor removal.
@@ -107,7 +108,9 @@ No current platform profile reports `releaseReady: true`.
 - DirectML/CPU provider execution, NVIDIA/AMD/Intel performance, mixed-DPI
   overlays, capture exclusion, games, DRM, and anti-cheat behavior lack
   real-device evidence.
-- Signed MSI/MSIX/NSIS production automation and Authenticode execution are open.
+- CI builds and inventories unsigned MSI/NSIS bytes only. Credential-gated
+  Authenticode/timestamp automation exists but has not run; MSIX, application
+  updates, and real install/upgrade/uninstall execution remain open.
 
 ### Linux
 

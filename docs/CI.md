@@ -7,7 +7,9 @@
   migration/installer/update-recovery gates, the release-profile training gate,
   and frontend build (using only a deterministic test key, never a release key);
 - unsigned macOS 26 Debug tests plus a Release compile, with the `.xcresult` uploaded;
-- Windows library tests plus debug/release all-target compilation on a Windows runner; and
+- Windows library tests plus debug/release all-target compilation on a Windows runner,
+  followed by unsigned build-only MSI/NSIS construction, checksum, and final-package
+  byte inventory; and
 - Linux library tests plus debug/release all-target compilation after installing
   Tauri, PipeWire, Wayland, and X11 development headers; Release separately
   proves that an unpackaged ONNX Runtime is rejected before using explicit
@@ -27,7 +29,14 @@ signed production package. The Linux job separately uploads
 `linux-build-only-package-evidence` containing the exact `.deb`, package hash,
 extracted-payload inventory, and runtime staging manifest. Its embedded keyring
 is intentionally empty, so it proves package construction only and must not be
-distributed. See [`LINUX_PACKAGING.md`](LINUX_PACKAGING.md).
+distributed. The Windows job uploads `windows-build-only-package-evidence` with
+one unsigned MSI, one unsigned NSIS executable, basename-rerunnable SHA-256 lines,
+a verified package-byte inventory, an MSI administrative-extraction payload and
+inventory, and a manifest whose signed/timestamped/promoted flags are false. The
+extracted payload must include the executable, ONNX Runtime DLL, and keyring, but
+it is not installed or launched. See
+[`LINUX_PACKAGING.md`](LINUX_PACKAGING.md) and
+[`WINDOWS_RELEASE.md`](WINDOWS_RELEASE.md).
 
 A green compile job proves source/build compatibility on that hosted image. It
 does **not** certify DirectML/CUDA/ROCm/CoreML performance, capture permission

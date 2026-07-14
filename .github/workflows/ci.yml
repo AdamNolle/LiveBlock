@@ -43,7 +43,7 @@ jobs:
       - name: Label and desktop adapter contract tests
         env:
           PYTHONPATH: tools
-        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_linux_runtime_staging tools.test_linux_packaging
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_packaging
       - name: Explicit migration, installer, and update recovery gates
         env:
           PYTHONPATH: tools
@@ -190,6 +190,24 @@ jobs:
           }
           $env:LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING = "1"
           cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets --release
+      - name: Build and inventory unsigned build-only Windows installers
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/release_windows.ps1 -Mode BuildOnly -OutputDir tools/runs/ci-windows-package
+      - name: Preserve Windows build-only package evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-only-package-evidence
+          path: |
+            tools/runs/ci-windows-package/packages/*.msi
+            tools/runs/ci-windows-package/packages/*.exe
+            tools/runs/ci-windows-package/package-inventory.json
+            tools/runs/ci-windows-package/package.sha256
+            tools/runs/ci-windows-package/msi-payload-inventory.json
+            tools/runs/ci-windows-package/msi-administrative-extract.log
+            tools/runs/ci-windows-package/msi-extracted/**
+            tools/runs/ci-windows-package/release-manifest.json
+          if-no-files-found: error
 
   linux:
     name: Ubuntu Linux compile

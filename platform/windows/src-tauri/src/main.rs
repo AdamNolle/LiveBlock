@@ -691,6 +691,17 @@ fn get_capabilities(
         "inpainting backend: {}; CPU-uploaded D3D11 patches are read back for webview composition",
         state.inpainter.lock().backend_status()
     ));
+    let detector_backend = state
+        .detector
+        .lock()
+        .as_ref()
+        .map(|detector| detector.backend_status());
+    profile.limitations.push(match detector_backend {
+        Some(backend) => format!(
+            "detector backend: {backend}; registration/load status is not proof of physical GPU graph execution"
+        ),
+        None => "detector backend: no authenticated model loaded; DirectML execution is unobserved".into(),
+    });
     profile.validate().map_err(str::to_string)?;
     Ok(profile)
 }

@@ -194,7 +194,13 @@ jobs:
         shell: pwsh
         run: |
           pwsh -NoProfile -File tools/release_windows.ps1 -Mode BuildOnly -OutputDir tools/runs/ci-windows-package
+      - name: Exercise build-only MSI and NSIS lifecycles
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/test_windows_package_lifecycle.ps1 `
+            -EvidenceDir tools/runs/ci-windows-package -LaunchSeconds 12
       - name: Preserve Windows build-only package evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-build-only-package-evidence
@@ -207,7 +213,8 @@ jobs:
             tools/runs/ci-windows-package/msi-administrative-extract.log
             tools/runs/ci-windows-package/msi-extracted/**
             tools/runs/ci-windows-package/release-manifest.json
-          if-no-files-found: error
+            tools/runs/ci-windows-package/lifecycle/**
+          if-no-files-found: warn
 
   linux:
     name: Ubuntu Linux compile

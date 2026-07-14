@@ -45,8 +45,34 @@ must say:
 ```
 
 Do not distribute these installers. They contain the empty development trust
-ring and no promoted model. Compilation/package construction is not proof of
-installation, launch, DirectML execution, capture, update, or uninstall behavior.
+ring and no promoted model. Package construction alone is not proof of runtime
+behavior. Native hosted CI separately exercises the exact BuildOnly bytes as
+described below; that smoke evidence still is not production distribution or
+hardware certification.
+
+### Hosted build-only lifecycle smoke
+
+After package and payload inventories pass, the Windows 11 hosted runner executes
+`tools/test_windows_package_lifecycle.ps1` against only an unsigned,
+untimestamped, no-model `windows-installers-build-only` manifest. The script:
+
+1. requires that no LiveBlock uninstall registration exists;
+2. silently installs the MSI, inventories and reverifies the installed
+   executable/runtime/license/notices/keyring tree, and requires the UI process
+   to remain alive for a bounded 12-second window;
+3. force-stops that process, silently uninstalls the MSI, and waits for both the
+   payload and uninstall registration to disappear;
+4. repeats clean install, installed-payload inventory, bounded launch, and
+   uninstall through the NSIS current-user installer; and
+5. preserves verbose MSI logs, NSIS stdout/stderr, launch logs, a progress
+   journal, both installed-payload inventories, and a machine-readable summary.
+
+The test has `finally` cleanup and the artifact upload runs even after failure so
+partial diagnostics remain available. It proves installer mechanics and bounded
+UI startup only on the hosted Windows image. It does not prove signatures,
+promoted-model authentication, DirectML/GPU execution, capture, anti-cheat,
+mixed-DPI, lifecycle recovery, accessibility, same-version repair, prior-version
+upgrade, application updates, or sustained use.
 
 ## Credential-gated execution
 
@@ -106,7 +132,9 @@ Tauri 2 currently produces MSI and NSIS for this adapter. MSIX creation, package
 identity, App Installer/application-update signing, and downgrade/upgrade policy
 for MSIX are **not implemented**. The checklist item covering signed MSI/MSIX and
 secure application updates remains open until one reviewed distribution channel
-is selected and clean-install/upgrade/uninstall tests run on real Windows.
+is selected, genuine signed packages run, prior-version upgrade/repair policy is
+tested, and the real Windows device matrix passes. Hosted BuildOnly MSI/NSIS
+clean-install/launch/uninstall smoke does not satisfy those production gates.
 
 ## Required final evidence
 

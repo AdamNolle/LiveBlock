@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "tools/release_windows.ps1").read_text()
+LIFECYCLE = (ROOT / "tools/test_windows_package_lifecycle.ps1").read_text()
 DOC = (ROOT / "docs/WINDOWS_RELEASE.md").read_text()
 CI = (ROOT / ".github/workflows/ci.yml").read_text()
 CONFIG = json.loads((ROOT / "platform/windows/src-tauri/tauri.conf.json").read_text())
@@ -70,6 +71,24 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn(".verify(artifact, &ring)", BUILD_RS)
         self.assertIn("empty-ring override cannot accompany", BUILD_RS)
 
+    def test_build_only_lifecycle_is_clean_bounded_and_fail_closed(self):
+        self.assertIn("windows-installers-build-only", LIFECYCLE)
+        self.assertIn("promotedModelEmbedded -ne $false", LIFECYCLE)
+        self.assertIn("Get-LiveBlockUninstallEntries", LIFECYCLE)
+        self.assertIn('"/i"', LIFECYCLE)
+        self.assertIn('"/x"', LIFECYCLE)
+        self.assertIn('ArgumentList "/S"', LIFECYCLE)
+        self.assertIn("Invoke-BoundedLaunch", LIFECYCLE)
+        self.assertIn("Stop-Process", LIFECYCLE)
+        self.assertIn("Wait-Removed", LIFECYCLE)
+        self.assertIn("windows-build-only-msi-installed", LIFECYCLE)
+        self.assertIn("windows-build-only-nsis-installed", LIFECYCLE)
+        self.assertIn("release_evidence.py verify", LIFECYCLE)
+        self.assertIn("productionModelAndTrustRoots = $false", LIFECYCLE)
+        self.assertIn("signedAndTimestamped = $false", LIFECYCLE)
+        self.assertIn("hardwareCertification = $false", LIFECYCLE)
+        self.assertIn("finally", LIFECYCLE)
+
     def test_tauri_and_ci_build_both_unsigned_installer_formats(self):
         self.assertEqual(CONFIG["build"]["beforeBuildCommand"], "cd ../_shared-frontend && npm run build")
         self.assertIn("npm ci", SCRIPT)
@@ -82,6 +101,9 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn("package.sha256", CI)
         self.assertIn("msi-payload-inventory.json", CI)
         self.assertIn("msi-extracted/**", CI)
+        self.assertIn("test_windows_package_lifecycle.ps1", CI)
+        self.assertIn("lifecycle/**", CI)
+        self.assertIn("if: always()", CI)
         self.assertIn('"load-dynamic"', CARGO_TOML)
         self.assertNotIn('"download-binaries"', CARGO_TOML)
 

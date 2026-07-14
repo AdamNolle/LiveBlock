@@ -37,14 +37,16 @@ distributed. The Windows job uploads `windows-build-only-package-evidence` with
 one unsigned MSI, one unsigned NSIS executable, basename-rerunnable SHA-256 lines,
 a verified package-byte inventory, an MSI administrative-extraction payload and
 inventory, and a manifest whose signed/timestamped/promoted flags are false. The
-extracted payload must include the executable, ONNX Runtime DLL, and keyring, but
-it is not installed or launched. See
+extracted payload must include the executable, ONNX Runtime DLL, and keyring.
+Hosted Windows then clean-installs, inventories, bounded-smoke-launches, and
+uninstalls both BuildOnly formats, preserving lifecycle logs and a limitations
+summary. See
 [`LINUX_PACKAGING.md`](LINUX_PACKAGING.md) and
 [`WINDOWS_RELEASE.md`](WINDOWS_RELEASE.md).
 
 A green compile job proves source/build compatibility on that hosted image. It
 does **not** certify DirectML/CUDA/ROCm/CoreML performance, capture permission
 flows, display hot-plug, DRM behavior, network-denied operation, click-through overlays, compositor
-support, signing, notarization, production installers, upgrade behavior, RPM
-transactions, or real-hardware reliability. Those remain separate release-matrix
+support, signing, notarization, production installer trust, upgrade/repair
+behavior, RPM transactions, or real-hardware reliability. Those remain separate release-matrix
 evidence gates.

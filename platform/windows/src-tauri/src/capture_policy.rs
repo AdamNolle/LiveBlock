@@ -13,6 +13,45 @@ pub fn action_is_newer_than_panic(action_sequence: u64, last_panic_sequence: u64
     action_sequence > last_panic_sequence
 }
 
+pub fn action_is_newer_than_barriers(
+    action_sequence: u64,
+    last_panic_sequence: u64,
+    last_stop_sequence: u64,
+    shutting_down: bool,
+) -> bool {
+    !shutting_down && action_sequence > last_panic_sequence.max(last_stop_sequence)
+}
+
+pub const SUSPENSION_POWER: u8 = 1 << 0;
+pub const SUSPENSION_SESSION_LOCK: u8 = 1 << 1;
+pub const RECOVERY_DELAYS_MS: [u64; 4] = [500, 1_000, 2_000, 4_000];
+pub const FIRST_FRAME_TIMEOUT_MS: u64 = 3_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuspensionTransition {
+    Unchanged,
+    BecameSuspended,
+    BecameResumable,
+}
+
+pub fn update_suspension_reasons(
+    current: u8,
+    reason: u8,
+    active: bool,
+) -> (u8, SuspensionTransition) {
+    let next = if active {
+        current | reason
+    } else {
+        current & !reason
+    };
+    let transition = match (current == 0, next == 0) {
+        (true, false) => SuspensionTransition::BecameSuspended,
+        (false, true) => SuspensionTransition::BecameResumable,
+        _ => SuspensionTransition::Unchanged,
+    };
+    (next, transition)
+}
+
 #[derive(Default)]
 pub struct CaptureTelemetry {
     captured_frames: AtomicU64,
@@ -239,10 +278,35 @@ mod tests {
     }
 
     #[test]
-    fn sequenced_panic_rejects_delayed_toggle_but_allows_fresh_intent() {
+    fn sequenced_panic_and_stop_reject_delayed_actions_but_allow_fresh_intent() {
         assert!(!action_is_newer_than_panic(8, 9));
-        assert!(!action_is_newer_than_panic(9, 9));
-        assert!(action_is_newer_than_panic(10, 9));
+        assert!(!action_is_newer_than_barriers(9, 9, 8, false));
+        assert!(!action_is_newer_than_barriers(10, 8, 10, false));
+        assert!(action_is_newer_than_barriers(11, 9, 10, false));
+        assert!(!action_is_newer_than_barriers(12, 9, 10, true));
+    }
+
+    #[test]
+    fn overlapping_power_and_lock_resume_only_after_both_clear() {
+        let (power, first) = update_suspension_reasons(0, SUSPENSION_POWER, true);
+        assert_eq!(first, SuspensionTransition::BecameSuspended);
+        let (both, overlap) = update_suspension_reasons(power, SUSPENSION_SESSION_LOCK, true);
+        assert_eq!(overlap, SuspensionTransition::Unchanged);
+        let (locked, power_resume) = update_suspension_reasons(both, SUSPENSION_POWER, false);
+        assert_eq!(power_resume, SuspensionTransition::Unchanged);
+        let (clear, unlock) = update_suspension_reasons(locked, SUSPENSION_SESSION_LOCK, false);
+        assert_eq!(unlock, SuspensionTransition::BecameResumable);
+        assert_eq!(clear, 0);
+        assert_eq!(RECOVERY_DELAYS_MS, [500, 1_000, 2_000, 4_000]);
+        assert_eq!(FIRST_FRAME_TIMEOUT_MS, 3_000);
+    }
+
+    #[test]
+    fn duplicate_suspension_messages_are_idempotent() {
+        let (power, _) = update_suspension_reasons(0, SUSPENSION_POWER, true);
+        let (same, transition) = update_suspension_reasons(power, SUSPENSION_POWER, true);
+        assert_eq!(same, power);
+        assert_eq!(transition, SuspensionTransition::Unchanged);
     }
 
     #[test]

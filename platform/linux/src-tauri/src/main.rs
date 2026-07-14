@@ -124,7 +124,11 @@ async fn start_capture_inner(
 }
 
 #[tauri::command]
-async fn stop_capture(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+async fn stop_capture(
+    _action_sequence: u64,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
     stop_capture_inner(app, state.inner().clone()).await
 }
 

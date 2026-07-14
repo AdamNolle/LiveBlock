@@ -92,8 +92,9 @@ No current platform profile reports `releaseReady: true`.
   Zero-copy DirectML texture inference is not implemented.
 - D3D11 compute inpainting/compositing and WARP fallback are not implemented;
   current inpainting and patch encoding are CPU paths.
-- Bounded automatic restart after sleep, display/device loss, or driver reset is
-  incomplete.
+- Native power/session/display observation and 0.5/1/2/4-second bounded recovery
+  are implemented, including first-frame gating. Real sleep, lock, hot-plug,
+  driver-reset, and observer-failure execution remains uncertified.
 - Region editor and labeling UI are not complete end-to-end workflows.
 - DirectML/CPU provider execution, NVIDIA/AMD/Intel performance, mixed-DPI
   overlays, capture exclusion, games, DRM, and anti-cheat behavior lack

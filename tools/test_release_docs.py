@@ -49,7 +49,7 @@ class ReleaseDocumentationContractTests(unittest.TestCase):
             "desktop_validation_evidence.py hashes",
         ):
             self.assertIn(phrase, RUNBOOKS)
-        self.assertIn("Current automatic sleep/device recovery is\nnot implemented", RUNBOOKS)
+        self.assertIn("Native lifecycle observation and bounded\nrecovery are implemented but uncertified", RUNBOOKS)
         self.assertIn("GNOME evidence must use the bounded movable preview", RUNBOOKS)
 
     def test_release_notes_are_explicitly_unreleased_and_blocked(self):

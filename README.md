@@ -224,7 +224,7 @@ LiveBlock/
 |----------------------|-------------------------------------------------------|
 | macOS app            | Capture, region editor, labeling, training dashboard, ML detector tuning. Native macOS 26 Liquid Glass UI. Linked against the Rust core via swift-bridge. |
 | Rust core            | Shared versioned persistence, detector processing, behavior, and authenticated model-update contracts with cross-platform tests. |
-| Windows port         | Experimental WGC frame loop, local ONNX/CPU processing, physical-display overlay geometry, runtime hotkeys, and authenticated updates. DirectML texture transport, D3D11 compute, bounded device recovery, packaging, and hardware certification remain open. |
+| Windows port         | Experimental WGC frame loop, local ONNX/CPU processing, physical-display overlay geometry, runtime hotkeys, and authenticated updates. DirectML texture transport, D3D11 compute, packaging, and real-device lifecycle/hardware certification remain open. |
 | Linux port           | Experimental portal/PipeWire mapped-buffer and X11 frame loops, local ONNX/CPU processing, runtime hotkeys, supported overlay plumbing, and GNOME limited preview. GPU compositing, provider packaging, distribution, and compositor certification remain open. |
 | Detector             | Runtime taxonomy is Logo / Ad banner / Sponsored, but human review is 0/21 and no candidate passes schema-5; nothing is promotable or distributable. |
 | Code signing         | Stable self-signed development identity plus a fail-closed Developer ID/notarization runbook in [`docs/MACOS_RELEASE.md`](docs/MACOS_RELEASE.md); production execution still requires genuine credentials. |

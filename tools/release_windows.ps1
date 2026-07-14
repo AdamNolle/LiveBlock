@@ -159,7 +159,14 @@ try {
     & msiexec.exe /a $msi.FullName /qn "TARGETDIR=$MsiExtracted" /L*V $MsiExtractLog
     if ($LASTEXITCODE -ne 0) { throw "MSI administrative extraction failed with exit code $LASTEXITCODE" }
     $payloadRequirements = @()
-    foreach ($name in @("liveblock-windows.exe", "onnxruntime.dll", "trusted-model-keys.json")) {
+    $executables = @(Get-ChildItem -LiteralPath $MsiExtracted -Recurse -File -Filter "*.exe")
+    if ($executables.Count -ne 1) {
+        $found = @(Get-ChildItem -LiteralPath $MsiExtracted -Recurse -File | ForEach-Object FullName) -join "; "
+        throw "MSI payload must contain exactly one application executable; found: $found"
+    }
+    $relative = [IO.Path]::GetRelativePath($MsiExtracted, $executables[0].FullName).Replace("\", "/")
+    $payloadRequirements += @("--require", $relative)
+    foreach ($name in @("onnxruntime.dll", "trusted-model-keys.json")) {
         $matches = @(Get-ChildItem -LiteralPath $MsiExtracted -Recurse -File -Filter $name)
         if ($matches.Count -ne 1) { throw "MSI payload must contain exactly one $name" }
         $relative = [IO.Path]::GetRelativePath($MsiExtracted, $matches[0].FullName).Replace("\", "/")

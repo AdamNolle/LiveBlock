@@ -12,6 +12,8 @@ pub mod hotkeys;
 pub mod inpainting;
 pub mod labels;
 #[cfg(windows)]
+pub mod lifecycle;
+#[cfg(windows)]
 pub mod overlay;
 pub mod paths;
 pub mod regions;

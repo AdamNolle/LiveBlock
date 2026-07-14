@@ -90,6 +90,7 @@
       let captureError = null;
       let regionCount = 0;
       let capabilitiesLoaded = false;
+      let capabilitiesEpoch = 0;
       const power = toggle({
         value: false,
         accent: "success",
@@ -149,6 +150,10 @@
         document.getElementById("status").textContent = text;
       }
 
+      events.onCapabilitiesChanged(() => {
+        capabilitiesEpoch += 1;
+        capabilitiesLoaded = false;
+      });
       events.onCaptureState((value) => {
         running = value;
         power.dataset.on = String(value);
@@ -176,7 +181,9 @@
       async function refresh() {
         try {
           if (!capabilitiesLoaded) {
+            const requestEpoch = capabilitiesEpoch;
             const capabilities = await lb.getCapabilities();
+            if (requestEpoch !== capabilitiesEpoch) return;
             capabilitiesLoaded = true;
             if (!capabilities.globalHotkeys) {
               document.getElementById("hotkeyHint").textContent = "Global hotkeys unavailable";

@@ -8,6 +8,7 @@ WINDOWS = (ROOT / "platform/windows/src-tauri/src/main.rs").read_text()
 LINUX = (ROOT / "platform/linux/src-tauri/src/main.rs").read_text()
 IPC = (ROOT / "platform/_shared-frontend/src/ipc.ts").read_text()
 WINDOWS_UPDATES = (ROOT / "platform/windows/src-tauri/src/model_updates.rs").read_text()
+WINDOWS_LIFECYCLE = (ROOT / "platform/windows/src-tauri/src/lifecycle.rs").read_text()
 LINUX_UPDATES = (ROOT / "platform/linux/src-tauri/src/model_updates.rs").read_text()
 
 EXPECTED_COMMANDS = {
@@ -90,6 +91,23 @@ class DesktopAdapterContractTests(unittest.TestCase):
         self.assertIn('for label in ["editor", "render", "labeling", "training"]', WINDOWS)
         self.assertIn("dispatch_hotkey", LINUX)
         self.assertIn("PanicDisable", LINUX)
+
+    def test_windows_lifecycle_recovery_is_fail_closed_and_bounded(self):
+        for event in (
+            "windows-power-suspension-changed",
+            "windows-session-lock-changed",
+            "windows-display-topology-changed",
+            "windows-lifecycle-availability-changed",
+        ):
+            self.assertIn(event, WINDOWS_LIFECYCLE)
+            self.assertIn(event, WINDOWS)
+        self.assertIn("WTSRegisterSessionNotification", WINDOWS_LIFECYCLE)
+        self.assertIn("PBT_APMSUSPEND", WINDOWS_LIFECYCLE)
+        self.assertIn("PBT_APMRESUMEAUTOMATIC", WINDOWS_LIFECYCLE)
+        self.assertIn("FIRST_FRAME_TIMEOUT_MS", WINDOWS)
+        self.assertIn("RECOVERY_DELAYS_MS", WINDOWS)
+        self.assertIn("capture_desired", WINDOWS)
+        self.assertIn("lifecycle_observer_available", WINDOWS)
 
     def test_release_training_uses_shared_fail_closed_gate(self):
         for source in (WINDOWS, LINUX):

@@ -106,7 +106,10 @@ export const lb = {
     const actionSequence = await invoke<number>("begin_user_action");
     return invoke<void>("start_capture", { monitorId, actionSequence });
   },
-  stopCapture: () => invoke<void>("stop_capture"),
+  stopCapture: async () => {
+    const actionSequence = await invoke<number>("begin_user_action");
+    return invoke<void>("stop_capture", { actionSequence });
+  },
   getCaptureTelemetry: () => invoke<CaptureTelemetry>("get_capture_telemetry"),
   setDetectionEnabled: (enabled: boolean) =>
     invoke<void>("set_detection_enabled", { enabled }),
@@ -149,6 +152,8 @@ export const lb = {
 };
 
 export const events = {
+  onCapabilitiesChanged: (cb: () => void) =>
+    listen("capabilities-changed", () => cb()),
   onPatches: (cb: (patches: PatchPayload[]) => void) =>
     listen<PatchPayload[]>("patches-updated", (e) => cb(e.payload)),
   onRegions: (cb: (regions: NormalizedRegion[]) => void) =>

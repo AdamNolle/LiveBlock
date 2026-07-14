@@ -8,6 +8,7 @@ mod detection;
 mod hotkeys;
 mod inpainting;
 mod labels;
+mod lifecycle;
 mod model_updates;
 mod overlay;
 mod paths;
@@ -28,7 +29,9 @@ use uuid::Uuid;
 
 use crate::capture::{enumerate_monitors, CaptureSession, FrameView, MonitorDescriptor};
 use crate::capture_policy::{
-    action_is_newer_than_panic, CaptureTelemetry, CaptureTelemetrySnapshot, ProtectedFrameDetector,
+    action_is_newer_than_barriers, update_suspension_reasons, CaptureTelemetry,
+    CaptureTelemetrySnapshot, ProtectedFrameDetector, SuspensionTransition,
+    FIRST_FRAME_TIMEOUT_MS, RECOVERY_DELAYS_MS, SUSPENSION_POWER, SUSPENSION_SESSION_LOCK,
 };
 use crate::detection::{DetBox, Detector};
 use crate::inpainting::PatchPayload;
@@ -81,6 +84,7 @@ fn main() {
             // Register tray + global hotkeys.
             tray::install(&handle).ok();
             hotkeys::spawn(handle.clone());
+            lifecycle::spawn(handle.clone());
             spawn_monitor_geometry_watcher(handle.clone());
 
             // Try to load a default detector if the model is present.
@@ -226,16 +230,187 @@ fn install_action_listeners(app: &AppHandle) {
 
     let handle = app.clone();
     app.listen("tray-quit-requested", move |_| {
-        panic_disable_action(&handle, hotkeys::next_action_sequence());
-        handle.exit(0);
+        quit_action(&handle);
+    });
+
+    let handle = app.clone();
+    app.listen("windows-lifecycle-availability-changed", move |event| {
+        let available = serde_json::from_str(event.payload()).unwrap_or(false);
+        let state = handle.state::<AppState>();
+        state
+            .lifecycle_observer_available
+            .store(available, Ordering::SeqCst);
+        if !available {
+            cancel_capture_intent(state.inner());
+            let _ = handle.emit(
+                "capture-runtime-error",
+                "Windows power/session lifecycle observation is unavailable",
+            );
+        }
+        let _ = handle.emit("capabilities-changed", ());
+    });
+
+    let handle = app.clone();
+    app.listen("windows-power-suspension-changed", move |event| {
+        let active = serde_json::from_str(event.payload()).unwrap_or(true);
+        update_windows_suspension(&handle, SUSPENSION_POWER, active);
+    });
+
+    let handle = app.clone();
+    app.listen("windows-session-lock-changed", move |event| {
+        let active = serde_json::from_str(event.payload()).unwrap_or(true);
+        update_windows_suspension(&handle, SUSPENSION_SESSION_LOCK, active);
+    });
+
+    let handle = app.clone();
+    app.listen("windows-display-topology-changed", move |_| {
+        let state = handle.state::<AppState>();
+        if state.capture_desired.load(Ordering::SeqCst)
+            && state.suspension_reasons.load(Ordering::SeqCst) == 0
+            && state.capture.lock().is_none()
+        {
+            schedule_capture_recovery(handle.clone());
+        }
+    });
+}
+
+fn update_windows_suspension(app: &AppHandle, reason: u8, active: bool) {
+    let state = app.state::<AppState>();
+    let transition = loop {
+        let current = state.suspension_reasons.load(Ordering::SeqCst);
+        let (next, transition) = update_suspension_reasons(current, reason, active);
+        match state.suspension_reasons.compare_exchange(
+            current,
+            next,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => break transition,
+            Err(_) => continue,
+        }
+    };
+    match transition {
+        SuspensionTransition::BecameSuspended => {
+            state.recovery_generation.fetch_add(1, Ordering::SeqCst);
+            let _ = stop_capture_inner(state.inner());
+            let _ = app.emit("capture-suspended-changed", true);
+        }
+        SuspensionTransition::BecameResumable => {
+            let _ = app.emit("capture-suspended-changed", false);
+            if state.capture_desired.load(Ordering::SeqCst) {
+                schedule_capture_recovery(app.clone());
+            }
+        }
+        SuspensionTransition::Unchanged => {}
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryAttemptEvent {
+    attempt: usize,
+    delay_ms: u64,
+}
+
+fn schedule_capture_recovery(app: AppHandle) {
+    let state = app.state::<AppState>();
+    if !state.capture_desired.load(Ordering::SeqCst)
+        || state.suspension_reasons.load(Ordering::SeqCst) != 0
+    {
+        return;
+    }
+    let token = state
+        .recovery_generation
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
+    std::thread::spawn(move || {
+        for (index, delay_ms) in RECOVERY_DELAYS_MS.into_iter().enumerate() {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            let state = app.state::<AppState>();
+            if state.recovery_generation.load(Ordering::SeqCst) != token
+                || !state.capture_desired.load(Ordering::SeqCst)
+                || state.suspension_reasons.load(Ordering::SeqCst) != 0
+            {
+                return;
+            }
+            if state.capture.lock().is_some() {
+                return;
+            }
+            let _ = app.emit(
+                "capture-recovery-attempt",
+                RecoveryAttemptEvent {
+                    attempt: index + 1,
+                    delay_ms,
+                },
+            );
+            let selected_handle = state.selected_monitor.load(Ordering::SeqCst);
+            let selected_name = state.selected_monitor_name.lock().clone();
+            let monitors = enumerate_monitors();
+            let selected = if let Some(name) = selected_name {
+                monitors.into_iter().find(|monitor| monitor.name == name)
+            } else {
+                monitors
+                    .into_iter()
+                    .find(|monitor| monitor.handle.0 as usize == selected_handle)
+            };
+            if let Some(selected) = selected {
+                if start_capture_inner(
+                    (selected.handle.0 as usize).to_string(),
+                    state.inner(),
+                    None,
+                    Some(token),
+                )
+                .is_ok()
+                    && state.capture.lock().is_some()
+                {
+                    // Active state is emitted only by the first-frame gate. A
+                    // recovery attempt does not succeed merely because WGC
+                    // created a session; wait for a packed valid frame.
+                    for _ in 0..(FIRST_FRAME_TIMEOUT_MS / 10 + 20) {
+                        if state.recovery_generation.load(Ordering::SeqCst) != token
+                            || !state.capture_desired.load(Ordering::SeqCst)
+                        {
+                            return;
+                        }
+                        let readiness = state
+                            .capture
+                            .lock()
+                            .as_ref()
+                            .map(CaptureSession::has_first_frame);
+                        match readiness {
+                            Some(true) => return,
+                            Some(false) => std::thread::sleep(Duration::from_millis(10)),
+                            None => break,
+                        }
+                    }
+                }
+            }
+        }
+        let state = app.state::<AppState>();
+        let lifecycle_guard = state.capture_lifecycle.lock();
+        let exhausted = state.recovery_generation.load(Ordering::SeqCst) == token
+            && state.capture_desired.load(Ordering::SeqCst)
+            && state.capture.lock().is_none();
+        if exhausted {
+            state.capture_desired.store(false, Ordering::SeqCst);
+        }
+        drop(lifecycle_guard);
+        if exhausted {
+            let _ = app.emit(
+                "capture-runtime-error",
+                "automatic capture recovery exhausted after four attempts",
+            );
+        }
     });
 }
 
 fn action_sequence_is_allowed(app: &AppHandle, action_sequence: u64) -> bool {
     let state = app.state::<AppState>();
-    action_is_newer_than_panic(
+    action_is_newer_than_barriers(
         action_sequence,
         state.last_panic_action.load(Ordering::SeqCst),
+        state.last_stop_action.load(Ordering::SeqCst),
+        state.shutting_down.load(Ordering::SeqCst),
     )
 }
 
@@ -244,9 +419,13 @@ fn toggle_capture_action(app: &AppHandle, action_sequence: u64) {
     if !action_sequence_is_allowed(app, action_sequence) {
         return;
     }
-    let running = state.capture.lock().is_some();
-    if running {
-        let _ = stop_capture_inner(state.inner());
+    let running_or_pending = state.capture.lock().is_some()
+        || state.capture_desired.load(Ordering::SeqCst);
+    if running_or_pending {
+        state
+            .last_stop_action
+            .fetch_max(action_sequence, Ordering::SeqCst);
+        cancel_capture_intent(state.inner());
         return;
     }
     let selected = state.selected_monitor.load(Ordering::SeqCst);
@@ -259,12 +438,27 @@ fn toggle_capture_action(app: &AppHandle, action_sequence: u64) {
             (monitor.handle.0 as usize).to_string(),
             state.inner(),
             Some(action_sequence),
+            None,
         ) {
-            let _ = app.emit("capture-runtime-error", error);
+            let _ = app.emit("capture-runtime-error", &error);
+            if state.capture_desired.load(Ordering::SeqCst) {
+                schedule_capture_recovery(app.clone());
+            }
         }
     } else {
         let _ = app.emit("capture-runtime-error", "no Windows monitor is available");
     }
+}
+
+fn quit_action(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    state.shutting_down.store(true, Ordering::SeqCst);
+    state.capture_desired.store(false, Ordering::SeqCst);
+    state.recovery_generation.fetch_add(1, Ordering::SeqCst);
+    state.recovery_cycles.store(0, Ordering::SeqCst);
+    let _ = app.emit("capture-state-changed", false);
+    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    app.exit(0);
 }
 
 fn panic_disable_action(app: &AppHandle, action_sequence: u64) {
@@ -272,6 +466,8 @@ fn panic_disable_action(app: &AppHandle, action_sequence: u64) {
     state
         .last_panic_action
         .fetch_max(action_sequence, Ordering::SeqCst);
+    state.capture_desired.store(false, Ordering::SeqCst);
+    state.recovery_generation.fetch_add(1, Ordering::SeqCst);
     // Visible privacy state clears before potentially contended native teardown.
     let _ = app.emit("capture-state-changed", false);
     let _ = app.emit("protected-content-changed", false);
@@ -289,11 +485,87 @@ fn panic_disable_action(app: &AppHandle, action_sequence: u64) {
     let _ = app.emit("panic-disabled", ());
 }
 
+fn spawn_first_frame_gate(
+    app: AppHandle,
+    generation: u64,
+    first_frame_seen: Arc<AtomicBool>,
+    failure_reported: Arc<AtomicBool>,
+    startup_gate: Arc<Mutex<()>>,
+    is_recovery: bool,
+) {
+    std::thread::spawn(move || {
+        let polls = FIRST_FRAME_TIMEOUT_MS / 10;
+        for _ in 0..polls {
+            if first_frame_seen.load(Ordering::Acquire) {
+                let _failure_guard = startup_gate.lock();
+                let state = app.state::<AppState>();
+                let _lifecycle_guard = state.capture_lifecycle.lock();
+                if !failure_reported.load(Ordering::SeqCst)
+                    && state.capture_generation.load(Ordering::SeqCst) == generation
+                    && state.capture_desired.load(Ordering::SeqCst)
+                    && state.suspension_reasons.load(Ordering::SeqCst) == 0
+                    && state.capture.lock().is_some()
+                {
+                    if let Some(window) = app.get_webview_window("render") {
+                        let _ = window.show();
+                    }
+                    let _ = app.emit("protected-content-changed", false);
+                    let _ = app.emit("capture-state-changed", true);
+                    if is_recovery {
+                        let _ = app.emit("capture-recovery-succeeded", ());
+                        spawn_recovery_stability_reset(app.clone(), generation);
+                    }
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let _failure_guard = startup_gate.lock();
+        let state = app.state::<AppState>();
+        let lifecycle_guard = state.capture_lifecycle.lock();
+        if failure_reported.load(Ordering::SeqCst)
+            || state.capture_generation.load(Ordering::SeqCst) != generation
+        {
+            return;
+        }
+        state.capture_generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(session) = state.capture.lock().take() {
+            session.stop();
+        }
+        let should_recover = state.capture_desired.load(Ordering::SeqCst)
+            && state.suspension_reasons.load(Ordering::SeqCst) == 0;
+        drop(lifecycle_guard);
+        let _ = app.emit("capture-state-changed", false);
+        let _ = app.emit(
+            "capture-runtime-error",
+            "capture started but produced no valid frame within 3 seconds",
+        );
+        if should_recover && !is_recovery {
+            schedule_capture_recovery(app);
+        }
+    });
+}
+
+fn spawn_recovery_stability_reset(app: AppHandle, generation: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(10));
+        let state = app.state::<AppState>();
+        let _lifecycle_guard = state.capture_lifecycle.lock();
+        if state.capture_generation.load(Ordering::SeqCst) == generation
+            && state.capture_desired.load(Ordering::SeqCst)
+            && state.capture.lock().is_some()
+        {
+            state.recovery_cycles.store(0, Ordering::SeqCst);
+        }
+    });
+}
+
 fn spawn_monitor_geometry_watcher(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
         let state = app.state::<AppState>();
-        let _lifecycle_guard = state.capture_lifecycle.lock();
+        let lifecycle_guard = state.capture_lifecycle.lock();
         if state.capture.lock().is_none() {
             continue;
         }
@@ -317,13 +589,36 @@ fn spawn_monitor_geometry_watcher(app: AppHandle) {
         if let Some(session) = state.capture.lock().take() {
             session.stop();
         }
+        let unstable_exhausted = state
+            .recovery_cycles
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1)
+            >= 4;
+        if unstable_exhausted {
+            state.capture_desired.store(false, Ordering::SeqCst);
+            state.recovery_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        drop(lifecycle_guard);
         if let Some(window) = app.get_webview_window("render") {
             let _ = window.hide();
         }
         let _ = app.emit("capture-state-changed", false);
         let _ = app.emit("protected-content-changed", false);
         let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
-        let _ = app.emit("capture-runtime-error", stop_reason);
+        let _ = app.emit(
+            "capture-runtime-error",
+            if unstable_exhausted {
+                "capture remained unstable after four display recovery cycles"
+            } else {
+                stop_reason
+            },
+        );
+        if !unstable_exhausted
+            && state.capture_desired.load(Ordering::SeqCst)
+            && state.suspension_reasons.load(Ordering::SeqCst) == 0
+        {
+            schedule_capture_recovery(app.clone());
+        }
     });
 }
 
@@ -366,6 +661,11 @@ fn get_capabilities(
     profile.click_through_overlay = state.click_through_available.load(Ordering::SeqCst);
     profile.capture_exclusion = state.capture_exclusion_available.load(Ordering::SeqCst);
     profile.global_hotkeys = state.global_hotkeys_available.load(Ordering::SeqCst);
+    if !state.lifecycle_observer_available.load(Ordering::SeqCst) {
+        profile.limitations.push(
+            "power/session lifecycle observation is unavailable; capture is disabled".into(),
+        );
+    }
     profile.validate().map_err(str::to_string)?;
     Ok(profile)
 }
@@ -411,13 +711,23 @@ fn start_capture(
     action_sequence: u64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    start_capture_inner(monitor_id, state.inner(), Some(action_sequence))
+    let result = start_capture_inner(
+        monitor_id,
+        state.inner(),
+        Some(action_sequence),
+        None,
+    );
+    if result.is_err() && state.capture_desired.load(Ordering::SeqCst) {
+        schedule_capture_recovery(state.app.clone());
+    }
+    result
 }
 
 fn start_capture_inner(
     monitor_id: String,
     state: &AppState,
     action_sequence: Option<u64>,
+    recovery_token: Option<u64>,
 ) -> Result<(), String> {
     let monitor_hmonitor = monitor_id
         .parse::<usize>()
@@ -427,18 +737,51 @@ fn start_capture_inner(
     // and publication share one lock, so concurrent transitions cannot split
     // geometry or resurrect a pre-panic action.
     let _lifecycle_guard = state.capture_lifecycle.lock();
+    if state.shutting_down.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     if let Some(sequence) = action_sequence {
-        if !action_is_newer_than_panic(
+        if !action_is_newer_than_barriers(
             sequence,
             state.last_panic_action.load(Ordering::SeqCst),
+            state.last_stop_action.load(Ordering::SeqCst),
+            state.shutting_down.load(Ordering::SeqCst),
         ) {
             return Ok(());
         }
+    }
+    if let Some(token) = recovery_token {
+        if state.recovery_generation.load(Ordering::SeqCst) != token
+            || !state.capture_desired.load(Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+    }
+    if !state.lifecycle_observer_available.load(Ordering::SeqCst) {
+        return Err("Windows power/session lifecycle observation is unavailable".into());
     }
     let selected = enumerate_monitors()
         .into_iter()
         .find(|monitor| monitor.handle.0 as usize == monitor_hmonitor)
         .ok_or_else(|| "selected monitor is no longer available".to_string())?;
+    let intent_token = if let Some(token) = recovery_token {
+        token
+    } else {
+        let token = state
+            .recovery_generation
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        state.recovery_cycles.store(0, Ordering::SeqCst);
+        state.capture_desired.store(true, Ordering::SeqCst);
+        token
+    };
+    state
+        .selected_monitor
+        .store(monitor_hmonitor, Ordering::SeqCst);
+    *state.selected_monitor_name.lock() = Some(selected.name.clone());
+    if state.suspension_reasons.load(Ordering::SeqCst) != 0 {
+        return Ok(());
+    }
     let generation = state
         .capture_generation
         .fetch_add(1, Ordering::SeqCst)
@@ -456,9 +799,6 @@ fn start_capture_inner(
         }
         return Err(error.to_string());
     }
-    state
-        .selected_monitor
-        .store(monitor_hmonitor, Ordering::SeqCst);
     let app = state.app.clone();
     let regions_arc = state.regions.clone();
     let inpainter_arc = state.inpainter.clone();
@@ -534,6 +874,7 @@ fn start_capture_inner(
     let capture_lifecycle = state.capture_lifecycle.clone();
     let active_generation = state.capture_generation.clone();
     let failure_reported = Arc::new(AtomicBool::new(false));
+    let is_recovery_start = recovery_token.is_some();
     let failure_for_callback = failure_reported.clone();
     let startup_gate = Arc::new(Mutex::new(()));
     let startup_gate_for_callback = startup_gate.clone();
@@ -571,6 +912,8 @@ fn start_capture_inner(
                     guard.take()
                 };
                 if let Some(session) = failed {
+                    generation_counter.fetch_add(1, Ordering::SeqCst);
+                    let had_valid_frame = session.has_first_frame();
                     session.stop();
                     let _ = cleanup_app.emit("capture-state-changed", false);
                     let _ = cleanup_app.emit("protected-content-changed", false);
@@ -578,7 +921,36 @@ fn start_capture_inner(
                     if let Some(window) = cleanup_app.get_webview_window("render") {
                         let _ = window.hide();
                     }
+                    let recovery_state = cleanup_app.state::<AppState>();
+                    let unstable_exhausted = if is_recovery_start && had_valid_frame {
+                        recovery_state
+                            .recovery_cycles
+                            .fetch_add(1, Ordering::SeqCst)
+                            .saturating_add(1)
+                            >= 4
+                    } else {
+                        if !is_recovery_start {
+                            recovery_state.recovery_cycles.store(0, Ordering::SeqCst);
+                        }
+                        false
+                    };
+                    if unstable_exhausted {
+                        recovery_state.capture_desired.store(false, Ordering::SeqCst);
+                        recovery_state.recovery_generation.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let should_schedule = !unstable_exhausted
+                        && (!is_recovery_start || had_valid_frame)
+                        && recovery_state.capture_desired.load(Ordering::SeqCst)
+                        && recovery_state.suspension_reasons.load(Ordering::SeqCst) == 0;
                     drop(lifecycle_guard);
+                    if unstable_exhausted {
+                        let _ = cleanup_app.emit(
+                            "capture-runtime-error",
+                            "capture remained unstable after four recovery cycles",
+                        );
+                    } else if should_schedule {
+                        schedule_capture_recovery(cleanup_app.clone());
+                    }
                     return;
                 }
                 drop(lifecycle_guard);
@@ -597,39 +969,79 @@ fn start_capture_inner(
         }
     };
     let _startup_guard = startup_gate.lock();
+    let action_still_allowed = action_sequence.is_none_or(|sequence| {
+        action_is_newer_than_barriers(
+            sequence,
+            state.last_panic_action.load(Ordering::SeqCst),
+            state.last_stop_action.load(Ordering::SeqCst),
+            state.shutting_down.load(Ordering::SeqCst),
+        )
+    });
     if state.capture_generation.load(Ordering::SeqCst) != generation
+        || state.recovery_generation.load(Ordering::SeqCst) != intent_token
+        || !state.capture_desired.load(Ordering::SeqCst)
+        || state.suspension_reasons.load(Ordering::SeqCst) != 0
+        || !action_still_allowed
         || failure_reported.load(Ordering::SeqCst)
     {
         session.stop();
         let _ = state.app.emit("capture-state-changed", false);
         return Err("capture failed during startup".into());
     }
+    let first_frame_seen = session.first_frame_signal();
     *state.capture.lock() = Some(session);
-    if let Some(window) = state.app.get_webview_window("render") {
-        let _ = window.show();
-    }
-    let _ = state.app.emit("protected-content-changed", false);
-    let _ = state.app.emit("capture-state-changed", true);
+    let _ = state.app.emit("capture-state-changed", false);
+    spawn_first_frame_gate(
+        state.app.clone(),
+        generation,
+        first_frame_seen,
+        failure_reported.clone(),
+        startup_gate.clone(),
+        recovery_token.is_some(),
+    );
     Ok(())
 }
 
 #[tauri::command]
-fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
-    stop_capture_inner(state.inner())
+fn stop_capture(action_sequence: u64, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .last_stop_action
+        .fetch_max(action_sequence, Ordering::SeqCst);
+    cancel_capture_intent(state.inner());
+    Ok(())
+}
+
+fn cancel_capture_intent(state: &AppState) {
+    // Commit cancellation before waiting on potentially slow native startup,
+    // then repeat it under the lifecycle lock so an older start cannot restore
+    // intent while stop is queued.
+    state.capture_desired.store(false, Ordering::SeqCst);
+    state.recovery_generation.fetch_add(1, Ordering::SeqCst);
+    state.recovery_cycles.store(0, Ordering::SeqCst);
+    let _lifecycle_guard = state.capture_lifecycle.lock();
+    state.capture_desired.store(false, Ordering::SeqCst);
+    state.recovery_generation.fetch_add(1, Ordering::SeqCst);
+    stop_capture_locked(state);
 }
 
 fn stop_capture_inner(state: &AppState) -> Result<(), String> {
     let _lifecycle_guard = state.capture_lifecycle.lock();
+    stop_capture_locked(state);
+    Ok(())
+}
+
+fn stop_capture_locked(state: &AppState) {
     state.capture_generation.fetch_add(1, Ordering::SeqCst);
     let session = { state.capture.lock().take() };
-    if let Some(session) = session { session.stop(); }
+    if let Some(session) = session {
+        session.stop();
+    }
     let _ = state.app.emit("capture-state-changed", false);
     let _ = state.app.emit("protected-content-changed", false);
     let _ = state.app.emit("patches-updated", Vec::<PatchPayload>::new());
     if let Some(window) = state.app.get_webview_window("render") {
         let _ = window.hide();
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -835,6 +1247,6 @@ fn hide_window(label: String, app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn quit(app: AppHandle) {
-    app.exit(0);
+fn quit(state: State<'_, AppState>) {
+    quit_action(&state.app);
 }

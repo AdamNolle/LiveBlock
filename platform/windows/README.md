@@ -18,8 +18,10 @@ natively, including panic teardown. The render HWND is click-through, top-most,
 and `WDA_EXCLUDEFROMCAPTURE`. Deterministic tests cover queue, monitor ordering,
 and conservative unavailable/protected-black-frame policy. DirectML/CPU ORT
 providers are configured for CPU-uploaded tensors; zero-copy D3D texture
-inference, D3D11 compute inpainting, bounded automatic lifecycle recovery,
-packaging, and real-device GPU/DPI/multi-monitor certification remain open.
+inference and D3D11 compute inpainting remain open. Native power/session/display
+observation now preserves user intent and retries runtime recovery after
+0.5/1/2/4 seconds, but real sleep/lock/device-loss execution, packaging, and
+GPU/DPI/multi-monitor certification remain open.
 
 ## Prerequisites
 
@@ -79,8 +81,13 @@ data round-trips across platforms.
   game hooks, or anti-cheat bypass is attempted; game/anti-cheat real-device
   behavior remains uncertified.
 - Per-monitor geometry uses the manifest's `PerMonitorV2` declaration and
-  effective monitor DPI, but mixed-scale/hot-plug behavior still needs real
-  Windows certification.
+  effective monitor DPI. Display handles are refreshed by device name during
+  bounded recovery, but mixed-scale/hot-plug behavior still needs real Windows
+  certification.
+- Capture is not reported active and the renderer is not shown until the first
+  valid packed frame. A three-second first-frame timeout participates in bounded
+  recovery. Power/session observation failure disables capture rather than
+  silently running through lock.
 - Production packages require an authenticated promoted ONNX model and a
   nonempty embedded public-key ring. Source/CI builds use an explicit empty-ring
   override and are not distributable; release packages never train or download

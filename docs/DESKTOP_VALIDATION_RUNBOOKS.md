@@ -163,9 +163,9 @@ was selected.
 Test WGC consent/availability, denial, monitor removal during startup and active
 capture, orientation/resolution changes, primary changes, negative origins, and
 mixed 100/125/150/175/200% scaling. Repeat sleep/wake, display sleep, lock/unlock,
-and display-driver reset 10 times. Current automatic sleep/device recovery is
-not implemented; record the scenario as failed/blocked rather than restarting
-manually and calling it a pass. Verify click-through, top-most behavior, and
+and display-driver reset 10 times. Native lifecycle observation and bounded
+recovery are implemented but uncertified; record any failed or manually restarted
+scenario as failed/blocked rather than calling it a pass. Verify click-through, top-most behavior, and
 `WDA_EXCLUDEFROMCAPTURE` with an independent screenshot/capture tool. Panic must
 win against active inference, editor/label actions, and quit within 500 ms.
 

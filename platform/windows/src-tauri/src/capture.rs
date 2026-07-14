@@ -68,6 +68,7 @@ pub struct CaptureSession {
     frame_token: EventRegistrationToken,
     closed_token: EventRegistrationToken,
     stop_worker: Arc<AtomicBool>,
+    first_frame_seen: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     telemetry: Arc<CaptureTelemetry>,
 }
@@ -131,6 +132,7 @@ impl CaptureSession {
         let latest = Arc::new(ArcSwapOption::<FrameView>::from(None));
         let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
         let stop_worker = Arc::new(AtomicBool::new(false));
+        let first_frame_seen = Arc::new(AtomicBool::new(false));
         let (frame_sender, frame_receiver) = bounded::<FrameView>(1);
         let eviction_receiver = frame_receiver.clone();
         let worker_stop = stop_worker.clone();
@@ -172,6 +174,7 @@ impl CaptureSession {
         let failure_gate_clone = failure_gate.clone();
         let current_size = Arc::new(AtomicU64::new(pack_size(size.Width, size.Height)));
         let current_size_clone = current_size.clone();
+        let first_frame_for_callback = first_frame_seen.clone();
 
         let frame_token = pool.FrameArrived(&TypedEventHandler::new(
             move |sender: &Option<Direct3D11CaptureFramePool>, _: &Option<IInspectable>| {
@@ -192,6 +195,7 @@ impl CaptureSession {
 
                     let content_size = frame.ContentSize()?;
                     let view = process_frame(&device_clone, &context_clone, &frame)?;
+                    first_frame_for_callback.store(true, Ordering::Release);
                     latest_clone.store(Some(Arc::new(view.clone())));
 
                     let next_size = pack_size(content_size.Width, content_size.Height);
@@ -240,6 +244,7 @@ impl CaptureSession {
             frame_token,
             closed_token,
             stop_worker,
+            first_frame_seen,
             worker: Some(worker),
             telemetry,
         })
@@ -251,6 +256,14 @@ impl CaptureSession {
 
     pub fn telemetry(&self) -> CaptureTelemetrySnapshot {
         self.telemetry.snapshot()
+    }
+
+    pub fn first_frame_signal(&self) -> Arc<AtomicBool> {
+        self.first_frame_seen.clone()
+    }
+
+    pub fn has_first_frame(&self) -> bool {
+        self.first_frame_seen.load(Ordering::Acquire)
     }
 
     pub fn stop(mut self) {

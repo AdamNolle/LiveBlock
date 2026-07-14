@@ -45,6 +45,7 @@ $Resources = Join-Path $Root "platform\windows\src-tauri\resources"
 $DevelopmentKeyring = Join-Path $Resources "trusted-model-keys.json"
 $ArtifactStaging = Join-Path $Resources "liveblock-detector.onnx"
 $ManifestStaging = Join-Path $Resources "liveblock-detector.manifest.json"
+$RuntimeStaging = Join-Path $Resources "onnxruntime.dll"
 
 $stamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
 if (-not $OutputDir) { $OutputDir = Join-Path $Root "tools\runs\release-windows\$stamp" }
@@ -92,6 +93,7 @@ if (Test-Path -LiteralPath $OutputDir) {
 
 $originalKeyring = [IO.File]::ReadAllBytes($DevelopmentKeyring)
 $stagedProduction = $false
+$stagedRuntime = $false
 $oldOverride = $env:LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING
 try {
     if ($Mode -eq "Execute") {
@@ -122,8 +124,22 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "frontend build failed" }
     } finally { Pop-Location }
 
+    if (Test-Path -LiteralPath $RuntimeStaging) {
+        throw "Internal ONNX Runtime staging path already exists"
+    }
     Push-Location (Join-Path $Root "platform\windows\src-tauri")
-    try { & $Tauri build --bundles msi,nsis --ci } finally { Pop-Location }
+    try {
+        cargo build --release
+        if ($LASTEXITCODE -ne 0) { throw "Windows release runtime build failed" }
+        $runtimeSource = Join-Path $Root "platform\windows\target\x86_64-pc-windows-msvc\release\onnxruntime.dll"
+        $runtimeItem = Get-Item -LiteralPath $runtimeSource -Force -ErrorAction Stop
+        if ($runtimeItem.PSIsContainer -or $runtimeItem.LinkType) {
+            throw "Built onnxruntime.dll must be a regular non-symlink file"
+        }
+        Copy-Item -LiteralPath $runtimeSource -Destination $RuntimeStaging
+        $stagedRuntime = $true
+        & $Tauri build --bundles msi,nsis --ci
+    } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw "Tauri Windows bundle build failed" }
 
     $TargetRoot = Join-Path $Root "platform\windows\target"
@@ -217,6 +233,9 @@ try {
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutputDir "release-manifest.json") -Encoding utf8NoBOM
     Write-Host "Verified Windows package evidence: $OutputDir"
 } finally {
+    if ($stagedRuntime) {
+        Remove-Item -LiteralPath $RuntimeStaging -Force -ErrorAction SilentlyContinue
+    }
     if ($stagedProduction) {
         Remove-Item -LiteralPath $ArtifactStaging -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $ManifestStaging -Force -ErrorAction SilentlyContinue

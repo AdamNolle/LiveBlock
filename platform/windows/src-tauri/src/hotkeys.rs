@@ -9,12 +9,12 @@ use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
+    RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    RegisterClassExW, TranslateMessage, UnregisterHotKey, HWND_MESSAGE, MSG, WINDOW_EX_STYLE,
-    WM_HOTKEY, WNDCLASSEXW, WS_OVERLAPPED,
+    RegisterClassExW, TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WM_HOTKEY, WNDCLASSEXW,
+    WS_OVERLAPPED,
 };
 
 const HOTKEY_TOGGLE_CAPTURE: i32 = 1;

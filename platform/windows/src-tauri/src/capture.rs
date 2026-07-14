@@ -357,9 +357,10 @@ pub struct MonitorDescriptor {
 pub fn enumerate_monitors() -> Vec<MonitorDescriptor> {
     use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
-        EnumDisplayMonitors, GetMonitorInfoW, HDC, MONITORINFOEXW, MONITORINFOF_PRIMARY,
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, MONITORINFOEXW,
     };
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    use windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
 
     extern "system" fn cb(monitor: HMONITOR, _hdc: HDC, _rect: *mut RECT, lparam: LPARAM) -> BOOL {
         let acc = unsafe { &mut *(lparam.0 as *mut Vec<MonitorDescriptor>) };

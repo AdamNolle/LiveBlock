@@ -43,7 +43,17 @@ jobs:
       - name: Label and desktop adapter contract tests
         env:
           PYTHONPATH: tools
-        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence
+      - name: Explicit migration, installer, and update recovery gates
+        env:
+          PYTHONPATH: tools
+        run: |
+          cargo test --manifest-path core/Cargo.toml --workspace --lib migrat
+          cargo test --manifest-path core/Cargo.toml -p liveblock-config --lib model_manifest::tests::atomic_install
+          cargo test --manifest-path core/Cargo.toml -p liveblock-config --lib model_update::tests::
+          python -m unittest \
+            tools.test_model_distribution.ModelDistributionTests.test_install_cli_strips_canonical_signing_secret \
+            tools.test_model_distribution.ModelDistributionTests.test_signed_coreml_bundle_verifier_binds_compiled_artifact
       - name: Release profile stays inference-only
         run: cargo test --manifest-path core/Cargo.toml -p liveblock-config --lib --release build_profile_controls_training_runtime
       - name: Parse published JSON Schemas
@@ -54,9 +64,52 @@ jobs:
           python -m json.tool contracts/model-manifest.schema.json >/dev/null
           python -m json.tool contracts/model-keyring.schema.json >/dev/null
           python -m json.tool contracts/model-update-state.schema.json >/dev/null
+          python -m json.tool contracts/release-artifact-inventory.schema.json >/dev/null
       - name: Shared frontend build
         working-directory: platform/_shared-frontend
         run: npm ci && npm run build
+      - name: Generate dependency SBOM, license report, and webview inventory
+        run: |
+          mkdir -p tools/runs/ci-release-evidence
+          cargo metadata --manifest-path core/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/core-metadata.json
+          cargo metadata --manifest-path platform/windows/src-tauri/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/windows-metadata.json
+          cargo metadata --manifest-path platform/linux/src-tauri/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/linux-metadata.json
+          python tools/release_evidence.py sbom \
+            --cargo-metadata tools/runs/ci-release-evidence/core-metadata.json \
+            --cargo-metadata tools/runs/ci-release-evidence/windows-metadata.json \
+            --cargo-metadata tools/runs/ci-release-evidence/linux-metadata.json \
+            --npm-lock platform/_shared-frontend/package-lock.json \
+            --output tools/runs/ci-release-evidence/liveblock.cdx.json \
+            --license-report tools/runs/ci-release-evidence/dependency-licenses.json \
+            --commit "$GITHUB_SHA"
+          python tools/release_evidence.py inventory \
+            --root platform/_shared-frontend/dist \
+            --output tools/runs/ci-release-evidence/webview-inventory.json \
+            --platform shared \
+            --artifact-type webview-payload-build-only \
+            --commit "$GITHUB_SHA" \
+            --require control-panel.html --require labeling.html \
+            --require region-editor.html --require render-layer.html --require training.html
+          python tools/release_evidence.py verify \
+            --root platform/_shared-frontend/dist \
+            --manifest tools/runs/ci-release-evidence/webview-inventory.json
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -cf tools/runs/ci-release-evidence/webview-payload.tar \
+            -C platform/_shared-frontend/dist .
+          sha256sum tools/runs/ci-release-evidence/webview-payload.tar \
+            > tools/runs/ci-release-evidence/webview-payload.tar.sha256
+      - name: Preserve release dependency and integrity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dependency-integrity-evidence
+          path: |
+            tools/runs/ci-release-evidence/liveblock.cdx.json
+            tools/runs/ci-release-evidence/dependency-licenses.json
+            tools/runs/ci-release-evidence/webview-inventory.json
+            tools/runs/ci-release-evidence/webview-payload.tar
+            tools/runs/ci-release-evidence/webview-payload.tar.sha256
+          if-no-files-found: error
 
   macos:
     name: macOS 26 build and tests
@@ -105,7 +158,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-xcresult
-          path: tools/runs/ci-macos-derived/Logs/Test/*.xcresult
+          path: |
+            tools/runs/ci-macos-derived/Logs/Test/*.xcresult
+            tools/runs/ci-macos-keyring-gate.log
           if-no-files-found: warn
 
   windows:

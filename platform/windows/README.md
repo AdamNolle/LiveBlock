@@ -10,15 +10,19 @@ Linux port.
 
 **Experimental, not release-ready.** The Windows.Graphics.Capture path acquires
 BGRA monitor frames, handles size changes and item closure, retains the newest
-labeling frame, and feeds a capacity-one worker so slow CPU inference/inpainting
-drops stale work instead of blocking frame delivery. The control panel exposes
+labeling frame, and copies only the newest frame-pool surface into an
+application-owned texture. Staging/Map, inference, and inpainting run on the
+capacity-one worker so GPU readback does not block the WGC callback. The control panel exposes
 explicit physical-monitor selection; render/editor windows follow negative
 origins and PerMonitorV2 pixel geometry. Global hotkeys and tray actions dispatch
 natively, including panic teardown. The render HWND is click-through, top-most,
 and `WDA_EXCLUDEFROMCAPTURE`. Deterministic tests cover queue, monitor ordering,
 and conservative unavailable/protected-black-frame policy. DirectML/CPU ORT
-providers are configured for CPU-uploaded tensors; zero-copy D3D texture
-inference and D3D11 compute inpainting remain open. Native power/session/display
+providers remain configured for CPU-uploaded tensors; zero-copy D3D texture
+inference is still open. Mirror-blend patches now dispatch through a bounded,
+isolated D3D11 compute device when available, then read back for PNG/webview
+composition; setup, dispatch, or timeout failure permanently falls back to CPU.
+Native power/session/display
 observation now preserves user intent and retries runtime recovery after
 0.5/1/2/4 seconds, but real sleep/lock/device-loss execution, packaging, and
 GPU/DPI/multi-monitor certification remain open.

@@ -450,8 +450,19 @@ fn toggle_capture_action(app: &AppHandle, action_sequence: u64) {
     }
 }
 
+fn cancel_detector_run(state: &AppState) {
+    // Never wait for the detector mutex during panic/stop. RunOptions is held
+    // separately so ORT can be asked to terminate an in-flight DirectML/CPU run.
+    if let Some(run_slot) = state.detector_run.try_lock() {
+        if let Some(run_options) = run_slot.as_ref() {
+            let _ = run_options.terminate();
+        }
+    }
+}
+
 fn quit_action(app: &AppHandle) {
     let state = app.state::<AppState>();
+    cancel_detector_run(state.inner());
     state.shutting_down.store(true, Ordering::SeqCst);
     state.capture_desired.store(false, Ordering::SeqCst);
     state.recovery_generation.fetch_add(1, Ordering::SeqCst);
@@ -463,6 +474,7 @@ fn quit_action(app: &AppHandle) {
 
 fn panic_disable_action(app: &AppHandle, action_sequence: u64) {
     let state = app.state::<AppState>();
+    cancel_detector_run(state.inner());
     state
         .last_panic_action
         .fetch_max(action_sequence, Ordering::SeqCst);
@@ -530,6 +542,7 @@ fn spawn_first_frame_gate(
             return;
         }
         state.capture_generation.fetch_add(1, Ordering::SeqCst);
+        cancel_detector_run(state.inner());
         if let Some(session) = state.capture.lock().take() {
             session.stop();
         }
@@ -586,6 +599,7 @@ fn spawn_monitor_geometry_watcher(app: AppHandle) {
         };
 
         state.capture_generation.fetch_add(1, Ordering::SeqCst);
+        cancel_detector_run(state.inner());
         if let Some(session) = state.capture.lock().take() {
             session.stop();
         }
@@ -666,6 +680,10 @@ fn get_capabilities(
             "power/session lifecycle observation is unavailable; capture is disabled".into(),
         );
     }
+    profile.limitations.push(format!(
+        "inpainting backend: {}; CPU-uploaded D3D11 patches are read back for webview composition",
+        state.inpainter.lock().backend_status()
+    ));
     profile.validate().map_err(str::to_string)?;
     Ok(profile)
 }
@@ -786,6 +804,7 @@ fn start_capture_inner(
         .capture_generation
         .fetch_add(1, Ordering::SeqCst)
         .wrapping_add(1);
+    cancel_detector_run(state);
     let existing = { state.capture.lock().take() };
     if let Some(existing) = existing {
         existing.stop();
@@ -803,6 +822,7 @@ fn start_capture_inner(
     let regions_arc = state.regions.clone();
     let inpainter_arc = state.inpainter.clone();
     let detector_arc = state.detector.clone();
+    let detector_run = state.detector_run.clone();
     let detection_on = state.detection_enabled.clone();
     let last_detection: Arc<Mutex<(Instant, Vec<DetBox>)>> =
         Arc::new(Mutex::new((Instant::now() - Duration::from_secs(1), Vec::new())));
@@ -835,11 +855,28 @@ fn start_capture_inner(
         // Detection every fourth processed frame. CaptureSession's capacity-one
         // queue keeps this CPU/ORT work off the WGC callback and drops stale work.
         if detection_on.load(Ordering::Relaxed) && frame_number % 4 == 0 {
-            if let Some(det) = detector_arc.lock().as_mut() {
-                if let Ok(boxes) = det.detect(&frame.bytes, frame.width, frame.height) {
+            let mut detector = detector_arc.lock();
+            if let (Some(det), Ok(options)) = (detector.as_mut(), ort::RunOptions::new()) {
+                let options = Arc::new(options);
+                *detector_run.lock() = Some(options.clone());
+                if frame_generation.load(Ordering::SeqCst) != generation {
+                    let _ = options.terminate();
+                } else if let Ok(boxes) =
+                    det.detect(&frame.bytes, frame.width, frame.height, &options)
+                {
                     *last_detection.lock() = (Instant::now(), boxes);
                 }
+                let mut active_run = detector_run.lock();
+                if active_run
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &options))
+                {
+                    *active_run = None;
+                }
             }
+        }
+        if frame_generation.load(Ordering::SeqCst) != generation {
+            return;
         }
 
         // Build region list = user regions ∪ recent detections.
@@ -857,11 +894,14 @@ fn start_capture_inner(
             }
         }
         drop(last);
+        if frame_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
 
         // Inpaint.
         let payloads: Vec<PatchPayload> = inpainter_arc
             .lock()
-            .render(&frame.bytes, frame.width, frame.height, &regions)
+            .render_frame(frame, &regions)
             .unwrap_or_default();
 
         if frame_generation.load(Ordering::SeqCst) == generation {
@@ -913,6 +953,8 @@ fn start_capture_inner(
                 };
                 if let Some(session) = failed {
                     generation_counter.fetch_add(1, Ordering::SeqCst);
+                    let recovery_state = cleanup_app.state::<AppState>();
+                    cancel_detector_run(recovery_state.inner());
                     let had_valid_frame = session.has_first_frame();
                     session.stop();
                     let _ = cleanup_app.emit("capture-state-changed", false);
@@ -921,7 +963,6 @@ fn start_capture_inner(
                     if let Some(window) = cleanup_app.get_webview_window("render") {
                         let _ = window.hide();
                     }
-                    let recovery_state = cleanup_app.state::<AppState>();
                     let unstable_exhausted = if is_recovery_start && had_valid_frame {
                         recovery_state
                             .recovery_cycles
@@ -1031,7 +1072,10 @@ fn stop_capture_inner(state: &AppState) -> Result<(), String> {
 }
 
 fn stop_capture_locked(state: &AppState) {
+    // Invalidate first. If a frame publishes a new RunOptions after the
+    // nonblocking cancellation attempt, its generation recheck self-terminates.
     state.capture_generation.fetch_add(1, Ordering::SeqCst);
+    cancel_detector_run(state);
     let session = { state.capture.lock().take() };
     if let Some(session) = session {
         session.stop();

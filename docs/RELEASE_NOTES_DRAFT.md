@@ -46,9 +46,10 @@ No current platform profile reports `releaseReady: true`.
 
 ### Windows
 
-- Windows Graphics Capture monitor frames, capacity-one processing, latest local
-  labeling frame, shared ONNX processing, CPU mirror inpainting, telemetry, and
-  conservative possible-protected/unavailable black-frame handling.
+- Windows Graphics Capture monitor frames, application-owned texture handoff,
+  worker-side staging/Map, capacity-one processing, latest local labeling frame,
+  shared ONNX processing, bounded D3D11 mirror inpainting with CPU fallback,
+  telemetry, and conservative possible-protected/unavailable black-frame handling.
 - Explicit physical-monitor selection, PerMonitorV2 physical geometry including
   negative origins, active topology refresh, and fail-closed monitor removal.
 - Runtime-attested global hotkeys, sequenced panic behavior, tray controls, and a
@@ -92,8 +93,10 @@ No current platform profile reports `releaseReady: true`.
 
 - Captured D3D textures are copied to CPU memory before ORT preprocessing.
   Zero-copy DirectML texture inference is not implemented.
-- D3D11 compute inpainting/compositing and WARP fallback are not implemented;
-  current inpainting and patch encoding are CPU paths.
+- D3D11 compute inpainting uses an isolated CPU-uploaded device and reads raw
+  patches back for PNG/webview composition. It is not zero-copy, production does
+  not select WARP, and real NVIDIA/AMD/Intel execution remains uncertified; a
+  setup/dispatch/readback error or 300 ms caller timeout permanently uses CPU.
 - Native power/session/display observation and 0.5/1/2/4-second bounded recovery
   are implemented, including first-frame gating. Real sleep, lock, hot-plug,
   driver-reset, and observer-failure execution remains uncertified.

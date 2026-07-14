@@ -297,7 +297,7 @@ jobs:
             test -f "$root/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so"
             test ! -L "$root/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so"
             test -s "$root/usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt"
-            test -s "$root/usr/lib/LiveBlock/resources/onnxruntime/LICENSE.txt"
+            test -s "$root/usr/lib/LiveBlock/resources/onnxruntime/LICENSE.onnxruntime.txt"
             test -f "$root/usr/lib/LiveBlock/resources/trusted-model-keys.json"
           done
           mkdir -p "$evidence/appimage-payload/usr/bin" "$evidence/appimage-payload/usr/lib/LiveBlock"
@@ -320,7 +320,7 @@ jobs:
               --require usr/bin/liveblock-linux \
               --require usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so \
               --require usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt \
-              --require usr/lib/LiveBlock/resources/onnxruntime/LICENSE.txt \
+              --require usr/lib/LiveBlock/resources/onnxruntime/LICENSE.onnxruntime.txt \
               --require usr/lib/LiveBlock/resources/onnxruntime/STAGING-MANIFEST.json \
               --require usr/lib/LiveBlock/resources/trusted-model-keys.json
             python3 tools/release_evidence.py verify \

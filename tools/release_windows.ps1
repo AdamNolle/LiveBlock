@@ -17,6 +17,25 @@ function Require-Command([string]$Name) {
     }
 }
 
+function Wait-RegularFileStable([string]$Path) {
+    $previous = $null
+    $stableSamples = 0
+    for ($attempt = 0; $attempt -lt 15; $attempt++) {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or $item.LinkType) { throw "Package output must be a regular non-symlink file: $Path" }
+        $fingerprint = "$($item.Length):$($item.LastWriteTimeUtc.Ticks)"
+        if ($fingerprint -eq $previous) {
+            $stableSamples++
+            if ($stableSamples -ge 2) { return }
+        } else {
+            $stableSamples = 0
+            $previous = $fingerprint
+        }
+        Start-Sleep -Seconds 1
+    }
+    throw "Package output did not become stable within 15 seconds: $Path"
+}
+
 function Find-SignTool {
     if ($env:LB_WINDOWS_SIGNTOOL) {
         $candidate = Get-Item -LiteralPath $env:LB_WINDOWS_SIGNTOOL -ErrorAction Stop
@@ -196,6 +215,7 @@ try {
         }
     }
 
+    foreach ($package in $copied) { Wait-RegularFileStable $package.FullName }
     $hashLines = foreach ($package in ($copied | Sort-Object Name)) {
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $package.FullName).Hash.ToLowerInvariant()
         "$hash  $($package.Name)"

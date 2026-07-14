@@ -44,6 +44,7 @@ parking_lot = "0.12"
 once_cell = "1.19"
 anyhow = "1"
 async-trait = "0.1"
+futures-util = "0.3"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -69,6 +70,11 @@ pipewire = "0.8"
 
 # X11 path
 x11rb = { version = "0.13", features = ["composite", "shape", "shm", "xfixes", "xinerama"] }
+
+# GTK/X11 window handles and Wayland layer-shell integration.
+gtk = "0.18"
+gdkx11 = "0.18"
+gtk-layer-shell = { version = "0.8.2", features = ["v0_6"] }
 
 # Wayland layer-shell + raw clients
 smithay-client-toolkit = "0.19"

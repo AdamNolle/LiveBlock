@@ -6,12 +6,13 @@
 //!     → "GNOME mode": visible Tauri window, always-on-top, movable.
 //!   - X11 → override-redirect window with an empty input shape (xfixes).
 
-pub mod wayland_layer_shell;
 pub mod wayland_gnome;
+pub mod wayland_layer_shell;
 pub mod x11;
 
 use crate::session::{detect_compositor, detect_session, supports_layer_shell, SessionType};
 use anyhow::Result;
+use tauri::AppHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayStrategy {
@@ -33,10 +34,10 @@ pub fn pick_strategy() -> OverlayStrategy {
     }
 }
 
-pub fn install_click_through(strategy: OverlayStrategy) -> Result<()> {
+pub fn install_click_through(strategy: OverlayStrategy, app: &AppHandle) -> Result<()> {
     match strategy {
-        OverlayStrategy::WaylandLayerShell => wayland_layer_shell::install(),
-        OverlayStrategy::WaylandGnomeMode => wayland_gnome::install(),
-        OverlayStrategy::X11OverrideRedirect => x11::install(),
+        OverlayStrategy::WaylandLayerShell => wayland_layer_shell::install(app),
+        OverlayStrategy::WaylandGnomeMode => wayland_gnome::install(app),
+        OverlayStrategy::X11OverrideRedirect => x11::install(app),
     }
 }

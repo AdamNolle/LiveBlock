@@ -36,7 +36,9 @@ use crate::session::detect_session;
 use crate::state::{AppState, CaptureRuntime, CaptureTelemetrySnapshot};
 
 #[tauri::command]
-fn get_capabilities() -> Result<liveblock_config::DesktopCapabilityProfile, String> {
+fn get_capabilities(
+    state: State<'_, Arc<AppState>>,
+) -> Result<liveblock_config::DesktopCapabilityProfile, String> {
     use liveblock_config::{DesktopCapabilityProfile, DesktopPlatform};
     let platform = match detect_session() {
         session::SessionType::X11 => DesktopPlatform::LinuxX11,
@@ -50,7 +52,15 @@ fn get_capabilities() -> Result<liveblock_config::DesktopCapabilityProfile, Stri
         },
         session::SessionType::Unknown => return Err("unknown desktop session".into()),
     };
-    let profile = DesktopCapabilityProfile::linux(platform);
+    let mut profile = DesktopCapabilityProfile::linux(platform);
+    if !state.hotkeys_initialized.load(Ordering::SeqCst)
+        || !state.hotkeys_available.load(Ordering::SeqCst)
+    {
+        profile.global_hotkeys = false;
+        profile
+            .limitations
+            .push("global shortcuts are unavailable in this runtime session".into());
+    }
     profile.validate().map_err(str::to_string)?;
     Ok(profile)
 }
@@ -62,6 +72,14 @@ async fn start_capture(
     monitor_id: String,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    start_capture_inner(monitor_id, app, state.inner().clone()).await
+}
+
+async fn start_capture_inner(
+    monitor_id: String,
+    app: AppHandle,
+    state: Arc<AppState>,
 ) -> Result<(), String> {
     let expected_id = match detect_session() {
         session::SessionType::Wayland => "portal-selection",
@@ -82,7 +100,7 @@ async fn start_capture(
     state.capture_running.store(false, Ordering::SeqCst);
     let stop_requested = Arc::new(AtomicBool::new(false));
     let task_stop = stop_requested.clone();
-    let task_state = state.inner().clone();
+    let task_state = state.clone();
     let task_app = app.clone();
     let task = tokio::spawn(async move {
         run_capture_task(task_stop, task_state, task_app).await;
@@ -99,19 +117,28 @@ async fn start_capture(
 
 #[tauri::command]
 async fn stop_capture(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    stop_capture_inner(app, state.inner().clone()).await
+}
+
+async fn stop_capture_inner(app: AppHandle, state: Arc<AppState>) -> Result<(), String> {
     // Hold the lifecycle lock through join and global-state cleanup so a new
     // start cannot be overwritten by the previous generation's teardown.
     let mut lifecycle = state.capture.lock().await;
     let runtime = lifecycle.take();
-    if let Some(runtime) = runtime {
+    if let Some(runtime) = &runtime {
         runtime.stop_requested.store(true, Ordering::Release);
-        let _ = runtime.task.await;
     }
     state.capture_running.store(false, Ordering::SeqCst);
     state.latest_frame.store(None);
     *state.current_patches.lock() = Vec::new();
     let _ = app.emit("capture-state-changed", false);
     let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    if let Some(window) = app.get_webview_window("render") {
+        let _ = window.hide();
+    }
+    if let Some(runtime) = runtime {
+        let _ = runtime.task.await;
+    }
     Ok(())
 }
 
@@ -205,6 +232,9 @@ async fn run_capture_loop(
         if !announced_running {
             announced_running = true;
             state.capture_running.store(true, Ordering::SeqCst);
+            if let Some(window) = app.get_webview_window("render") {
+                let _ = window.show();
+            }
             let _ = app.emit("capture-state-changed", true);
         }
         state.latest_frame.store(Some(Arc::new(frame.clone())));
@@ -283,6 +313,9 @@ async fn run_capture_loop(
     state.latest_frame.store(None);
     *state.current_patches.lock() = Vec::new();
     let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    if let Some(window) = app.get_webview_window("render") {
+        let _ = window.hide();
+    }
     let _ = app.emit("capture-state-changed", false);
     if let Some(message) = failure {
         tracing::error!("Linux capture stopped: {message}");
@@ -343,6 +376,10 @@ fn clear_regions(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 fn capture_screenshot_for_labeling(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<PathBuf>, String> {
+    capture_screenshot_inner(state.inner().as_ref())
+}
+
+fn capture_screenshot_inner(state: &AppState) -> Result<Option<PathBuf>, String> {
     let Some(frame) = state.latest_frame.load_full() else {
         return Ok(None);
     };
@@ -442,6 +479,60 @@ fn discard_screenshot(path: PathBuf) -> Result<(), String> {
     std::fs::rename(&path, &dst).map_err(|e| e.to_string())
 }
 
+async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: Arc<AppState>) {
+    match action {
+        hotkeys::HotkeyAction::ToggleCapture => {
+            let has_runtime = state.capture.lock().await.is_some();
+            if has_runtime {
+                let _ = stop_capture_inner(app, state).await;
+            } else {
+                let target = match detect_session() {
+                    session::SessionType::Wayland => Some("portal-selection"),
+                    session::SessionType::X11 => Some("x11-root"),
+                    session::SessionType::Unknown => None,
+                };
+                if let Some(target) = target {
+                    if let Err(error) = start_capture_inner(target.into(), app.clone(), state).await {
+                        let _ = app.emit("capture-runtime-error", error);
+                    }
+                }
+            }
+        }
+        hotkeys::HotkeyAction::ToggleEditor => {
+            if let Some(window) = app.get_webview_window("editor") {
+                if window.is_visible().unwrap_or(false) {
+                    let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }
+        hotkeys::HotkeyAction::CaptureForLabeling => {
+            if capture_screenshot_inner(state.as_ref()).ok().flatten().is_some() {
+                if let Some(window) = app.get_webview_window("labeling") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }
+        hotkeys::HotkeyAction::PanicDisable => {
+            // Clear capture/overlay state before awaiting source teardown.
+            let _ = stop_capture_inner(app.clone(), state).await;
+            for label in ["editor", "render"] {
+                if let Some(window) = app.get_webview_window(label) {
+                    let _ = window.hide();
+                }
+            }
+            if let Some(window) = app.get_webview_window("control") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit("panic-disabled", ());
+        }
+    }
+}
+
 // ---------- Training pipeline ----------
 
 #[tauri::command]
@@ -522,7 +613,26 @@ fn main() {
             if let (Some(detector), Some(state)) = (detector, app.try_state::<Arc<AppState>>()) {
                 *state.detector.lock() = Some(detector);
             }
-            if let Err(e) = overlay::install_click_through(overlay::pick_strategy()) {
+
+            let (hotkey_tx, hotkey_rx) = crossbeam_channel::unbounded();
+            let hotkey_app = app.handle().clone();
+            let hotkey_state = app.state::<Arc<AppState>>().inner().clone();
+            hotkeys::spawn(hotkey_app.clone(), hotkey_tx, hotkey_state.clone());
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match hotkey_rx.try_recv() {
+                        Ok(action) => {
+                            dispatch_hotkey(action, hotkey_app.clone(), hotkey_state.clone()).await;
+                        }
+                        Err(crossbeam_channel::TryRecvError::Empty) => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                    }
+                }
+            });
+
+            if let Err(e) = overlay::install_click_through(overlay::pick_strategy(), app.handle()) {
                 tracing::warn!("overlay install failed: {e}");
             }
             for label in ["editor", "render", "labeling", "training"] {

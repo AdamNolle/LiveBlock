@@ -61,14 +61,21 @@
         <div class="div"></div>
         <button class="cancel" id="cancelBtn">×</button>
       </div>
-      <div class="hint">CLICK & DRAG ANY REGION  ·  Ctrl+Shift+B HIDES THIS TOOL</div>
+      <div class="hint" id="editorHint">CLICK & DRAG ANY REGION  ·  Ctrl+Shift+B HIDES THIS TOOL</div>
     </div>
 
     <script type="module">
       import { logo } from "./primitives.ts";
-      import { lb } from "./ipc.ts";
+      import { events, lb } from "./ipc.ts";
 
       document.getElementById("logo").appendChild(logo({ size: 32, radius: 8 }));
+      const setHotkeyHint = (available) => {
+        document.getElementById("editorHint").textContent = available
+          ? "CLICK & DRAG ANY REGION  ·  Ctrl+Shift+B HIDES THIS TOOL"
+          : "CLICK & DRAG ANY REGION  ·  Use × to close (global hotkeys unavailable)";
+      };
+      lb.getCapabilities().then((capabilities) => setHotkeyHint(capabilities.globalHotkeys)).catch(() => {});
+      events.onHotkeyAvailability(setHotkeyHint);
       document.getElementById("cancelBtn").addEventListener("click", () => lb.hideWindow("editor"));
       document.querySelectorAll("#sizeSeg .opt").forEach(b => {
         b.addEventListener("click", () => {

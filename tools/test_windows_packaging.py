@@ -50,6 +50,7 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn("Remove-Item -LiteralPath $ArtifactStaging", SCRIPT)
         self.assertIn('$RuntimeStaging = Join-Path $Resources "onnxruntime.dll"', SCRIPT)
         self.assertIn("[IO.File]::WriteAllBytes($RuntimeStaging", SCRIPT)
+        self.assertIn('"ort.pyke.io\\dfbin"', SCRIPT)
         self.assertIn("Remove-Item -LiteralPath $RuntimeStaging", SCRIPT)
         self.assertIn("Do not distribute these installers", DOC)
         self.assertIn("MSIX creation", DOC)

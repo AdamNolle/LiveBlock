@@ -17,6 +17,11 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.tauri = json.loads(
             (ROOT / "platform/linux/src-tauri/tauri.conf.json").read_text()
         )
+        self.app_module = next(
+            module
+            for module in self.flatpak["modules"]
+            if module["name"] == "liveblock-linux"
+        )
         self.workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.packaging_docs = (ROOT / "docs/LINUX_PACKAGING.md").read_text()
 
@@ -32,7 +37,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertFalse(any("FileChooser" in value or "Notifications" in value for value in finish))
 
     def test_flatpak_uses_real_workspace_paths_and_resource_directory(self):
-        commands = "\n".join(self.flatpak["modules"][0]["build-commands"])
+        commands = "\n".join(self.app_module["build-commands"])
         self.assertIn("cd platform/_shared-frontend", commands)
         self.assertIn("cd platform/linux/src-tauri", commands)
         self.assertIn("platform/linux/target/release/liveblock-linux", commands)
@@ -41,7 +46,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertEqual(self.flatpak["command"], "liveblock-linux")
 
     def test_flatpak_runtime_sources_match_pinned_staging_contract(self):
-        sources = self.flatpak["modules"][0]["sources"]
+        sources = self.app_module["sources"]
         by_arch = {
             source["only-arches"][0]: source
             for source in sources
@@ -54,12 +59,12 @@ class LinuxPackagingContractTests(unittest.TestCase):
             self.assertEqual(
                 source["dest-filename"], f"onnxruntime-{architecture}.tgz"
             )
-        commands = "\n".join(self.flatpak["modules"][0]["build-commands"])
+        commands = "\n".join(self.app_module["build-commands"])
         self.assertIn("stage_linux_onnxruntime.py", commands)
         self.assertIn("--architecture ${FLATPAK_ARCH}", commands)
 
     def test_flatpak_build_inputs_are_lock_derived_and_offline(self):
-        module = self.flatpak["modules"][0]
+        module = self.app_module
         self.assertIn("cargo-sources.json", module["sources"])
         self.assertIn("node-sources.json", module["sources"])
         environment = self.flatpak["build-options"]["env"]
@@ -70,6 +75,19 @@ class LinuxPackagingContractTests(unittest.TestCase):
             "/run/build/liveblock-linux/flatpak-node/npm-cache",
         )
         self.assertIn("npm ci --offline", "\n".join(module["build-commands"]))
+
+    def test_flatpak_pins_native_layer_shell_dependency(self):
+        module = next(
+            module
+            for module in self.flatpak["modules"]
+            if module["name"] == "gtk-layer-shell"
+        )
+        source = module["sources"][0]
+        self.assertEqual(source["tag"], "v0.8.2")
+        self.assertEqual(
+            source["commit"], "91e5ef02b557f93337bcc11ffe8c0a251aa9ab52"
+        )
+        self.assertIn("-Dtests=false", module["config-opts"])
 
     def test_native_bundle_is_recursive_and_targets_expected_formats(self):
         bundle = self.tauri["bundle"]
@@ -94,6 +112,18 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertNotIn("onnxruntime/LICENSE.txt", self.workflow)
         self.assertIn("runtime-staging-manifest.json", self.workflow)
         self.assertIn("packages.sha256", self.workflow)
+
+    def test_flatpak_ci_builds_without_network_permission_and_runs_lifecycle(self):
+        self.assertIn("Flatpak offline build and lifecycle", self.workflow)
+        self.assertIn("verify_flatpak_sources.py", self.workflow)
+        self.assertIn("flatpak-builder --user --install-deps-from=flathub", self.workflow)
+        self.assertIn("--disable-rofiles-fuse", self.workflow)
+        self.assertIn("flatpak build-bundle", self.workflow)
+        self.assertIn("--artifact-type flatpak-build-only", self.workflow)
+        self.assertIn("Install, inspect, launch, and uninstall build-only Flatpak", self.workflow)
+        self.assertIn("sandboxNetworkPermission", self.workflow)
+        self.assertIn("portalAndCompositorCertification", self.workflow)
+        self.assertIn("flatpak-build-only-evidence", self.workflow)
 
     def test_hosted_lifecycle_evidence_is_bounded_and_build_only(self):
         self.assertIn("Exercise build-only deb and AppImage lifecycle", self.workflow)

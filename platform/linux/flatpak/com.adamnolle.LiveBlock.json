@@ -29,6 +29,25 @@
   },
   "modules": [
     {
+      "name": "gtk-layer-shell",
+      "buildsystem": "meson",
+      "config-opts": [
+        "-Dexamples=false",
+        "-Ddocs=false",
+        "-Dtests=false",
+        "-Dintrospection=false",
+        "-Dvapi=false"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/wmww/gtk-layer-shell.git",
+          "tag": "v0.8.2",
+          "commit": "91e5ef02b557f93337bcc11ffe8c0a251aa9ab52"
+        }
+      ]
+    },
+    {
       "name": "liveblock-linux",
       "buildsystem": "simple",
       "build-commands": [

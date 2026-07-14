@@ -430,3 +430,121 @@ jobs:
             tools/runs/ci-linux-packages/*-uninstall.log
             tools/runs/ci-linux-packages/lifecycle-summary.json
           if-no-files-found: error
+
+  flatpak:
+    name: Flatpak offline build and lifecycle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Flatpak builder and headless X11 tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder xvfb dbus-x11
+          flatpak remote-add --user --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Verify lock-derived offline sources
+        env:
+          PYTHONPATH: tools
+        run: |
+          python3 tools/verify_flatpak_sources.py
+          python3 -m unittest tools.test_flatpak_sources tools.test_linux_packaging
+      - name: Build sandboxed build-only Flatpak
+        run: |
+          mkdir -p tools/runs/ci-flatpak
+          flatpak-builder --user --install-deps-from=flathub --force-clean \
+            --disable-rofiles-fuse \
+            --state-dir=/tmp/liveblock-flatpak-state \
+            --repo=/tmp/liveblock-flatpak-repo \
+            /tmp/liveblock-flatpak-build \
+            platform/linux/flatpak/com.adamnolle.LiveBlock.json \
+            2>&1 | tee tools/runs/ci-flatpak/build.log
+          mkdir -p tools/runs/ci-flatpak/bundle
+          flatpak build-bundle /tmp/liveblock-flatpak-repo \
+            tools/runs/ci-flatpak/bundle/LiveBlock_0.1.0_x86_64_build-only.flatpak \
+            com.adamnolle.LiveBlock 47
+          python3 tools/release_evidence.py inventory \
+            --root tools/runs/ci-flatpak/bundle \
+            --output tools/runs/ci-flatpak/bundle-inventory.json \
+            --platform linux-x86_64 \
+            --artifact-type flatpak-build-only \
+            --commit "$GITHUB_SHA" \
+            --require LiveBlock_0.1.0_x86_64_build-only.flatpak
+          python3 tools/release_evidence.py verify \
+            --root tools/runs/ci-flatpak/bundle \
+            --manifest tools/runs/ci-flatpak/bundle-inventory.json
+          (cd tools/runs/ci-flatpak/bundle && \
+            sha256sum LiveBlock_0.1.0_x86_64_build-only.flatpak > ../bundle.sha256)
+      - name: Install, inspect, launch, and uninstall build-only Flatpak
+        run: |
+          evidence=tools/runs/ci-flatpak
+          remote="file:///tmp/liveblock-flatpak-repo"
+          flatpak remote-add --user --if-not-exists --no-gpg-verify liveblock-ci "$remote"
+          if flatpak info --user com.adamnolle.LiveBlock >/dev/null 2>&1; then
+            echo "LiveBlock unexpectedly installed before clean-install test" >&2
+            exit 1
+          fi
+          flatpak install --user -y --noninteractive liveblock-ci com.adamnolle.LiveBlock
+          flatpak run --user --command=sh com.adamnolle.LiveBlock -c '
+            test -x /app/bin/liveblock-linux &&
+            test -f /app/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so &&
+            test ! -L /app/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so &&
+            test -s /app/lib/LiveBlock/resources/onnxruntime/LICENSE.onnxruntime.txt &&
+            test -s /app/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt &&
+            test -f /app/lib/LiveBlock/resources/trusted-model-keys.json'
+          mkdir -m 700 "$evidence/runtime"
+          set +e
+          timeout --kill-after=5s 12s env \
+            XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/$evidence/runtime" \
+            XDG_SESSION_TYPE=x11 xvfb-run -a dbus-run-session -- \
+            flatpak run --user --env=XDG_SESSION_TYPE=x11 com.adamnolle.LiveBlock \
+            > "$evidence/launch.log" 2>&1
+          launch_status=$?
+          set -e
+          test "$launch_status" -eq 124
+          grep -q "Loaded ONNX Runtime dylib with version '1.18.1'" "$evidence/launch.log"
+          grep -q "trusted model keyring is empty" "$evidence/launch.log"
+          grep -q "X11 global shortcuts registered" "$evidence/launch.log"
+          flatpak uninstall --user -y --noninteractive com.adamnolle.LiveBlock
+          if flatpak info --user com.adamnolle.LiveBlock >/dev/null 2>&1; then
+            echo "Flatpak uninstall left LiveBlock installed" >&2
+            exit 1
+          fi
+          flatpak remote-delete --user --force liveblock-ci
+          python3 - "$evidence/lifecycle-summary.json" "$launch_status" <<'PY'
+          import json, sys
+          from pathlib import Path
+          output, launch_status = sys.argv[1:]
+          Path(output).write_text(json.dumps({
+              "schemaVersion": 1,
+              "evidenceClass": "build-only-hosted-flatpak",
+              "cleanInstall": True,
+              "requiredPayloadPathsVerified": True,
+              "launchSurvivedSeconds": 12,
+              "launchTimeoutStatus": int(launch_status),
+              "packagedOnnxRuntimeLoaded": True,
+              "emptyDevelopmentKeyringRejected": True,
+              "x11GlobalShortcutsRegistered": True,
+              "uninstallRemovedApplication": True,
+              "sandboxNetworkPermission": False,
+              "productionModelAndTrustRoots": False,
+              "portalAndCompositorCertification": False,
+          }, sort_keys=True, indent=2) + "\n")
+          PY
+      - name: Preserve Flatpak build-only evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-build-only-evidence
+          path: |
+            tools/runs/ci-flatpak/build.log
+            tools/runs/ci-flatpak/bundle/*.flatpak
+            tools/runs/ci-flatpak/bundle-inventory.json
+            tools/runs/ci-flatpak/bundle.sha256
+            tools/runs/ci-flatpak/launch.log
+            tools/runs/ci-flatpak/lifecycle-summary.json
+            platform/linux/flatpak/generated-sources.lock.json
+          if-no-files-found: warn

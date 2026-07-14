@@ -242,7 +242,11 @@ def _validate_node(lock_path: Path, sources_path: Path) -> None:
 
 def _validate_manifest(cargo_output: str, node_output: str) -> None:
     manifest = json.loads(MANIFEST_PATH.read_text())
-    module = manifest["modules"][0]
+    module = next(
+        candidate
+        for candidate in manifest["modules"]
+        if candidate.get("name") == "liveblock-linux"
+    )
     sources = module["sources"]
     if cargo_output not in sources or node_output not in sources:
         raise ValueError("Flatpak manifest does not include committed generated sources")

@@ -84,7 +84,11 @@ class LinuxPackagingContractTests(unittest.TestCase):
 
     def test_hosted_lifecycle_evidence_is_bounded_and_build_only(self):
         self.assertIn("Exercise build-only deb and AppImage lifecycle", self.workflow)
-        self.assertIn("timeout --kill-after=5s 12s", self.workflow)
+        self.assertIn("timeout --kill-after=5s 12s env", self.workflow)
+        self.assertIn("xvfb-run -a dbus-run-session", self.workflow)
+        self.assertIn("Loaded ONNX Runtime dylib with version '1.18.1'", self.workflow)
+        self.assertIn("trusted model keyring is empty", self.workflow)
+        self.assertIn("X11 global shortcuts registered", self.workflow)
         self.assertIn("debCleanInstall", self.workflow)
         self.assertIn("debUninstallRemovedSystemPayload", self.workflow)
         self.assertIn('"rpmLifecycle": "not-run-on-ubuntu"', self.workflow)

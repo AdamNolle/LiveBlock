@@ -61,6 +61,7 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn("empty-ring override cannot accompany", BUILD_RS)
 
     def test_tauri_and_ci_build_both_unsigned_installer_formats(self):
+        self.assertEqual(CONFIG["build"]["beforeBuildCommand"], "cd ../_shared-frontend && npm ci && npm run build")
         self.assertEqual(CONFIG["bundle"]["targets"], ["msi", "nsis"])
         self.assertFalse(CONFIG["bundle"]["windows"]["allowDowngrades"])
         self.assertIn("release_windows.ps1 -Mode BuildOnly", CI)

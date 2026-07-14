@@ -46,6 +46,8 @@ $DevelopmentKeyring = Join-Path $Resources "trusted-model-keys.json"
 $ArtifactStaging = Join-Path $Resources "liveblock-detector.onnx"
 $ManifestStaging = Join-Path $Resources "liveblock-detector.manifest.json"
 $RuntimeStaging = Join-Path $Resources "onnxruntime.dll"
+$RuntimeNoticesStaging = Join-Path $Resources "onnxruntime-THIRD-PARTY-NOTICES.txt"
+$RuntimeLicenseStaging = Join-Path $Resources "onnxruntime-LICENSE.txt"
 
 $stamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
 if (-not $OutputDir) { $OutputDir = Join-Path $Root "tools\runs\release-windows\$stamp" }
@@ -124,30 +126,14 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "frontend build failed" }
     } finally { Pop-Location }
 
-    if (Test-Path -LiteralPath $RuntimeStaging) {
-        throw "Internal ONNX Runtime staging path already exists"
+    foreach ($path in @($RuntimeStaging, $RuntimeNoticesStaging, $RuntimeLicenseStaging)) {
+        if (Test-Path -LiteralPath $path) { throw "Internal ONNX Runtime staging path already exists: $path" }
     }
+    python tools/stage_windows_onnxruntime.py
+    if ($LASTEXITCODE -ne 0) { throw "Pinned ONNX Runtime DirectML staging failed" }
+    $stagedRuntime = $true
     Push-Location (Join-Path $Root "platform\windows\src-tauri")
-    try {
-        cargo build --release
-        if ($LASTEXITCODE -ne 0) { throw "Windows release runtime build failed" }
-        $runtimeSearchRoots = @(
-            (Join-Path $Root "platform\windows\target"),
-            (Join-Path $env:LOCALAPPDATA "ort.pyke.io\dfbin")
-        )
-        $runtimeCandidates = @($runtimeSearchRoots | Where-Object { Test-Path -LiteralPath $_ -PathType Container } |
-            ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -Force -Filter "onnxruntime.dll" } |
-            Where-Object { -not $_.PSIsContainer })
-        if ($runtimeCandidates.Count -eq 0) { throw "Windows release build did not produce onnxruntime.dll" }
-        $runtimeHashes = @($runtimeCandidates | ForEach-Object {
-            (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
-        } | Sort-Object -Unique)
-        if ($runtimeHashes.Count -ne 1) { throw "Windows release build produced conflicting onnxruntime.dll files" }
-        $runtimeSource = ($runtimeCandidates | Sort-Object FullName | Select-Object -First 1).FullName
-        [IO.File]::WriteAllBytes($RuntimeStaging, [IO.File]::ReadAllBytes($runtimeSource))
-        $stagedRuntime = $true
-        & $Tauri build --bundles msi,nsis --ci
-    } finally { Pop-Location }
+    try { & $Tauri build --bundles msi,nsis --ci } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw "Tauri Windows bundle build failed" }
 
     $TargetRoot = Join-Path $Root "platform\windows\target"
@@ -195,7 +181,7 @@ try {
     }
     $relative = [IO.Path]::GetRelativePath($MsiExtracted, $executables[0].FullName).Replace("\", "/")
     $payloadRequirements += @("--require", $relative)
-    foreach ($name in @("onnxruntime.dll", "trusted-model-keys.json")) {
+    foreach ($name in @("onnxruntime.dll", "onnxruntime-THIRD-PARTY-NOTICES.txt", "onnxruntime-LICENSE.txt", "trusted-model-keys.json")) {
         $matches = @(Get-ChildItem -LiteralPath $MsiExtracted -Recurse -File -Filter $name)
         if ($matches.Count -ne 1) { throw "MSI payload must contain exactly one $name" }
         $relative = [IO.Path]::GetRelativePath($MsiExtracted, $matches[0].FullName).Replace("\", "/")
@@ -243,6 +229,8 @@ try {
 } finally {
     if ($stagedRuntime) {
         Remove-Item -LiteralPath $RuntimeStaging -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $RuntimeNoticesStaging -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $RuntimeLicenseStaging -Force -ErrorAction SilentlyContinue
     }
     if ($stagedProduction) {
         Remove-Item -LiteralPath $ArtifactStaging -Force -ErrorAction SilentlyContinue

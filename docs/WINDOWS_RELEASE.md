@@ -24,12 +24,15 @@ pwsh -File tools/release_windows.ps1 -Mode BuildOnly `
 ```
 
 This mode is explicitly development-only. It sets the empty-keyring override,
-refuses leftover staged model resources, builds one MSI and one NSIS installer,
-copies them into a fixed evidence directory, emits basename-rerunnable SHA-256
-lines, and creates/verifies a schema-1 artifact inventory. It also performs a
-non-installing MSI administrative extraction and inventories the complete payload,
-requiring the application executable, packaged ONNX Runtime DLL, and trusted-keyring
-resource. The release manifest
+refuses leftover staged model resources, stages the official ONNX Runtime DirectML
+1.18.1 NuGet package only after verifying archive SHA-256
+`51273348e0edc53d50a68fdddf29f142cdb9eca5c688d0233334c3295ebae595`,
+validates the DLL as x86_64 PE32+, and preserves its license and complete notices.
+It then builds one MSI and one NSIS installer, copies them into a fixed evidence
+directory, emits basename-rerunnable SHA-256 lines, and creates/verifies a schema-1
+artifact inventory. It also performs a non-installing MSI administrative extraction
+and inventories the complete payload, requiring the application executable,
+packaged ONNX Runtime DLL/license/notices, and trusted-keyring resource. The release manifest
 must say:
 
 ```json

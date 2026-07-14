@@ -49,8 +49,9 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn("WriteAllBytes($DevelopmentKeyring, $originalKeyring)", SCRIPT)
         self.assertIn("Remove-Item -LiteralPath $ArtifactStaging", SCRIPT)
         self.assertIn('$RuntimeStaging = Join-Path $Resources "onnxruntime.dll"', SCRIPT)
-        self.assertIn("[IO.File]::WriteAllBytes($RuntimeStaging", SCRIPT)
-        self.assertIn('"ort.pyke.io\\dfbin"', SCRIPT)
+        self.assertIn("stage_windows_onnxruntime.py", SCRIPT)
+        self.assertIn("onnxruntime-THIRD-PARTY-NOTICES.txt", SCRIPT)
+        self.assertIn("onnxruntime-LICENSE.txt", SCRIPT)
         self.assertIn("Remove-Item -LiteralPath $RuntimeStaging", SCRIPT)
         self.assertIn("Do not distribute these installers", DOC)
         self.assertIn("MSIX creation", DOC)
@@ -79,8 +80,8 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn("package.sha256", CI)
         self.assertIn("msi-payload-inventory.json", CI)
         self.assertIn("msi-extracted/**", CI)
-        self.assertIn('"download-binaries"', CARGO_TOML)
-        self.assertIn('"copy-dylibs"', CARGO_TOML)
+        self.assertIn('"load-dynamic"', CARGO_TOML)
+        self.assertNotIn('"download-binaries"', CARGO_TOML)
 
 
 if __name__ == "__main__":

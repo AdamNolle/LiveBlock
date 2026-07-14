@@ -67,9 +67,11 @@ closed outer package inventory binds all remaining AppImage bytes.
 
 On the clean hosted Ubuntu runner, CI then installs the local build-only deb,
 requires the installed UI process to remain alive for a bounded 12-second Xvfb
-smoke window, uninstalls it, and checks that the system executable and resource
-tree were removed. It also extracts the AppImage without FUSE and requires its
-`AppRun` process to remain alive for the same bounded Xvfb window. Exact package
+smoke window, verifies that packaged ONNX Runtime 1.18.1 loaded, verifies the
+empty development keyring was rejected, and verifies X11 shortcut registration.
+It then uninstalls the deb and checks that the system executable and resource
+tree were removed. CI also extracts the AppImage without FUSE and requires its
+`AppRun` process to satisfy the same bounded startup assertions. Exact package
 bytes, payload inventories, runtime staging manifest, install/launch/uninstall
 logs, and a machine-readable lifecycle summary are preserved together.
 

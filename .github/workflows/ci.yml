@@ -357,29 +357,36 @@ jobs:
           test -f /usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so
           mkdir -m 700 "$evidence/deb-home" "$evidence/deb-runtime"
           set +e
-          timeout --kill-after=5s 12s dbus-run-session -- xvfb-run -a \
-            env HOME="$GITHUB_WORKSPACE/$evidence/deb-home" \
+          timeout --kill-after=5s 12s env \
+            HOME="$GITHUB_WORKSPACE/$evidence/deb-home" \
             XDG_DATA_HOME="$GITHUB_WORKSPACE/$evidence/deb-home/.local/share" \
             XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/$evidence/deb-runtime" \
-            XDG_SESSION_TYPE=x11 /usr/bin/liveblock-linux \
+            XDG_SESSION_TYPE=x11 xvfb-run -a dbus-run-session -- /usr/bin/liveblock-linux \
             > "$evidence/deb-launch.log" 2>&1
           deb_launch_status=$?
           set -e
           test "$deb_launch_status" -eq 124
+          grep -q "Loaded ONNX Runtime dylib with version '1.18.1'" "$evidence/deb-launch.log"
+          grep -q "trusted model keyring is empty" "$evidence/deb-launch.log"
+          grep -q "X11 global shortcuts registered" "$evidence/deb-launch.log"
           sudo apt-get remove -y "$package_id" > "$evidence/deb-uninstall.log" 2>&1
           test ! -e /usr/bin/liveblock-linux
           test ! -e /usr/lib/LiveBlock
           mkdir -m 700 "$evidence/appimage-home" "$evidence/appimage-runtime"
           set +e
-          timeout --kill-after=5s 12s dbus-run-session -- xvfb-run -a \
-            env HOME="$GITHUB_WORKSPACE/$evidence/appimage-home" \
+          timeout --kill-after=5s 12s env \
+            HOME="$GITHUB_WORKSPACE/$evidence/appimage-home" \
             XDG_DATA_HOME="$GITHUB_WORKSPACE/$evidence/appimage-home/.local/share" \
             XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/$evidence/appimage-runtime" \
-            XDG_SESSION_TYPE=x11 "$GITHUB_WORKSPACE/$appimage_root/AppRun" \
+            XDG_SESSION_TYPE=x11 xvfb-run -a dbus-run-session -- \
+            "$GITHUB_WORKSPACE/$appimage_root/AppRun" \
             > "$evidence/appimage-launch.log" 2>&1
           appimage_launch_status=$?
           set -e
           test "$appimage_launch_status" -eq 124
+          grep -q "Loaded ONNX Runtime dylib with version '1.18.1'" "$evidence/appimage-launch.log"
+          grep -q "trusted model keyring is empty" "$evidence/appimage-launch.log"
+          grep -q "X11 global shortcuts registered" "$evidence/appimage-launch.log"
           python3 - "$evidence/lifecycle-summary.json" "$package_id" "$deb_launch_status" "$appimage_launch_status" <<'PY'
           import json, sys
           from pathlib import Path
@@ -394,6 +401,9 @@ jobs:
               "debUninstallRemovedSystemPayload": True,
               "appImageExtractedLaunchSurvivedSeconds": 12,
               "appImageLaunchTimeoutStatus": int(appimage_status),
+              "packagedOnnxRuntimeLoaded": True,
+              "emptyDevelopmentKeyringRejected": True,
+              "x11GlobalShortcutsRegistered": True,
               "rpmLifecycle": "not-run-on-ubuntu",
               "productionModelAndTrustRoots": False,
           }, sort_keys=True, indent=2) + "\n")

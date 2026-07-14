@@ -25,7 +25,7 @@ INVENTORY_HASH = "sha256-release-inventory-v1"
 SBOM_SPEC = "1.5"
 ALLOWED_LICENSE_IDS = {
     "0BSD", "Apache-2.0", "BSD-1-Clause", "BSD-2-Clause", "BSD-3-Clause",
-    "BSL-1.0", "CC0-1.0", "ISC", "MIT", "MIT-0", "NCSA", "OFL-1.1",
+    "BSL-1.0", "CC0-1.0", "CDLA-Permissive-2.0", "ISC", "MIT", "MIT-0", "NCSA", "OFL-1.1",
     "Unicode-3.0", "Unlicense", "Zlib",
 }
 REVIEW_LICENSE_PREFIXES = ("LGPL-", "MPL-")

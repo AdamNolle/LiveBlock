@@ -168,7 +168,7 @@ function Invoke-BoundedLaunch(
 function Wait-Removed([string]$ApplicationPath, [string]$Description) {
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         if (-not (Test-Path -LiteralPath $ApplicationPath) -and
-            (Get-LiveBlockUninstallEntries).Count -eq 0) {
+            @(Get-LiveBlockUninstallEntries).Count -eq 0) {
             return
         }
         Start-Sleep -Seconds 1
@@ -214,7 +214,7 @@ if ($msiPackages.Count -ne 1 -or $nsisPackages.Count -ne 1) {
 $extractedExecutables = @(Get-ChildItem -LiteralPath $MsiExtracted -File -Filter "*.exe" -Recurse)
 if ($extractedExecutables.Count -ne 1) { throw "Expected exactly one application executable in MSI extraction evidence" }
 $expectedExecutableName = $extractedExecutables[0].Name
-if ((Get-LiveBlockUninstallEntries).Count -ne 0) {
+if (@(Get-LiveBlockUninstallEntries).Count -ne 0) {
     throw "LiveBlock is already registered; clean-install evidence requires an absent package"
 }
 

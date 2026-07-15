@@ -245,7 +245,7 @@ def _validate_manifest(cargo_output: str, node_output: str) -> None:
     module = next(
         candidate
         for candidate in manifest["modules"]
-        if candidate.get("name") == "liveblock-linux"
+        if isinstance(candidate, dict) and candidate.get("name") == "liveblock-linux"
     )
     sources = module["sources"]
     if cargo_output not in sources or node_output not in sources:

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "decisions": [
+    {
+      "purl": "pkg:cargo/r-efi@5.3.0",
+      "declaredExpression": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "selectedLicense": "MIT",
+      "rationale": "LiveBlock elects the crate's declared MIT option for binary distribution; LGPL terms are not selected."
+    },
+    {
+      "purl": "pkg:cargo/r-efi@6.0.0",
+      "declaredExpression": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "selectedLicense": "MIT",
+      "rationale": "LiveBlock elects the crate's declared MIT option for binary distribution; LGPL terms are not selected."
+    }
+  ]
+}

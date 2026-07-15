@@ -79,13 +79,22 @@ Duplicate packages shared by platform graphs appear once with all contexts.
 
 The companion `dependency-licenses.json` parses the supported SPDX expression
 subset and fails CI when a third-party component is unknown/malformed, has no
-declared license, has mandatory restricted GPL/AGPL/SSPL/BUSL terms, or has no
-approved distribution choice. A permissive `OR` choice is accepted; `AND` keeps
-every obligation. LGPL/MPL occurrences are preserved under
-`reviewRequired` so release operators can satisfy notice, relinking, source, and
-other distribution obligations; a green report is not legal advice and does
-not remove that review. Final release approval requires the review list to be
-resolved and required notices bundled.
+declared license, contains any restricted GPL/AGPL/SSPL/BUSL term (including
+under `OR`), or has no approved distribution choice. `AND` keeps every
+obligation. LGPL/MPL occurrences remain under `reviewRequired` unless an exact
+component-bound decision selects a declared permissive `OR` branch.
+`licenses/dependency-license-decisions.json` currently elects MIT for the two
+locked `r-efi` versions; decisions cannot override restricted/unknown terms and
+fail on component, expression, or selected-branch drift.
+
+The remaining MPL review list is exactly covered by
+`licenses/mpl-source-offer.json`: five unmodified crate archives with Cargo.lock
+checksums, versioned HTTPS source URLs, and pinned MPL-2.0 text. CI emits
+`dependency-obligations.json` only when the decisions, generated report, three
+locks, source offers, and license text agree. This prepares notice/source
+evidence but is not legal advice or accountable human approval. Final release
+approval still requires operator review and delivery of these files through the
+chosen package/update channel.
 
 `tools/requirements.txt` is intentionally excluded: it defines the source-only
 training environment and production packages are inference-only. OS shared
@@ -113,9 +122,18 @@ python3 tools/release_evidence.py sbom \
   --cargo-metadata tools/runs/release-evidence/windows-metadata.json \
   --cargo-metadata tools/runs/release-evidence/linux-metadata.json \
   --npm-lock platform/_shared-frontend/package-lock.json \
+  --license-decisions licenses/dependency-license-decisions.json \
   --output tools/runs/release-evidence/liveblock.cdx.json \
   --license-report tools/runs/release-evidence/dependency-licenses.json \
   --commit "$(git rev-parse HEAD)"
+python3 tools/verify_dependency_obligations.py \
+  --license-report tools/runs/release-evidence/dependency-licenses.json \
+  --license-decisions licenses/dependency-license-decisions.json \
+  --source-offer licenses/mpl-source-offer.json \
+  --cargo-lock core/Cargo.lock \
+  --cargo-lock platform/windows/Cargo.lock \
+  --cargo-lock platform/linux/Cargo.lock \
+  --output tools/runs/release-evidence/dependency-obligations.json
 ```
 
 ## CI evidence boundaries

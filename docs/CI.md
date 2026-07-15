@@ -22,8 +22,9 @@ Cargo lockfiles pin `ort`, `ort-sys`, and `ndarray` exactly because mismatched
 prerelease versions do not compile together.
 
 The shared job uploads `release-dependency-integrity-evidence`: a deterministic
-CycloneDX 1.5 build-input SBOM, declared-license policy/report, a verified
-schema-1 inventory of the built webview payload, and a deterministic tar plus
+CycloneDX 1.5 build-input SBOM, declared-license policy/report, component-bound
+OR selections, MPL source-offer/license evidence, obligation-verification report,
+a verified schema-1 inventory of the built webview payload, and a deterministic tar plus
 SHA-256 preserving the exact inventoried bytes/modes for independent recheck. See
 [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md). This webview payload is explicitly `build-only`; it is not an installer or
 signed production package. The Linux job separately uploads

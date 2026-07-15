@@ -43,7 +43,7 @@ jobs:
       - name: Label and desktop adapter contract tests
         env:
           PYTHONPATH: tools
-        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_flatpak_sources tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_runtime_staging tools.test_windows_packaging
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_dependency_obligations tools.test_flatpak_sources tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_runtime_staging tools.test_windows_packaging
       - name: Explicit migration, installer, and update recovery gates
         env:
           PYTHONPATH: tools
@@ -79,9 +79,18 @@ jobs:
             --cargo-metadata tools/runs/ci-release-evidence/windows-metadata.json \
             --cargo-metadata tools/runs/ci-release-evidence/linux-metadata.json \
             --npm-lock platform/_shared-frontend/package-lock.json \
+            --license-decisions licenses/dependency-license-decisions.json \
             --output tools/runs/ci-release-evidence/liveblock.cdx.json \
             --license-report tools/runs/ci-release-evidence/dependency-licenses.json \
             --commit "$GITHUB_SHA"
+          python tools/verify_dependency_obligations.py \
+            --license-report tools/runs/ci-release-evidence/dependency-licenses.json \
+            --license-decisions licenses/dependency-license-decisions.json \
+            --source-offer licenses/mpl-source-offer.json \
+            --cargo-lock core/Cargo.lock \
+            --cargo-lock platform/windows/Cargo.lock \
+            --cargo-lock platform/linux/Cargo.lock \
+            --output tools/runs/ci-release-evidence/dependency-obligations.json
           python tools/release_evidence.py inventory \
             --root platform/_shared-frontend/dist \
             --output tools/runs/ci-release-evidence/webview-inventory.json \
@@ -106,6 +115,11 @@ jobs:
           path: |
             tools/runs/ci-release-evidence/liveblock.cdx.json
             tools/runs/ci-release-evidence/dependency-licenses.json
+            tools/runs/ci-release-evidence/dependency-obligations.json
+            licenses/dependency-license-decisions.json
+            licenses/mpl-source-offer.json
+            licenses/MPL-2.0.txt
+            licenses/README.md
             tools/runs/ci-release-evidence/webview-inventory.json
             tools/runs/ci-release-evidence/webview-payload.tar
             tools/runs/ci-release-evidence/webview-payload.tar.sha256

@@ -134,15 +134,15 @@ class LinuxPackagingContractTests(unittest.TestCase):
 
     def test_flatpak_sdk_includes_libclang_for_pipewire_bindgen(self):
         self.assertIn(
-            "org.freedesktop.Sdk.Extension.llvm18",
+            "org.freedesktop.Sdk.Extension.llvm20",
             self.flatpak["sdk-extensions"],
         )
         self.assertEqual(
             self.flatpak["build-options"]["env"]["LIBCLANG_PATH"],
-            "/usr/lib/sdk/llvm18/lib",
+            "/usr/lib/sdk/llvm20/lib",
         )
         self.assertIn(
-            "/usr/lib/sdk/llvm18/bin",
+            "/usr/lib/sdk/llvm20/bin",
             self.flatpak["build-options"]["append-path"],
         )
 
@@ -192,7 +192,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
                 "libXfixes",
                 "libXinerama",
                 "libxkbcommon",
-                "wayland-libs",
+                "libwayland-client",
             },
         )
         self.assertIn("resources/**/*", bundle["resources"])

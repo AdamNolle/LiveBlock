@@ -47,7 +47,7 @@ rpm -qp --queryformat 'name=%{NAME}\nversion=%{VERSION}\nrelease=%{RELEASE}\narc
   "$package" > "$evidence_dir/rpm-package-metadata.txt"
 rpm -qp --requires "$package" | sort -u > "$evidence_dir/rpm-package-requires.txt"
 for requirement in \
-  gtk-layer-shell pipewire-libs libX11 libXcomposite libXfixes libXinerama libxkbcommon wayland-libs; do
+  gtk-layer-shell pipewire-libs libX11 libXcomposite libXfixes libXinerama libxkbcommon libwayland-client; do
   grep -Fxq "$requirement" "$evidence_dir/rpm-package-requires.txt"
 done
 

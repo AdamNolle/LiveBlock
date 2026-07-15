@@ -252,7 +252,7 @@ def _validate_manifest(cargo_output: str, node_output: str) -> None:
         raise ValueError("Flatpak manifest does not include committed generated sources")
     environment = manifest["build-options"]["env"]
     expected_environment = {
-        "LIBCLANG_PATH": "/usr/lib/sdk/llvm18/lib",
+        "LIBCLANG_PATH": "/usr/lib/sdk/llvm20/lib",
         "CARGO_HOME": "/run/build/liveblock-linux/cargo",
         "CARGO_NET_OFFLINE": "true",
         "XDG_CACHE_HOME": "/run/build/liveblock-linux/flatpak-node/cache",

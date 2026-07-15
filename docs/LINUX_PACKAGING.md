@@ -133,10 +133,12 @@ and lifecycle summary. The x86_64 bundle SHA-256 is
 inventory aggregate is
 `b06811bb4901d128cd7de6a0871a1191a684f441621d6aed136fddd547a0bddb`.
 
-This is still build-only: its source is a local `type: dir`, its embedded keyring
-is empty, it has no promoted model or signed repository metadata, and GNOME 47 is
-now an upstream end-of-life runtime. Xvfb startup does not certify real portals,
-tray hosts, Wayland compositors, GPUs, multi-output geometry, accessibility, or
-pointer behavior. Do not publish it or check the broad Flatpak checklist item
-until a pinned release source, supported runtime, production trust/model inputs,
-signed repository, and real compositor behavior are present.
+That cited iteration-25 artifact remains build-only: its source is a local
+`type: dir`, its embedded keyring is empty, it has no promoted model or signed
+repository metadata, and it used the now end-of-life GNOME 47 runtime. The
+current manifest pins GNOME 50; separate hosted build/lifecycle evidence must be
+recorded before that migration is considered verified. Xvfb startup does not
+certify real portals, tray hosts, Wayland compositors, GPUs, multi-output
+geometry, accessibility, or pointer behavior. Do not publish it or check the
+broad Flatpak checklist item until a pinned release source, production
+trust/model inputs, signed repository, and real compositor behavior are present.

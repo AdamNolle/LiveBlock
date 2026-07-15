@@ -180,6 +180,12 @@ class LinuxPackagingContractTests(unittest.TestCase):
             },
         )
         self.assertEqual(
+            bundle["linux"]["rpm"]["postRemoveScript"], "rpm-post-remove.sh"
+        )
+        post_remove = (ROOT / "platform/linux/src-tauri/rpm-post-remove.sh").read_text()
+        self.assertIn("rmdir", post_remove)
+        self.assertNotIn("rm -rf", post_remove)
+        self.assertEqual(
             set(bundle["linux"]["rpm"]["depends"]),
             {
                 "webkit2gtk4.1",

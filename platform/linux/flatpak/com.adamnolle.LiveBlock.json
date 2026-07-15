@@ -14,7 +14,8 @@
     "--socket=wayland",
     "--socket=fallback-x11",
     "--device=dri",
-    "--talk-name=org.freedesktop.portal.Desktop"
+    "--talk-name=org.freedesktop.portal.Desktop",
+    "--talk-name=org.kde.StatusNotifierWatcher"
   ],
   "build-options": {
     "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin:/usr/lib/sdk/llvm18/bin",
@@ -30,6 +31,7 @@
     }
   },
   "modules": [
+    "shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json",
     {
       "name": "gtk-layer-shell",
       "buildsystem": "meson",

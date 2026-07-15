@@ -17,10 +17,16 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.tauri = json.loads(
             (ROOT / "platform/linux/src-tauri/tauri.conf.json").read_text()
         )
+        self.appindicator = json.loads(
+            (
+                ROOT
+                / "platform/linux/flatpak/shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json"
+            ).read_text()
+        )
         self.app_module = next(
             module
             for module in self.flatpak["modules"]
-            if module["name"] == "liveblock-linux"
+            if isinstance(module, dict) and module["name"] == "liveblock-linux"
         )
         self.workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.packaging_docs = (ROOT / "docs/LINUX_PACKAGING.md").read_text()
@@ -31,6 +37,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("--socket=fallback-x11", finish)
         self.assertIn("--device=dri", finish)
         self.assertIn("--talk-name=org.freedesktop.portal.Desktop", finish)
+        self.assertIn("--talk-name=org.kde.StatusNotifierWatcher", finish)
         self.assertNotIn("--share=network", finish)
         self.assertNotIn("--device=all", finish)
         self.assertFalse(any(value.startswith("--filesystem=") for value in finish))
@@ -78,6 +85,36 @@ class LinuxPackagingContractTests(unittest.TestCase):
         )
         self.assertIn("npm ci --offline", "\n".join(module["build-commands"]))
 
+    def test_flatpak_pins_appindicator_runtime_and_sources(self):
+        self.assertIn(
+            "shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json",
+            self.flatpak["modules"],
+        )
+        self.assertEqual(self.appindicator["name"], "libayatana-appindicator")
+        appindicator_source = self.appindicator["sources"][0]
+        self.assertEqual(appindicator_source["tag"], "0.5.94")
+        self.assertEqual(
+            appindicator_source["commit"],
+            "31e8bb083b307e1cc96af4874a94707727bd1e79",
+        )
+        nested = {
+            module["name"]: module
+            for module in self.appindicator["modules"]
+            if isinstance(module, dict)
+        }
+        self.assertEqual(
+            nested["libdbusmenu"]["sources"][0]["sha256"],
+            "b9cc4a2acd74509435892823607d966d424bd9ad5d0b00938f27240a1bfa878a",
+        )
+        self.assertEqual(
+            nested["ayatana-ido"]["sources"][0]["commit"],
+            "f968079b09e2310fefc3fc307359025f1c74b3eb",
+        )
+        self.assertEqual(
+            nested["libayatana-indicator"]["sources"][0]["commit"],
+            "611bb384b73fa6311777ba4c41381a06f5b99dad",
+        )
+
     def test_flatpak_sdk_includes_libclang_for_pipewire_bindgen(self):
         self.assertIn(
             "org.freedesktop.Sdk.Extension.llvm18",
@@ -96,7 +133,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
         module = next(
             module
             for module in self.flatpak["modules"]
-            if module["name"] == "gtk-layer-shell"
+            if isinstance(module, dict) and module["name"] == "gtk-layer-shell"
         )
         source = module["sources"][0]
         self.assertEqual(source["tag"], "v0.8.2")

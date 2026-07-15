@@ -75,9 +75,17 @@ tree were removed. CI also extracts the AppImage without FUSE and requires its
 bytes, payload inventories, runtime staging manifest, install/launch/uninstall
 logs, and a machine-readable lifecycle summary are preserved together.
 
-This proves build-only package construction, payload placement, a Debian package
-transaction, and bounded X11 startup on the hosted Ubuntu image. It does not
-prove promoted-model authentication, production trust roots, signatures,
+CI also builds separately inventoried `0.0.9` deb/RPM package-mechanics fixtures
+from the same source payload. Ubuntu clean-installs the prior deb, upgrades to
+current `0.1.0`, reinstalls current as a repair, and requires the default prior
+package install to leave current installed. The Fedora 44 job performs the same
+prior-install, upgrade, reinstall, and current-version-retention sequence through
+DNF before its bounded launch.
+
+This proves build-only package construction, payload placement, Debian/Fedora
+package-manager transitions, and bounded X11 startup in hosted environments. The
+prior fixture changes package metadata but is not a historical release payload.
+It does not prove promoted-model authentication, production trust roots, signatures,
 updates, capture, compositor/portal behavior, GPUs, accessibility, or sustained
 operation. A separate CI job clean-installs the RPM through DNF inside the
 checksum-pinned Fedora 44 container, verifies declared runtime requirements and
@@ -87,8 +95,9 @@ RPM may leave only empty intermediate resource directories; the lifecycle
 records those paths and removes only empty directories before confirming a clean
 container. This is real Fedora userspace/package-manager evidence but not a
 native Fedora kernel, desktop, portal, compositor, or hardware certification.
-Native upgrade testing also remains open until a prior installable version is
-available. None of these empty-keyring, no-model artifacts is distributable.
+Upgrade compatibility against a genuinely shipped historical payload remains
+open until such a release exists. None of these empty-keyring, no-model artifacts
+is distributable.
 
 ## Flatpak boundary
 

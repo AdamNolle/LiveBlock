@@ -163,6 +163,9 @@ class LinuxPackagingContractTests(unittest.TestCase):
     def test_native_bundle_is_recursive_and_targets_expected_formats(self):
         bundle = self.tauri["bundle"]
         self.assertEqual(bundle["targets"], ["deb", "rpm", "appimage"])
+        self.assertIn("native-version-fixtures-build-only", self.workflow)
+        self.assertIn("'{\"version\":\"0.0.9\"}'", self.workflow)
+        self.assertIn("linux-version-fixture-evidence", self.workflow)
         self.assertEqual(
             set(bundle["linux"]["deb"]["depends"]),
             {
@@ -253,6 +256,10 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("trusted model keyring is empty", self.rpm_lifecycle)
         self.assertIn("X11 global shortcuts registered", self.rpm_lifecycle)
         self.assertIn("uninstallRemovedApplicationFilesAndRegistration", self.rpm_lifecycle)
+        self.assertIn("--previous-package", self.rpm_lifecycle)
+        self.assertIn("sameVersionRepair", self.rpm_lifecycle)
+        self.assertIn("defaultDowngradeRetainedCurrent", self.rpm_lifecycle)
+        self.assertIn("debDefaultDowngradeRejected", self.workflow)
         self.assertIn("harnessRemovedEmptyPackageDirectories", self.rpm_lifecycle)
         self.assertIn("rpm-uninstall-residue.txt", self.workflow)
         self.assertIn('"nativeFedoraHost": False', self.rpm_lifecycle)
@@ -265,7 +272,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("Loaded ONNX Runtime dylib with version '1.18.1'", self.workflow)
         self.assertIn("trusted model keyring is empty", self.workflow)
         self.assertIn("X11 global shortcuts registered", self.workflow)
-        self.assertIn("debCleanInstall", self.workflow)
+        self.assertIn("debCleanPriorVersionInstall", self.workflow)
         self.assertIn("debUninstallRemovedSystemPayload", self.workflow)
         self.assertIn('"rpmLifecycle": "not-run-on-ubuntu"', self.workflow)
         self.assertIn('"productionModelAndTrustRoots": False', self.workflow)

@@ -23,7 +23,10 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn("git status --porcelain --untracked-files=all", SCRIPT)
         self.assertIn("--bundles msi,nsis --ci", SCRIPT)
         self.assertIn("windows-installers-build-only", SCRIPT)
+        self.assertIn("windows-installers-version-fixture-build-only", SCRIPT)
         self.assertIn("windows-installers-signed", SCRIPT)
+        self.assertIn("BuildOnlyFixtureVersion is allowed only in BuildOnly mode", SCRIPT)
+        self.assertIn("BuildOnlyFixtureVersion must be lower", SCRIPT)
         self.assertIn("Output directory already exists", SCRIPT)
 
     def test_execute_uses_certificate_store_and_verifies_final_bytes(self):
@@ -73,6 +76,10 @@ class WindowsPackagingContractTests(unittest.TestCase):
 
     def test_build_only_lifecycle_is_clean_bounded_and_fail_closed(self):
         self.assertIn("windows-installers-build-only", LIFECYCLE)
+        self.assertIn("windows-installers-version-fixture-build-only", LIFECYCLE)
+        self.assertIn("Assert-SingleRegisteredVersion", LIFECYCLE)
+        self.assertIn('"/fa"', LIFECYCLE)
+        self.assertIn("downgradeRejected = $true", LIFECYCLE)
         self.assertIn("promotedModelEmbedded -ne $false", LIFECYCLE)
         self.assertIn("Get-LiveBlockUninstallEntries", LIFECYCLE)
         self.assertIn('"/i"', LIFECYCLE)
@@ -102,6 +109,8 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertEqual(CONFIG["bundle"]["targets"], ["msi", "nsis"])
         self.assertFalse(CONFIG["bundle"]["windows"]["allowDowngrades"])
         self.assertIn("release_windows.ps1 -Mode BuildOnly", CI)
+        self.assertIn("-BuildOnlyFixtureVersion 0.0.9", CI)
+        self.assertIn("-PreviousEvidenceDir tools/runs/ci-windows-previous", CI)
         self.assertIn("windows-build-only-package-evidence", CI)
         self.assertIn("package-inventory.json", CI)
         self.assertIn("package.sha256", CI)

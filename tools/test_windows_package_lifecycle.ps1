@@ -2,6 +2,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$EvidenceDir,
+    [Parameter(Mandatory = $true)]
+    [string]$PreviousEvidenceDir,
     [int]$LaunchSeconds = 12
 )
 
@@ -16,7 +18,10 @@ if ($LaunchSeconds -lt 5 -or $LaunchSeconds -gt 60) {
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 $EvidenceDir = (Resolve-Path -LiteralPath $EvidenceDir).Path
+$PreviousEvidenceDir = (Resolve-Path -LiteralPath $PreviousEvidenceDir).Path
 $PackagesDir = Join-Path $EvidenceDir "packages"
+$PreviousPackagesDir = Join-Path $PreviousEvidenceDir "packages"
+$PreviousManifestPath = Join-Path $PreviousEvidenceDir "release-manifest.json"
 $ManifestPath = Join-Path $EvidenceDir "release-manifest.json"
 $MsiExtracted = Join-Path $EvidenceDir "msi-extracted"
 $LifecycleDir = Join-Path $EvidenceDir "lifecycle"
@@ -76,6 +81,18 @@ function Get-LiveBlockUninstallEntries {
             }
     }
     return @($entries)
+}
+
+function Assert-SingleRegisteredVersion([string]$ExpectedVersion, [string]$Description) {
+    $entries = @(Get-LiveBlockUninstallEntries)
+    if ($entries.Count -ne 1) {
+        throw "$Description expected exactly one LiveBlock registration; found $($entries.Count)"
+    }
+    $actualVersion = [string](Get-PropertyValue $entries[0] "DisplayVersion")
+    if ($actualVersion -ne $ExpectedVersion) {
+        throw "$Description expected registered version $ExpectedVersion; found $actualVersion"
+    }
+    return $entries
 }
 
 function Find-InstalledApplication([string]$ExpectedName, [object[]]$Entries) {
@@ -234,11 +251,31 @@ if ($manifest.schema -ne 1 -or
 }
 $commit = [string]$manifest.gitCommit
 if ($commit -notmatch '^[0-9a-f]{40}$') { throw "Release manifest Git commit is invalid" }
+$currentVersion = [Version]((Get-Content -LiteralPath (Join-Path $Root "platform/windows/src-tauri/tauri.conf.json") -Raw | ConvertFrom-Json).version)
+$previousManifest = Get-Content -LiteralPath $PreviousManifestPath -Raw | ConvertFrom-Json
+if ($previousManifest.schema -ne 1 -or
+    $previousManifest.artifactType -ne "windows-installers-version-fixture-build-only" -or
+    $previousManifest.signed -ne $false -or
+    $previousManifest.timestamped -ne $false -or
+    $previousManifest.promotedModelEmbedded -ne $false) {
+    throw "Prior-version lifecycle accepts only unsigned, untimestamped, no-model fixture evidence"
+}
+$previousVersion = [Version]([string]$previousManifest.packageFixtureVersion)
+if ($previousVersion -ge $currentVersion) {
+    throw "Prior-version fixture must be older than current version $currentVersion"
+}
+$currentVersionString = $currentVersion.ToString()
+$previousVersionString = $previousVersion.ToString()
 
 $msiPackages = @(Get-ChildItem -LiteralPath $PackagesDir -File -Filter "*.msi")
 $nsisPackages = @(Get-ChildItem -LiteralPath $PackagesDir -File -Filter "*.exe")
+$previousMsiPackages = @(Get-ChildItem -LiteralPath $PreviousPackagesDir -File -Filter "*.msi")
+$previousNsisPackages = @(Get-ChildItem -LiteralPath $PreviousPackagesDir -File -Filter "*.exe")
 if ($msiPackages.Count -ne 1 -or $nsisPackages.Count -ne 1) {
-    throw "Expected exactly one MSI and one NSIS package"
+    throw "Expected exactly one current MSI and one current NSIS package"
+}
+if ($previousMsiPackages.Count -ne 1 -or $previousNsisPackages.Count -ne 1) {
+    throw "Expected exactly one prior-version MSI and one prior-version NSIS fixture"
 }
 $extractedExecutables = @(Get-ChildItem -LiteralPath $MsiExtracted -File -Filter "*.exe" -Recurse)
 if ($extractedExecutables.Count -ne 1) { throw "Expected exactly one application executable in MSI extraction evidence" }
@@ -253,14 +290,32 @@ $msiApplicationPath = $null
 $nsisApplicationPath = $null
 $nsisUninstaller = $null
 try {
-    Add-Progress "starting MSI clean-install lifecycle"
-    $msiInstallLog = Join-Path $LifecycleDir "msi-install.log"
+    Add-Progress "starting MSI prior-version install and upgrade lifecycle"
+    $msiPreviousInstallLog = Join-Path $LifecycleDir "msi-previous-install.log"
+    $msiUpgradeLog = Join-Path $LifecycleDir "msi-upgrade.log"
+    $msiRepairLog = Join-Path $LifecycleDir "msi-repair.log"
+    $msiDowngradeLog = Join-Path $LifecycleDir "msi-downgrade.log"
     $msiInstalled = $true
     Invoke-MsiExec @(
-        "/i", "`"$($msiPackages[0].FullName)`"", "/qn", "/norestart", "/L*V", "`"$msiInstallLog`""
-    ) "MSI clean install"
-    $msiEntries = @(Get-LiveBlockUninstallEntries)
-    if ($msiEntries.Count -eq 0) { throw "MSI install did not create an uninstall registration" }
+        "/i", "`"$($previousMsiPackages[0].FullName)`"", "/qn", "/norestart", "/L*V", "`"$msiPreviousInstallLog`""
+    ) "MSI prior-version install"
+    [void](Assert-SingleRegisteredVersion $previousVersionString "MSI prior-version install")
+    Invoke-MsiExec @(
+        "/i", "`"$($msiPackages[0].FullName)`"", "/qn", "/norestart", "/L*V", "`"$msiUpgradeLog`""
+    ) "MSI major upgrade"
+    $msiEntries = Assert-SingleRegisteredVersion $currentVersionString "MSI major upgrade"
+    Invoke-MsiExec @(
+        "/fa", "`"$($msiPackages[0].FullName)`"", "/qn", "/norestart", "/L*V", "`"$msiRepairLog`""
+    ) "MSI same-version repair"
+    [void](Assert-SingleRegisteredVersion $currentVersionString "MSI same-version repair")
+    $downgradeProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList @(
+        "/i", "`"$($previousMsiPackages[0].FullName)`"", "/qn", "/norestart", "/L*V", "`"$msiDowngradeLog`""
+    ) -Wait -PassThru
+    if ($downgradeProcess.ExitCode -eq 0) {
+        throw "MSI downgrade fixture was accepted over current version"
+    }
+    [void](Assert-SingleRegisteredVersion $currentVersionString "MSI downgrade rejection")
+    Add-Progress "MSI upgraded $previousVersion to $currentVersion, repaired current, and rejected downgrade with exit code $($downgradeProcess.ExitCode)"
     $msiApplication = Find-InstalledApplication $expectedExecutableName $msiEntries
     $msiApplicationPath = $msiApplication.FullName
     $msiInventory = Join-Path $LifecycleDir "msi-installed-payload-inventory.json"
@@ -312,7 +367,12 @@ try {
         msi = [ordered]@{
             package = $msiPackages[0].Name
             sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $msiPackages[0].FullName).Hash.ToLowerInvariant()
-            cleanInstall = $true
+            priorVersionFixture = $previousVersionString
+            priorVersionInstall = $true
+            upgradeToCurrent = $true
+            sameVersionRepair = $true
+            downgradeRejected = $true
+            downgradeExitCode = $downgradeProcess.ExitCode
             installedPayloadInventory = "msi-installed-payload-inventory.json"
             payloadCheck = $msiPayloadCheck
             launch = $msiLaunch
@@ -330,7 +390,7 @@ try {
         notTested = @(
             "signed installer execution",
             "promoted model authentication",
-            "same-version repair or prior-version upgrade",
+            "NSIS prior-version upgrade, repair, or downgrade policy",
             "capture, DirectML, GPU, display, lifecycle, accessibility, or anti-cheat behavior"
         )
     }
@@ -351,8 +411,10 @@ try {
         }
     }
     if ($msiInstalled) {
-        try {
-            Invoke-MsiExec @("/x", "`"$($msiPackages[0].FullName)`"", "/qn", "/norestart") "MSI cleanup uninstall"
-        } catch {}
+        foreach ($cleanupMsi in @($msiPackages[0], $previousMsiPackages[0])) {
+            try {
+                Invoke-MsiExec @("/x", "`"$($cleanupMsi.FullName)`"", "/qn", "/norestart") "MSI cleanup uninstall"
+            } catch {}
+        }
     }
 }

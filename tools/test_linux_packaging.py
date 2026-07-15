@@ -32,6 +32,11 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.rpm_lifecycle = (ROOT / "tools/test_linux_rpm_lifecycle.sh").read_text()
         self.packaging_docs = (ROOT / "docs/LINUX_PACKAGING.md").read_text()
 
+    def test_flatpak_targets_supported_gnome_runtime(self):
+        self.assertEqual(self.flatpak["runtime"], "org.gnome.Platform")
+        self.assertEqual(self.flatpak["sdk"], "org.gnome.Sdk")
+        self.assertEqual(self.flatpak["runtime-version"], "50")
+
     def test_runtime_permissions_are_portal_and_dri_minimized(self):
         finish = set(self.flatpak["finish-args"])
         self.assertIn("--socket=wayland", finish)

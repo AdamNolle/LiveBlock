@@ -112,6 +112,32 @@ grep -q "trusted model keyring is empty" "$evidence_dir/rpm-launch.log"
 grep -q "X11 global shortcuts registered" "$evidence_dir/rpm-launch.log"
 log_progress "application survived ${launch_seconds}s and emitted expected build-only runtime evidence"
 
+python3 - "$evidence_dir/rpm-lifecycle-summary.json" "$package_nevra" "$launch_seconds" "$launch_status" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+output, nevra, seconds, status = sys.argv[1:]
+Path(output).write_text(json.dumps({
+    "schemaVersion": 1,
+    "evidenceClass": "build-only-fedora-container-rpm",
+    "packageNevra": nevra,
+    "containerImage": "registry.fedoraproject.org/fedora@sha256:e70db1fd517c7d6990715fb200b1aae95ef6a1ef1492dc12c8ca25cc129a5094",
+    "cleanInstall": True,
+    "rpmDatabasePayloadVerification": True,
+    "launchSurvivedSeconds": int(seconds),
+    "launchTimeoutStatus": int(status),
+    "packagedOnnxRuntimeLoaded": True,
+    "emptyDevelopmentKeyringRejected": True,
+    "x11GlobalShortcutsRegistered": True,
+    "uninstallRemovedApplicationFilesAndRegistration": True,
+    "harnessRemovedEmptyPackageDirectories": False,
+    "productionModelAndTrustRoots": False,
+    "nativeFedoraHost": False,
+    "hardwareCertification": False,
+}, sort_keys=True, indent=2) + "\n")
+PY
+
 log_progress "uninstalling $package_name"
 dnf -y remove "$package_name" > "$evidence_dir/rpm-uninstall.log" 2>&1
 installed=false
@@ -130,30 +156,8 @@ if [[ -e /usr/lib/LiveBlock ]]; then
   harness_removed_empty_directories=true
 fi
 [[ ! -e /usr/lib/LiveBlock ]]
-
-python3 - "$evidence_dir/rpm-lifecycle-summary.json" "$package_nevra" "$launch_seconds" "$launch_status" "$harness_removed_empty_directories" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-output, nevra, seconds, status, harness_cleanup = sys.argv[1:]
-Path(output).write_text(json.dumps({
-    "schemaVersion": 1,
-    "evidenceClass": "build-only-fedora-container-rpm",
-    "packageNevra": nevra,
-    "containerImage": "registry.fedoraproject.org/fedora@sha256:e70db1fd517c7d6990715fb200b1aae95ef6a1ef1492dc12c8ca25cc129a5094",
-    "cleanInstall": True,
-    "rpmDatabasePayloadVerification": True,
-    "launchSurvivedSeconds": int(seconds),
-    "launchTimeoutStatus": int(status),
-    "packagedOnnxRuntimeLoaded": True,
-    "emptyDevelopmentKeyringRejected": True,
-    "x11GlobalShortcutsRegistered": True,
-    "uninstallRemovedApplicationFilesAndRegistration": True,
-    "harnessRemovedEmptyPackageDirectories": harness_cleanup == "true",
-    "productionModelAndTrustRoots": False,
-    "nativeFedoraHost": False,
-    "hardwareCertification": False,
-}, sort_keys=True, indent=2) + "\n")
-PY
+if $harness_removed_empty_directories; then
+  sed -i 's/"harnessRemovedEmptyPackageDirectories": false/"harnessRemovedEmptyPackageDirectories": true/' \
+    "$evidence_dir/rpm-lifecycle-summary.json"
+fi
 log_progress "RPM lifecycle completed"

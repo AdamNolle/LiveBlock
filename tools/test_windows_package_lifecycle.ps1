@@ -155,16 +155,31 @@ function Invoke-BoundedLaunch(
         throw "$Prefix application exited before the $Seconds-second launch gate with code $($process.ExitCode)"
     }
     $processName = $process.ProcessName
+    $messageObserved = $false
+    $observationWaitSeconds = 0
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        if (Select-String -LiteralPath $stdout -SimpleMatch "trusted model keyring is empty" -Quiet) {
+            $messageObserved = $true
+            break
+        }
+        $process.Refresh()
+        if ($process.HasExited) {
+            throw "$Prefix application exited while awaiting empty-development-keyring evidence with code $($process.ExitCode)"
+        }
+        Start-Sleep -Seconds 1
+        $observationWaitSeconds += 1
+    }
     Stop-Process -Id $process.Id -Force -ErrorAction Stop
     $process.WaitForExit(5000) | Out-Null
-    if (-not (Select-String -LiteralPath $stdout -SimpleMatch "trusted model keyring is empty" -Quiet)) {
-        throw "$Prefix launch did not preserve the expected empty-development-keyring rejection"
+    if (-not $messageObserved) {
+        throw "$Prefix launch did not preserve the expected empty-development-keyring rejection within 30 seconds after the survival gate"
     }
     Add-Progress "$Prefix launch remained active for $Seconds seconds, rejected the empty keyring, and was terminated"
     return [ordered]@{
         survivedSeconds = $Seconds
         processName = $processName
         emptyDevelopmentKeyringRejected = $true
+        startupObservationWaitSeconds = $observationWaitSeconds
         terminatedAfterGate = $true
     }
 }

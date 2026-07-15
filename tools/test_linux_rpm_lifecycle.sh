@@ -45,6 +45,8 @@ package_nevra=$(rpm -qp --queryformat '%{NEVRA}' "$package")
 rpm -K "$package" | tee "$evidence_dir/rpm-signature-status.log"
 rpm -qp --queryformat 'name=%{NAME}\nversion=%{VERSION}\nrelease=%{RELEASE}\narch=%{ARCH}\nnevra=%{NEVRA}\n' \
   "$package" > "$evidence_dir/rpm-package-metadata.txt"
+rpm -qp --requires "$package" | sort -u > "$evidence_dir/rpm-package-requires.txt"
+grep -Fxq "gtk-layer-shell" "$evidence_dir/rpm-package-requires.txt"
 
 installed=false
 cleanup() {

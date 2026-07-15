@@ -101,6 +101,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertEqual(
             source["commit"], "91e5ef02b557f93337bcc11ffe8c0a251aa9ab52"
         )
+        self.assertIn("--libdir=lib", module["config-opts"])
         self.assertIn("-Dtests=false", module["config-opts"])
 
     def test_native_bundle_is_recursive_and_targets_expected_formats(self):

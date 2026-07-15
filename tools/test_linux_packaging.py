@@ -158,6 +158,8 @@ class LinuxPackagingContractTests(unittest.TestCase):
     def test_native_bundle_is_recursive_and_targets_expected_formats(self):
         bundle = self.tauri["bundle"]
         self.assertEqual(bundle["targets"], ["deb", "rpm", "appimage"])
+        self.assertIn("libgtk-layer-shell0", bundle["linux"]["deb"]["depends"])
+        self.assertIn("gtk-layer-shell", bundle["linux"]["rpm"]["depends"])
         self.assertIn("resources/**/*", bundle["resources"])
         self.assertEqual(
             self.tauri["build"]["beforeBuildCommand"],

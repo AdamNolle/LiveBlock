@@ -467,6 +467,7 @@ jobs:
             --artifact-type rpm-lifecycle-build-only \
             --commit "$GITHUB_SHA" \
             --require rpm-package-metadata.txt \
+            --require rpm-package-requires.txt \
             --require rpm-installed-files.txt \
             --require rpm-install.log \
             --require rpm-launch.log \

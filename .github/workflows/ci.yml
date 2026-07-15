@@ -70,6 +70,7 @@ jobs:
         run: npm ci && npm run build
       - name: Generate dependency SBOM, license report, and webview inventory
         run: |
+          git ls-files --error-unmatch core/Cargo.lock platform/windows/Cargo.lock platform/linux/Cargo.lock
           mkdir -p tools/runs/ci-release-evidence
           cargo metadata --manifest-path core/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/core-metadata.json
           cargo metadata --manifest-path platform/windows/src-tauri/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/windows-metadata.json

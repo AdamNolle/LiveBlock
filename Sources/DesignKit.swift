@@ -162,6 +162,7 @@ struct Kbd: View {
                 RoundedRectangle(cornerRadius: Theme.Radius.r1, style: .continuous)
                     .strokeBorder(border, lineWidth: 1)
             )
+            .accessibilityHidden(true)
     }
 }
 
@@ -177,11 +178,19 @@ enum LBToggleSize {
 /// `Toggle` — pill track (on = accent, off = surface3), white knob, 0.18s slide.
 struct LBToggle: View {
     @Binding var isOn: Bool
+    var accessibilityName: String
+    var accessibilityIdentifier: String
     var size: LBToggleSize = .md
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.18)) { isOn.toggle() }
+            if reduceMotion {
+                isOn.toggle()
+            } else {
+                withAnimation(.easeInOut(duration: 0.18)) { isOn.toggle() }
+            }
         } label: {
             ZStack(alignment: isOn ? .trailing : .leading) {
                 Capsule(style: .continuous)
@@ -199,6 +208,9 @@ struct LBToggle: View {
             .frame(width: size.width, height: size.height)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(Text(accessibilityName))
+        .accessibilityValue(Text(isOn ? "On" : "Off"))
+        .accessibilityIdentifier(accessibilityIdentifier)
     }
 }
 

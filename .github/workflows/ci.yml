@@ -43,7 +43,7 @@ jobs:
       - name: Label and desktop adapter contract tests
         env:
           PYTHONPATH: tools
-        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_dependency_obligations tools.test_flatpak_sources tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_runtime_staging tools.test_windows_packaging
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_dependency_obligations tools.test_macos_accessibility tools.test_flatpak_sources tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_runtime_staging tools.test_windows_packaging
       - name: Explicit migration, installer, and update recovery gates
         env:
           PYTHONPATH: tools

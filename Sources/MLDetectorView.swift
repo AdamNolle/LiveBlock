@@ -302,7 +302,10 @@ struct MLDetectorView: View {
 
             Spacer(minLength: 8)
 
-            LBToggle(isOn: isOn, size: .sm)
+            LBToggle(isOn: isOn,
+                     accessibilityName: "Detect \(rule.name)",
+                     accessibilityIdentifier: "detector-class-toggle.\(rule.id)",
+                     size: .sm)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)

@@ -61,7 +61,7 @@
         "mkdir -p /app/lib/LiveBlock/resources && cp -a platform/linux/src-tauri/resources/. /app/lib/LiveBlock/resources/",
         "install -Dm644 platform/linux/flatpak/com.adamnolle.LiveBlock.desktop /app/share/applications/com.adamnolle.LiveBlock.desktop",
         "install -Dm644 platform/linux/flatpak/com.adamnolle.LiveBlock.metainfo.xml /app/share/metainfo/com.adamnolle.LiveBlock.metainfo.xml",
-        "install -Dm644 platform/linux/icons/icon.png /app/share/icons/hicolor/512x512/apps/com.adamnolle.LiveBlock.png"
+        "install -Dm644 platform/linux/src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/com.adamnolle.LiveBlock.png"
       ],
       "sources": [
         {

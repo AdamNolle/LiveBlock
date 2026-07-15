@@ -1,3 +1,4 @@
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -10,6 +11,11 @@ CI = (ROOT / ".github/workflows/ci.yml").read_text()
 CONFIG = json.loads((ROOT / "platform/windows/src-tauri/tauri.conf.json").read_text())
 BUILD_RS = (ROOT / "platform/windows/src-tauri/build.rs").read_text()
 CARGO_TOML = (ROOT / "platform/windows/src-tauri/Cargo.toml").read_text()
+NSIS_TEMPLATE_PATH = ROOT / "platform/windows/src-tauri/nsis/installer.nsi"
+NSIS_TEMPLATE = NSIS_TEMPLATE_PATH.read_bytes()
+NSIS_UPSTREAM_SHA256 = "ee84148e405adc4d736a46456dd8345a644751bd1f28a335dd7fd833a32d7c3e"
+NSIS_GUARD_START = b"  ; LIVEBLOCK BEGIN DOWNGRADE GUARD\n"
+NSIS_GUARD_END = b"  ; LIVEBLOCK END DOWNGRADE GUARD\n\n"
 
 
 class WindowsPackagingContractTests(unittest.TestCase):
@@ -81,9 +87,10 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn('"/fa"', LIFECYCLE)
         self.assertIn("downgradeRejected = $true", LIFECYCLE)
         self.assertIn("sameVersionReinstall = $true", LIFECYCLE)
-        self.assertIn("silentDowngradeAccepted = $nsisDowngradeAccepted", LIFECYCLE)
-        self.assertIn("downgradeProtectionPassed = (-not $nsisDowngradeAccepted)", LIFECYCLE)
-        self.assertIn("currentRestoredAfterDowngradeProbe = $true", LIFECYCLE)
+        self.assertIn("silentDowngradeRejected = $true", LIFECYCLE)
+        self.assertIn("downgradeProtectionPassed = $true", LIFECYCLE)
+        self.assertIn("currentRemainedInstalledAfterDowngradeProbe = $true", LIFECYCLE)
+        self.assertIn("NSIS downgrade guard expected exit code 2", LIFECYCLE)
         self.assertIn("Assert-UserDataSentinel", LIFECYCLE)
         self.assertIn("userDataSentinelPreservedAcrossTransitionsAndUninstall", LIFECYCLE)
         self.assertIn("promotedModelEmbedded -ne $false", LIFECYCLE)
@@ -107,6 +114,24 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn("signedAndTimestamped = $false", LIFECYCLE)
         self.assertIn("hardwareCertification = $false", LIFECYCLE)
         self.assertIn("finally", LIFECYCLE)
+
+    def test_custom_nsis_template_is_pinned_with_only_downgrade_guard_delta(self):
+        self.assertEqual(
+            CONFIG["bundle"]["windows"]["nsis"]["template"],
+            "nsis/installer.nsi",
+        )
+        self.assertEqual(NSIS_TEMPLATE.count(NSIS_GUARD_START), 1)
+        self.assertEqual(NSIS_TEMPLATE.count(NSIS_GUARD_END), 1)
+        start = NSIS_TEMPLATE.index(NSIS_GUARD_START)
+        end = NSIS_TEMPLATE.index(NSIS_GUARD_END, start) + len(NSIS_GUARD_END)
+        upstream = NSIS_TEMPLATE[:start] + NSIS_TEMPLATE[end:]
+        self.assertEqual(hashlib.sha256(upstream).hexdigest(), NSIS_UPSTREAM_SHA256)
+        guard = NSIS_TEMPLATE[start:end].decode()
+        self.assertIn('ReadRegStr $R7 SHCTX "${UNINSTKEY}" "DisplayVersion"', guard)
+        self.assertIn('nsis_tauri_utils::SemverCompare "${VERSION}" $R7', guard)
+        self.assertIn("SetErrorLevel 2", guard)
+        self.assertIn("Abort", guard)
+        self.assertIn("malformed", guard)
 
     def test_tauri_and_ci_build_both_unsigned_installer_formats(self):
         self.assertEqual(CONFIG["build"]["beforeBuildCommand"], "cd ../_shared-frontend && npm run build")

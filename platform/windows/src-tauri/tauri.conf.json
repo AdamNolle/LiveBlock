@@ -112,6 +112,9 @@
     "windows": {
       "webviewInstallMode": { "type": "embedBootstrapper" },
       "allowDowngrades": false,
+      "nsis": {
+        "template": "nsis/installer.nsi"
+      },
       "wix": {
         "language": "en-US"
       }

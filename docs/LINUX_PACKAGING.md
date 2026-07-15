@@ -81,7 +81,9 @@ current `0.1.0`, reinstalls current as a repair, and requires the default prior
 package attempt to leave current installed. The Fedora 44 job performs the same
 prior-install, upgrade, and reinstall sequence, then proves DNF's standard
 `upgrade` command does not replace current with the older local RPM. Explicit
-operator-forced RPM downgrade remains outside this gate.
+operator-forced RPM downgrade remains outside this gate. Create-new sentinels in
+the normal unprivileged application-data roots must survive every deb/RPM
+transition, bounded launch, and uninstall.
 
 This proves build-only package construction, payload placement, Debian/Fedora
 package-manager transitions, and bounded X11 startup in hosted environments. The
@@ -133,8 +135,9 @@ It also builds pinned GTK 3 native dependencies that are absent from the GNOME
 SDK: `gtk-layer-shell` v0.8.2 at commit
 `91e5ef02b557f93337bcc11ffe8c0a251aa9ab52`, plus the vendored
 `libayatana-appindicator` module chain described in
-`platform/linux/flatpak/shared-modules/README.md`. The LLVM 20 SDK extension matching Freedesktop 25.08 is used only to provide
-`libclang` for PipeWire's generated bindings.
+`platform/linux/flatpak/shared-modules/README.md`. The LLVM 20 SDK extension
+matching Freedesktop 25.08 is used only to provide `libclang` for PipeWire's
+generated bindings.
 
 Hosted CI run
 [29380181732](https://github.com/AdamNolle/LiveBlock/actions/runs/29380181732)
@@ -149,12 +152,20 @@ and lifecycle summary. The x86_64 bundle SHA-256 is
 inventory aggregate is
 `b06811bb4901d128cd7de6a0871a1191a684f441621d6aed136fddd547a0bddb`.
 
-That cited iteration-25 artifact remains build-only: its source is a local
-`type: dir`, its embedded keyring is empty, it has no promoted model or signed
-repository metadata, and it used the now end-of-life GNOME 47 runtime. The
-current manifest pins GNOME 50; separate hosted build/lifecycle evidence must be
-recorded before that migration is considered verified. Xvfb startup does not
-certify real portals, tray hosts, Wayland compositors, GPUs, multi-output
-geometry, accessibility, or pointer behavior. Do not publish it or check the
-broad Flatpak checklist item until a pinned release source, production
-trust/model inputs, signed repository, and real compositor behavior are present.
+That cited iteration-25 artifact remains historical BuildOnly evidence and used
+the now end-of-life GNOME 47 runtime. Current CI pins GNOME 50 and first exports
+and clean-installs a marked prior local OSTree commit, then exports current into
+the same unsigned repository. It updates to a distinct current commit, proves
+the prior marker disappears, proves repeated standard updates retain current,
+and verifies application data survives update and uninstall before the bounded
+Xvfb smoke. This tests local Flatpak transaction mechanics only: both commits use
+the same source payload, repository metadata is unsigned, and an operator can
+explicitly select an older commit.
+
+The current package remains build-only: its source is a local `type: dir`, its
+embedded keyring is empty, and it has no promoted model or signed repository
+metadata. Xvfb startup does not certify real portals, tray hosts, Wayland
+compositors, GPUs, multi-output geometry, accessibility, or pointer behavior. Do
+not publish it or check the broad Flatpak checklist item until a pinned release
+source, production trust/model inputs, signed repository, and real compositor
+behavior are present.

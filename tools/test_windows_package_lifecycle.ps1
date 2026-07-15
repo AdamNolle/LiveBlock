@@ -83,6 +83,13 @@ function Get-LiveBlockUninstallEntries {
     return @($entries)
 }
 
+function Assert-UserDataSentinel([string]$Description) {
+    $actual = Get-Content -LiteralPath $UserDataSentinel -Raw -ErrorAction Stop
+    if ($actual -ne $UserDataSentinelValue) {
+        throw "$Description modified the application-data sentinel"
+    }
+}
+
 function Assert-SingleRegisteredVersion([string]$ExpectedVersion, [string]$Description) {
     $entries = @(Get-LiveBlockUninstallEntries)
     if ($entries.Count -ne 1) {
@@ -283,6 +290,19 @@ $expectedExecutableName = $extractedExecutables[0].Name
 if (@(Get-LiveBlockUninstallEntries).Count -ne 0) {
     throw "LiveBlock is already registered; clean-install evidence requires an absent package"
 }
+$UserDataRoot = Join-Path $env:APPDATA "LiveBlock"
+$UserDataSentinel = Join-Path $UserDataRoot "package-transition-sentinel.txt"
+$UserDataSentinelValue = "liveblock-package-transition-sentinel-v1"
+if (Test-Path -LiteralPath $UserDataRoot) {
+    throw "Application-data root unexpectedly exists before transition test: $UserDataRoot"
+}
+New-Item -ItemType Directory -Path $UserDataRoot | Out-Null
+$sentinelStream = [IO.File]::Open($UserDataSentinel, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+try {
+    $sentinelBytes = [Text.UTF8Encoding]::new($false).GetBytes($UserDataSentinelValue)
+    $sentinelStream.Write($sentinelBytes, 0, $sentinelBytes.Length)
+    $sentinelStream.Flush($true)
+} finally { $sentinelStream.Dispose() }
 
 $msiInstalled = $false
 $nsisInstalled = $false
@@ -315,6 +335,7 @@ try {
         throw "MSI downgrade fixture was accepted over current version"
     }
     [void](Assert-SingleRegisteredVersion $currentVersionString "MSI downgrade rejection")
+    Assert-UserDataSentinel "MSI upgrade/repair/downgrade"
     Add-Progress "MSI upgraded $previousVersion to $currentVersion, repaired current, and rejected downgrade with exit code $($downgradeProcess.ExitCode)"
     $msiApplication = Find-InstalledApplication $expectedExecutableName $msiEntries
     $msiApplicationPath = $msiApplication.FullName
@@ -329,17 +350,37 @@ try {
     ) "MSI uninstall"
     $msiInstalled = $false
     Wait-Removed $msiApplicationPath "MSI uninstall"
-    Add-Progress "MSI uninstall removed payload and registration"
+    Assert-UserDataSentinel "MSI uninstall"
+    Add-Progress "MSI uninstall removed payload and registration while preserving user data"
 
-    Add-Progress "starting NSIS clean-install lifecycle"
-    $nsisInstallStdout = Join-Path $LifecycleDir "nsis-install.stdout.log"
-    $nsisInstallStderr = Join-Path $LifecycleDir "nsis-install.stderr.log"
+    Add-Progress "starting NSIS prior-version install and transition lifecycle"
+    $nsisPreviousInstallStdout = Join-Path $LifecycleDir "nsis-previous-install.stdout.log"
+    $nsisPreviousInstallStderr = Join-Path $LifecycleDir "nsis-previous-install.stderr.log"
+    $nsisUpgradeStdout = Join-Path $LifecycleDir "nsis-upgrade.stdout.log"
+    $nsisUpgradeStderr = Join-Path $LifecycleDir "nsis-upgrade.stderr.log"
+    $nsisRepairStdout = Join-Path $LifecycleDir "nsis-repair.stdout.log"
+    $nsisRepairStderr = Join-Path $LifecycleDir "nsis-repair.stderr.log"
+    $nsisDowngradeStdout = Join-Path $LifecycleDir "nsis-downgrade.stdout.log"
+    $nsisDowngradeStderr = Join-Path $LifecycleDir "nsis-downgrade.stderr.log"
     $nsisInstalled = $true
-    $nsisInstall = Start-Process -FilePath $nsisPackages[0].FullName -ArgumentList "/S" -Wait -PassThru `
-        -RedirectStandardOutput $nsisInstallStdout -RedirectStandardError $nsisInstallStderr
-    if ($nsisInstall.ExitCode -ne 0) { throw "NSIS clean install failed with exit code $($nsisInstall.ExitCode)" }
+    $nsisPreviousInstall = Start-Process -FilePath $previousNsisPackages[0].FullName -ArgumentList "/S" -Wait -PassThru `
+        -RedirectStandardOutput $nsisPreviousInstallStdout -RedirectStandardError $nsisPreviousInstallStderr
+    if ($nsisPreviousInstall.ExitCode -ne 0) { throw "NSIS prior-version install failed with exit code $($nsisPreviousInstall.ExitCode)" }
+    [void](Assert-SingleRegisteredVersion $previousVersionString "NSIS prior-version install")
+    $nsisUpgrade = Start-Process -FilePath $nsisPackages[0].FullName -ArgumentList "/S" -Wait -PassThru `
+        -RedirectStandardOutput $nsisUpgradeStdout -RedirectStandardError $nsisUpgradeStderr
+    if ($nsisUpgrade.ExitCode -ne 0) { throw "NSIS upgrade failed with exit code $($nsisUpgrade.ExitCode)" }
+    [void](Assert-SingleRegisteredVersion $currentVersionString "NSIS upgrade")
+    $nsisRepair = Start-Process -FilePath $nsisPackages[0].FullName -ArgumentList "/S" -Wait -PassThru `
+        -RedirectStandardOutput $nsisRepairStdout -RedirectStandardError $nsisRepairStderr
+    if ($nsisRepair.ExitCode -ne 0) { throw "NSIS same-version reinstall failed with exit code $($nsisRepair.ExitCode)" }
+    [void](Assert-SingleRegisteredVersion $currentVersionString "NSIS same-version reinstall")
+    $nsisDowngrade = Start-Process -FilePath $previousNsisPackages[0].FullName -ArgumentList "/S" -Wait -PassThru `
+        -RedirectStandardOutput $nsisDowngradeStdout -RedirectStandardError $nsisDowngradeStderr
+    [void](Assert-SingleRegisteredVersion $currentVersionString "NSIS downgrade retention")
+    Assert-UserDataSentinel "NSIS upgrade/reinstall/downgrade"
+    Add-Progress "NSIS upgraded $previousVersion to $currentVersion, reinstalled current, and retained current after downgrade attempt status $($nsisDowngrade.ExitCode)"
     $nsisEntries = @(Get-LiveBlockUninstallEntries)
-    if ($nsisEntries.Count -eq 0) { throw "NSIS install did not create an uninstall registration" }
     $nsisApplication = Find-InstalledApplication $expectedExecutableName $nsisEntries
     $nsisApplicationPath = $nsisApplication.FullName
     $nsisInventory = Join-Path $LifecycleDir "nsis-installed-payload-inventory.json"
@@ -355,7 +396,8 @@ try {
     if ($nsisRemove.ExitCode -ne 0) { throw "NSIS uninstall failed with exit code $($nsisRemove.ExitCode)" }
     $nsisInstalled = $false
     Wait-Removed $nsisApplicationPath "NSIS uninstall"
-    Add-Progress "NSIS uninstall removed payload and registration"
+    Assert-UserDataSentinel "NSIS uninstall"
+    Add-Progress "NSIS uninstall removed payload and registration while preserving user data"
 
     $summary = [ordered]@{
         schemaVersion = 1
@@ -364,6 +406,7 @@ try {
         productionModelAndTrustRoots = $false
         signedAndTimestamped = $false
         hardwareCertification = $false
+        userDataSentinelPreservedAcrossTransitionsAndUninstall = $true
         msi = [ordered]@{
             package = $msiPackages[0].Name
             sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $msiPackages[0].FullName).Hash.ToLowerInvariant()
@@ -381,7 +424,12 @@ try {
         nsis = [ordered]@{
             package = $nsisPackages[0].Name
             sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $nsisPackages[0].FullName).Hash.ToLowerInvariant()
-            cleanInstall = $true
+            priorVersionFixture = $previousVersionString
+            priorVersionInstall = $true
+            upgradeToCurrent = $true
+            sameVersionReinstall = $true
+            downgradeRetainedCurrent = $true
+            downgradeExitCode = $nsisDowngrade.ExitCode
             installedPayloadInventory = "nsis-installed-payload-inventory.json"
             payloadCheck = $nsisPayloadCheck
             launch = $nsisLaunch
@@ -390,7 +438,7 @@ try {
         notTested = @(
             "signed installer execution",
             "promoted model authentication",
-            "NSIS prior-version upgrade, repair, or downgrade policy",
+            "signed NSIS transition execution",
             "capture, DirectML, GPU, display, lifecycle, accessibility, or anti-cheat behavior"
         )
     }
@@ -416,5 +464,8 @@ try {
                 Invoke-MsiExec @("/x", "`"$($cleanupMsi.FullName)`"", "/qn", "/norestart") "MSI cleanup uninstall"
             } catch {}
         }
+    }
+    if (Test-Path -LiteralPath $UserDataRoot -PathType Container) {
+        Remove-Item -LiteralPath $UserDataRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

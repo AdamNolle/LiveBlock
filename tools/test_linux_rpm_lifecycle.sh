@@ -88,24 +88,41 @@ dnf -y --setopt=install_weak_deps=False install \
   xorg-x11-server-Xvfb dbus-daemon util-linux shadow-utils \
   > "$evidence_dir/rpm-prerequisites.log" 2>&1
 
+user_name=liveblock-ci
+useradd --create-home --home-dir /tmp/liveblock-ci-home --shell /sbin/nologin "$user_name"
+install -d -m 0700 -o "$user_name" -g "$user_name" \
+  /tmp/liveblock-ci-home/.local/share \
+  /tmp/liveblock-ci-home/.local/share/LiveBlock \
+  /tmp/liveblock-ci-runtime
+user_data_sentinel=/tmp/liveblock-ci-home/.local/share/LiveBlock/package-transition-sentinel.txt
+runuser -u "$user_name" -- sh -c \
+  'umask 077; printf %s liveblock-package-transition-sentinel-v1 > "$1"' sh "$user_data_sentinel"
+assert_user_data_sentinel() {
+  [[ "$(cat "$user_data_sentinel")" == "liveblock-package-transition-sentinel-v1" ]]
+}
+
 log_progress "clean-installing prior-version fixture $previous_nevra"
 dnf -y --setopt=install_weak_deps=False install "$previous_package" \
   > "$evidence_dir/rpm-install.log" 2>&1
 installed=true
 [[ "$(rpm -q --queryformat '%{VERSION}' "$package_name")" == "$previous_version" ]]
+assert_user_data_sentinel
 log_progress "upgrading RPM fixture to $package_nevra"
 dnf -y --setopt=install_weak_deps=False upgrade "$package" \
   > "$evidence_dir/rpm-upgrade.log" 2>&1
 [[ "$(rpm -q --queryformat '%{VERSION}' "$package_name")" == "$current_version" ]]
+assert_user_data_sentinel
 dnf -y --setopt=install_weak_deps=False reinstall "$package" \
   > "$evidence_dir/rpm-repair.log" 2>&1
 [[ "$(rpm -q --queryformat '%{VERSION}' "$package_name")" == "$current_version" ]]
+assert_user_data_sentinel
 set +e
 dnf -y --setopt=install_weak_deps=False upgrade "$previous_package" \
   > "$evidence_dir/rpm-downgrade.log" 2>&1
 rpm_downgrade_status=$?
 set -e
 [[ "$(rpm -q --queryformat '%{VERSION}' "$package_name")" == "$current_version" ]]
+assert_user_data_sentinel
 log_progress "RPM upgraded $previous_version to $current_version, repaired current, and retained current after default downgrade attempt status $rpm_downgrade_status"
 rpm -q "$package_name" > "$evidence_dir/rpm-installed-query.txt"
 [[ -x /usr/bin/liveblock-linux && ! -L /usr/bin/liveblock-linux ]]
@@ -123,11 +140,6 @@ rpm -ql --dump "$package_name" > "$evidence_dir/rpm-installed-files.txt"
 ldd /usr/bin/liveblock-linux | tee "$evidence_dir/rpm-runtime-linkage.txt"
 ! grep -q "not found" "$evidence_dir/rpm-runtime-linkage.txt"
 log_progress "installed payload and runtime linkage verified"
-
-user_name=liveblock-ci
-useradd --create-home --home-dir /tmp/liveblock-ci-home --shell /sbin/nologin "$user_name"
-install -d -m 0700 -o "$user_name" -g "$user_name" \
-  /tmp/liveblock-ci-home/.local/share /tmp/liveblock-ci-runtime
 
 set +e
 runuser -u "$user_name" -- env \
@@ -163,6 +175,7 @@ Path(output).write_text(json.dumps({
     "sameVersionRepair": True,
     "defaultDowngradeRetainedCurrent": True,
     "downgradeCommandStatus": int(downgrade_status),
+    "userDataSentinelPreservedAcrossTransitionsAndUninstall": True,
     "rpmDatabasePayloadVerification": True,
     "launchSurvivedSeconds": int(seconds),
     "launchTimeoutStatus": int(status),
@@ -182,6 +195,7 @@ dnf -y remove "$package_name" > "$evidence_dir/rpm-uninstall.log" 2>&1
 installed=false
 ! rpm -q "$package_name" >/dev/null 2>&1
 [[ ! -e /usr/bin/liveblock-linux ]]
+assert_user_data_sentinel
 harness_removed_empty_directories=false
 : > "$evidence_dir/rpm-uninstall-residue.txt"
 if [[ -e /usr/lib/LiveBlock ]]; then

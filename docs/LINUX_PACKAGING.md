@@ -79,10 +79,16 @@ This proves build-only package construction, payload placement, a Debian package
 transaction, and bounded X11 startup on the hosted Ubuntu image. It does not
 prove promoted-model authentication, production trust roots, signatures,
 updates, capture, compositor/portal behavior, GPUs, accessibility, or sustained
-operation. RPM install/launch/uninstall remains untested because Ubuntu is not a
-Fedora/RHEL package-manager environment. Native upgrade testing also remains
-open until a prior installable version is available. None of these empty-keyring,
-no-model artifacts is distributable.
+operation. A separate CI job clean-installs the RPM through DNF inside the
+checksum-pinned Fedora 44 container, verifies declared runtime requirements and
+`ldd` closure, repeats the 12-second Xvfb startup assertions, removes the package,
+and rejects any remaining application file or special node. Tauri's generated
+RPM may leave only empty intermediate resource directories; the lifecycle
+records those paths and removes only empty directories before confirming a clean
+container. This is real Fedora userspace/package-manager evidence but not a
+native Fedora kernel, desktop, portal, compositor, or hardware certification.
+Native upgrade testing also remains open until a prior installable version is
+available. None of these empty-keyring, no-model artifacts is distributable.
 
 ## Flatpak boundary
 
@@ -117,8 +123,8 @@ It also builds pinned GTK 3 native dependencies that are absent from the GNOME
 SDK: `gtk-layer-shell` v0.8.2 at commit
 `91e5ef02b557f93337bcc11ffe8c0a251aa9ab52`, plus the vendored
 `libayatana-appindicator` module chain described in
-`platform/linux/flatpak/shared-modules/README.md`. The LLVM 18 SDK extension is
-used only to provide `libclang` for PipeWire's generated bindings.
+`platform/linux/flatpak/shared-modules/README.md`. The LLVM 20 SDK extension matching Freedesktop 25.08 is used only to provide
+`libclang` for PipeWire's generated bindings.
 
 Hosted CI run
 [29380181732](https://github.com/AdamNolle/LiveBlock/actions/runs/29380181732)

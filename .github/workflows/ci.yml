@@ -473,6 +473,7 @@ jobs:
             --require rpm-install.log \
             --require rpm-launch.log \
             --require rpm-uninstall.log \
+            --require rpm-uninstall-residue.txt \
             --require rpm-lifecycle-summary.json
           python3 tools/release_evidence.py verify \
             --root tools/runs/ci-rpm-lifecycle \

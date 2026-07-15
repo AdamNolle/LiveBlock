@@ -252,7 +252,9 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("Loaded ONNX Runtime dylib with version '1.18.1'", self.rpm_lifecycle)
         self.assertIn("trusted model keyring is empty", self.rpm_lifecycle)
         self.assertIn("X11 global shortcuts registered", self.rpm_lifecycle)
-        self.assertIn("uninstallRemovedApplicationPayload", self.rpm_lifecycle)
+        self.assertIn("uninstallRemovedApplicationFilesAndRegistration", self.rpm_lifecycle)
+        self.assertIn("harnessRemovedEmptyPackageDirectories", self.rpm_lifecycle)
+        self.assertIn("rpm-uninstall-residue.txt", self.workflow)
         self.assertIn('"nativeFedoraHost": False', self.rpm_lifecycle)
         self.assertIn('"hardwareCertification": False', self.rpm_lifecycle)
 
@@ -267,7 +269,8 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("debUninstallRemovedSystemPayload", self.workflow)
         self.assertIn('"rpmLifecycle": "not-run-on-ubuntu"', self.workflow)
         self.assertIn('"productionModelAndTrustRoots": False', self.workflow)
-        self.assertIn("RPM install/launch/uninstall remains untested", self.packaging_docs)
+        self.assertIn("checksum-pinned Fedora 44 container", self.packaging_docs)
+        self.assertIn("native Fedora kernel", self.packaging_docs)
 
 
 if __name__ == "__main__":

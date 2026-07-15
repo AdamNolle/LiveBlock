@@ -377,25 +377,12 @@ try {
     [void](Assert-SingleRegisteredVersion $currentVersionString "NSIS same-version reinstall")
     $nsisDowngrade = Start-Process -FilePath $previousNsisPackages[0].FullName -ArgumentList "/S" -Wait -PassThru `
         -RedirectStandardOutput $nsisDowngradeStdout -RedirectStandardError $nsisDowngradeStderr
-    $afterDowngradeEntries = @(Get-LiveBlockUninstallEntries)
-    if ($afterDowngradeEntries.Count -ne 1) {
-        throw "NSIS downgrade attempt expected one registration; found $($afterDowngradeEntries.Count)"
+    if ($nsisDowngrade.ExitCode -ne 2) {
+        throw "NSIS downgrade guard expected exit code 2; found $($nsisDowngrade.ExitCode)"
     }
-    $afterDowngradeVersion = [string](Get-PropertyValue $afterDowngradeEntries[0] "DisplayVersion")
-    if ($afterDowngradeVersion -notin @($currentVersionString, $previousVersionString)) {
-        throw "NSIS downgrade attempt produced unexpected version $afterDowngradeVersion"
-    }
-    $nsisDowngradeAccepted = $afterDowngradeVersion -eq $previousVersionString
-    if ($nsisDowngradeAccepted) {
-        $nsisRestoreStdout = Join-Path $LifecycleDir "nsis-restore-current.stdout.log"
-        $nsisRestoreStderr = Join-Path $LifecycleDir "nsis-restore-current.stderr.log"
-        $nsisRestore = Start-Process -FilePath $nsisPackages[0].FullName -ArgumentList "/S" -Wait -PassThru `
-            -RedirectStandardOutput $nsisRestoreStdout -RedirectStandardError $nsisRestoreStderr
-        if ($nsisRestore.ExitCode -ne 0) { throw "NSIS current-version restore failed with exit code $($nsisRestore.ExitCode)" }
-        [void](Assert-SingleRegisteredVersion $currentVersionString "NSIS current-version restore")
-    }
-    Assert-UserDataSentinel "NSIS upgrade/reinstall/downgrade/restore"
-    Add-Progress "NSIS upgraded $previousVersion to $currentVersion, reinstalled current, observed downgradeAccepted=$nsisDowngradeAccepted, and restored current"
+    [void](Assert-SingleRegisteredVersion $currentVersionString "NSIS rejected downgrade")
+    Assert-UserDataSentinel "NSIS upgrade/reinstall/rejected downgrade"
+    Add-Progress "NSIS upgraded $previousVersion to $currentVersion, reinstalled current, and rejected downgrade with exit code $($nsisDowngrade.ExitCode)"
     $nsisEntries = @(Get-LiveBlockUninstallEntries)
     $nsisApplication = Find-InstalledApplication $expectedExecutableName $nsisEntries
     $nsisApplicationPath = $nsisApplication.FullName
@@ -444,10 +431,10 @@ try {
             priorVersionInstall = $true
             upgradeToCurrent = $true
             sameVersionReinstall = $true
-            silentDowngradeAccepted = $nsisDowngradeAccepted
-            downgradeProtectionPassed = (-not $nsisDowngradeAccepted)
+            silentDowngradeRejected = $true
+            downgradeProtectionPassed = $true
             downgradeExitCode = $nsisDowngrade.ExitCode
-            currentRestoredAfterDowngradeProbe = $true
+            currentRemainedInstalledAfterDowngradeProbe = $true
             installedPayloadInventory = "nsis-installed-payload-inventory.json"
             payloadCheck = $nsisPayloadCheck
             launch = $nsisLaunch

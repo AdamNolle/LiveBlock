@@ -67,10 +67,10 @@ untimestamped, no-model `windows-installers-build-only` manifest. The script:
    the UI process to remain alive for a bounded 12-second window;
 3. force-stops that process, silently uninstalls the current MSI, and waits for
    both the payload and uninstall registration to disappear;
-4. repeats prior install, current upgrade, same-version reinstall, and a silent
-   downgrade probe through the NSIS current-user installer, records the actual
-   resulting version, restores current when necessary, then inventories,
-   bounded-launches, and uninstalls current; and
+4. repeats prior install, current upgrade, and same-version reinstall through
+   the NSIS current-user installer, requires the older silent installer to exit
+   with the pinned guard's code `2` while current remains registered, then
+   inventories, bounded-launches, and uninstalls current; and
 5. preserves verbose MSI logs, NSIS stdout/stderr, launch logs, a progress
    journal, both installed-payload inventories, and a machine-readable summary.
 
@@ -83,11 +83,15 @@ package-manager transitions only on the hosted Windows image. The `0.0.9`
 fixture changes installer metadata while intentionally using the same source
 payload; it proves mechanics, not compatibility with a historical release.
 A create-new sentinel under `%APPDATA%\LiveBlock` must survive every MSI/NSIS
-transition and both uninstalls. Hosted evidence currently shows that Tauri's
-silent NSIS path accepts the older fixture despite `allowDowngrades: false`; the
-test records that failure and restores current instead of claiming protection.
-Production NSIS distribution remains blocked until a verified template/hook or
-upstream fix rejects silent downgrades. This does not prove signatures,
+transition and both uninstalls. Run `29398897155` proved Tauri 2.11.1's stock
+silent NSIS path accepted the older fixture despite `allowDowngrades: false`.
+LiveBlock therefore pins the exact upstream template at commit
+`e5ae5b93cdd310045191cc0526f253140ad64b87` and adds one hash-checked `.onInit`
+guard that reads the registered version before any uninstall or payload
+mutation. It allows upgrades/reinstalls, but rejects older or malformed incoming
+comparisons for silent and interactive entry points. Production distribution
+still requires this lifecycle against genuinely signed packages and a shipped
+historical payload. BuildOnly fixture success does not prove signatures,
 promoted-model authentication, DirectML/GPU execution, capture, anti-cheat,
 mixed-DPI, lifecycle recovery, accessibility, application-update transport, or
 sustained use.

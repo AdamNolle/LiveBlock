@@ -101,7 +101,7 @@ dnf -y --setopt=install_weak_deps=False reinstall "$package" \
   > "$evidence_dir/rpm-repair.log" 2>&1
 [[ "$(rpm -q --queryformat '%{VERSION}' "$package_name")" == "$current_version" ]]
 set +e
-dnf -y --setopt=install_weak_deps=False install "$previous_package" \
+dnf -y --setopt=install_weak_deps=False upgrade "$previous_package" \
   > "$evidence_dir/rpm-downgrade.log" 2>&1
 rpm_downgrade_status=$?
 set -e

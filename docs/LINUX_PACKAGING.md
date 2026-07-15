@@ -78,9 +78,10 @@ logs, and a machine-readable lifecycle summary are preserved together.
 CI also builds separately inventoried `0.0.9` deb/RPM package-mechanics fixtures
 from the same source payload. Ubuntu clean-installs the prior deb, upgrades to
 current `0.1.0`, reinstalls current as a repair, and requires the default prior
-package install to leave current installed. The Fedora 44 job performs the same
-prior-install, upgrade, reinstall, and current-version-retention sequence through
-DNF before its bounded launch.
+package attempt to leave current installed. The Fedora 44 job performs the same
+prior-install, upgrade, and reinstall sequence, then proves DNF's standard
+`upgrade` command does not replace current with the older local RPM. Explicit
+operator-forced RPM downgrade remains outside this gate.
 
 This proves build-only package construction, payload placement, Debian/Fedora
 package-manager transitions, and bounded X11 startup in hosted environments. The

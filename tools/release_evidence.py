@@ -300,22 +300,22 @@ def _license_tokens(expression: str) -> list[str]:
     return tokens
 
 
-def _license_leaf(identifier: str) -> tuple[int, bool, bool]:
+def _license_leaf(identifier: str) -> tuple[int, bool, bool, bool]:
     if identifier in ALLOWED_LICENSE_IDS:
-        return 0, False, False
+        return 0, False, False, False
     if identifier.startswith(REVIEW_LICENSE_PREFIXES):
-        return 1, True, False
+        return 1, True, False, False
     if identifier.startswith(RESTRICTED_LICENSE_PREFIXES):
-        return 2, False, False
-    return 2, False, True
+        return 2, False, True, False
+    return 2, False, False, True
 
 
-def _parse_license_expression(expression: str) -> tuple[int, bool, bool, list[str]]:
-    """Return rank, review/unknown presence, and normalized expression tokens."""
+def _parse_license_expression(expression: str) -> tuple[int, bool, bool, bool, list[str]]:
+    """Return rank, review/restricted/unknown presence, and normalized tokens."""
     tokens = _license_tokens(expression)
     index = 0
 
-    def factor() -> tuple[int, bool, bool]:
+    def factor() -> tuple[int, bool, bool, bool]:
         nonlocal index
         if index >= len(tokens):
             raise ValueError("incomplete license expression")
@@ -338,37 +338,39 @@ def _parse_license_expression(expression: str) -> tuple[int, bool, bool, list[st
             index += 1
         return value
 
-    def and_expression() -> tuple[int, bool, bool]:
+    def and_expression() -> tuple[int, bool, bool, bool]:
         nonlocal index
-        rank, needs_review, has_unknown = factor()
+        rank, needs_review, has_restricted, has_unknown = factor()
         while index < len(tokens) and tokens[index] == "AND":
             index += 1
-            right_rank, right_review, right_unknown = factor()
+            right_rank, right_review, right_restricted, right_unknown = factor()
             rank = max(rank, right_rank)
             needs_review = needs_review or right_review
+            has_restricted = has_restricted or right_restricted
             has_unknown = has_unknown or right_unknown
-        return rank, needs_review, has_unknown
+        return rank, needs_review, has_restricted, has_unknown
 
-    def or_expression() -> tuple[int, bool, bool]:
+    def or_expression() -> tuple[int, bool, bool, bool]:
         nonlocal index
-        rank, needs_review, has_unknown = and_expression()
+        rank, needs_review, has_restricted, has_unknown = and_expression()
         while index < len(tokens) and tokens[index] == "OR":
             index += 1
-            right_rank, right_review, right_unknown = and_expression()
+            right_rank, right_review, right_restricted, right_unknown = and_expression()
             rank = min(rank, right_rank)
             needs_review = needs_review or right_review
+            has_restricted = has_restricted or right_restricted
             has_unknown = has_unknown or right_unknown
-        return rank, needs_review, has_unknown
+        return rank, needs_review, has_restricted, has_unknown
 
-    result, review, unknown = or_expression()
+    result, review, restricted, unknown = or_expression()
     if index != len(tokens):
         raise ValueError("unexpected license expression token")
-    return result, review, unknown, tokens
+    return result, review, restricted, unknown, tokens
 
 
 def _license_choice(license_name: str) -> dict[str, Any]:
     try:
-        _rank, _review, unknown, tokens = _parse_license_expression(license_name)
+        _rank, _review, _restricted, unknown, tokens = _parse_license_expression(license_name)
     except ValueError:
         return {"license": {"name": license_name}}
     if unknown:
@@ -397,11 +399,13 @@ def _license_status(license_name: str, first_party: bool) -> tuple[str, str | No
     if not license_name.strip() or license_name.strip() == "NOASSERTION":
         return "denied", "third-party dependency has no declared license"
     try:
-        rank, has_review_license, has_unknown, _tokens = _parse_license_expression(license_name)
+        rank, has_review_license, has_restricted, has_unknown, _tokens = _parse_license_expression(license_name)
     except ValueError as error:
         return "denied", f"unknown or malformed license expression: {error}"
     if has_unknown:
         return "denied", f"license expression contains an unknown SPDX identifier: {license_name}"
+    if has_restricted:
+        return "denied", f"license expression contains a restricted SPDX identifier: {license_name}"
     if rank == 2:
         return "denied", f"license expression has no approved distribution choice: {license_name}"
     if has_review_license:
@@ -409,11 +413,36 @@ def _license_status(license_name: str, first_party: bool) -> tuple[str, str | No
     return "allowed", None
 
 
+def _load_license_decisions(path: Path | None) -> tuple[dict[str, dict[str, str]], str | None]:
+    if path is None:
+        return {}, None
+    raw = path.read_bytes()
+    document = json.loads(raw)
+    if not isinstance(document, dict) or set(document) != {"schemaVersion", "decisions"}:
+        raise ValueError("license decisions must contain only schemaVersion and decisions")
+    if document["schemaVersion"] != 1 or not isinstance(document["decisions"], list):
+        raise ValueError("license decisions must use schema 1 with a decisions array")
+    decisions: dict[str, dict[str, str]] = {}
+    required = {"purl", "declaredExpression", "selectedLicense", "rationale"}
+    for item in document["decisions"]:
+        if not isinstance(item, dict) or set(item) != required:
+            raise ValueError("each license decision must contain exactly purl, declaredExpression, selectedLicense, and rationale")
+        normalized = {key: str(item[key]).strip() for key in required}
+        if any(not value for value in normalized.values()):
+            raise ValueError("license decision values must be nonempty strings")
+        purl = normalized["purl"]
+        if not purl.startswith(("pkg:cargo/", "pkg:npm/")) or purl in decisions:
+            raise ValueError(f"invalid or duplicate license-decision purl: {purl}")
+        decisions[purl] = normalized
+    return decisions, hashlib.sha256(raw).hexdigest()
+
+
 def create_sbom(
     cargo_metadata_paths: Iterable[Path],
     npm_lock: Path,
     *,
     commit: str,
+    license_decisions: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
         raise ValueError("commit must be a full lowercase 40-character Git SHA")
@@ -422,6 +451,11 @@ def create_sbom(
     declared_licenses: dict[tuple[str, str, str, str], str] = {}
     first_party_keys: set[tuple[str, str, str, str]] = set()
     input_hashes: dict[str, str] = {}
+    decisions, decisions_sha256 = _load_license_decisions(license_decisions)
+    used_decisions: set[str] = set()
+    license_selections: list[dict[str, str]] = []
+    if decisions_sha256 is not None:
+        input_hashes["licenseDecisionsSha256"] = decisions_sha256
 
     for metadata_path in cargo_metadata_paths:
         metadata = json.loads(metadata_path.read_text())
@@ -496,16 +530,47 @@ def create_sbom(
         component["properties"].sort(key=lambda item: item["name"])
         license_name = declared_licenses[key]
         license_counts[license_name] += 1
-        status, reason = _license_status(license_name, key in first_party_keys)
+        purl = component["purl"]
+        decision = decisions.get(purl)
+        effective_license = license_name
+        if decision is not None:
+            if decision["declaredExpression"] != license_name:
+                raise ValueError(f"license decision expression does not match metadata for {purl}")
+            _rank, _review, restricted, unknown, tokens = _parse_license_expression(license_name)
+            selected = decision["selectedLicense"]
+            if "OR" not in tokens or selected not in tokens:
+                raise ValueError(f"license decision must select a declared OR branch for {purl}")
+            if selected not in ALLOWED_LICENSE_IDS:
+                raise ValueError(f"license decision must select an approved permissive SPDX identifier for {purl}")
+            if restricted or unknown:
+                raise ValueError(f"license decisions cannot override restricted or unknown terms for {purl}")
+            effective_license = selected
+            used_decisions.add(purl)
+            component.setdefault("properties", []).append({
+                "name": "liveblock:selectedLicense", "value": selected,
+            })
+            license_selections.append({
+                "purl": purl,
+                "declaredExpression": license_name,
+                "selectedLicense": selected,
+                "rationale": decision["rationale"],
+            })
+        status, reason = _license_status(effective_license, key in first_party_keys)
         finding = {
             "name": component["name"], "version": component["version"],
-            "purl": component["purl"], "license": license_name, "reason": reason,
+            "purl": purl, "license": license_name, "reason": reason,
         }
         if status == "denied":
             denied.append(finding)
         elif status == "review":
             review.append(finding)
+        component["properties"].sort(key=lambda item: item["name"])
         ordered.append(component)
+
+    unused_decisions = sorted(set(decisions) - used_decisions)
+    if unused_decisions:
+        raise ValueError(f"license decisions did not match dependency components: {', '.join(unused_decisions)}")
+    license_selections.sort(key=lambda item: item["purl"])
 
     identity_payload = json.dumps({"commit": commit, "components": ordered}, sort_keys=True).encode()
     serial = uuid.uuid5(uuid.NAMESPACE_URL, hashlib.sha256(identity_payload).hexdigest())
@@ -529,6 +594,7 @@ def create_sbom(
         "passed": not denied,
         "failures": denied,
         "reviewRequired": review,
+        "licenseSelections": license_selections,
         "componentCount": len(ordered),
         "licenseCounts": dict(sorted(license_counts.items())),
         "inputFingerprints": dict(sorted(input_hashes.items())),
@@ -562,6 +628,7 @@ def main() -> int:
     sbom_parser.add_argument("--npm-lock", type=Path, required=True)
     sbom_parser.add_argument("--output", type=Path, required=True)
     sbom_parser.add_argument("--license-report", type=Path, required=True)
+    sbom_parser.add_argument("--license-decisions", type=Path)
     sbom_parser.add_argument("--commit", required=True)
 
     arguments = parser.parse_args()
@@ -582,6 +649,7 @@ def main() -> int:
                 arguments.cargo_metadata,
                 arguments.npm_lock,
                 commit=arguments.commit,
+                license_decisions=arguments.license_decisions,
             )
             _write_json_exclusive(arguments.output, sbom)
             _write_json_exclusive(arguments.license_report, report)

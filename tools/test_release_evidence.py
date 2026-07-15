@@ -140,6 +140,7 @@ class ReleaseSbomTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.cargo = self.root / "linux-metadata.json"
         self.npm = self.root / "package-lock.json"
+        self.decisions = self.root / "license-decisions.json"
 
     def tearDown(self):
         self.temp.cleanup()
@@ -195,7 +196,7 @@ class ReleaseSbomTests(unittest.TestCase):
         for license_name in (
             "", "GPL-3.0-only", "AGPL-3.0-only", "Proprietary",
             "UNLICENSED", "LicenseRef-Proprietary", "MIT AND GPL-3.0-only",
-            "MIT OR MadeUp-1.0",
+            "MIT OR MadeUp-1.0", "MIT OR GPL-3.0-only",
         ):
             with self.subTest(license=license_name):
                 self.write_inputs(cargo_license=license_name)
@@ -222,6 +223,70 @@ class ReleaseSbomTests(unittest.TestCase):
             dependency["licenses"],
             [{"expression": "MIT OR Apache-2.0 OR LGPL-2.1-or-later"}],
         )
+
+    def test_component_bound_or_choice_removes_only_selected_review_branch(self):
+        expression = "MIT OR Apache-2.0 OR LGPL-2.1-or-later"
+        self.write_inputs(cargo_license=expression)
+        self.decisions.write_text(json.dumps({
+            "schemaVersion": 1,
+            "decisions": [{
+                "purl": "pkg:cargo/dependency@1.2.3",
+                "declaredExpression": expression,
+                "selectedLicense": "MIT",
+                "rationale": "elect the declared permissive branch",
+            }],
+        }))
+        sbom, report = create_sbom(
+            [self.cargo], self.npm, commit=COMMIT,
+            license_decisions=self.decisions,
+        )
+        self.assertEqual(report["reviewRequired"], [])
+        self.assertEqual(report["licenseSelections"][0]["selectedLicense"], "MIT")
+        dependency = next(item for item in sbom["components"] if item["name"] == "dependency")
+        self.assertEqual(
+            next(item for item in dependency["properties"] if item["name"] == "liveblock:selectedLicense")["value"],
+            "MIT",
+        )
+        self.assertEqual(dependency["licenses"], [{"expression": expression}])
+
+    def test_license_decisions_fail_closed_on_mismatch_unused_or_restricted_expression(self):
+        cases = (
+            ("MIT OR LGPL-2.1-or-later", "Apache-2.0", "declared OR branch"),
+            ("MIT OR GPL-3.0-only", "MIT", "cannot override restricted"),
+        )
+        for expression, selected, message in cases:
+            with self.subTest(expression=expression):
+                self.write_inputs(cargo_license=expression)
+                self.decisions.write_text(json.dumps({
+                    "schemaVersion": 1,
+                    "decisions": [{
+                        "purl": "pkg:cargo/dependency@1.2.3",
+                        "declaredExpression": expression,
+                        "selectedLicense": selected,
+                        "rationale": "test",
+                    }],
+                }))
+                with self.assertRaisesRegex(ValueError, message):
+                    create_sbom(
+                        [self.cargo], self.npm, commit=COMMIT,
+                        license_decisions=self.decisions,
+                    )
+
+        self.write_inputs()
+        self.decisions.write_text(json.dumps({
+            "schemaVersion": 1,
+            "decisions": [{
+                "purl": "pkg:cargo/missing@9.9.9",
+                "declaredExpression": "MIT OR Apache-2.0",
+                "selectedLicense": "MIT",
+                "rationale": "test",
+            }],
+        }))
+        with self.assertRaisesRegex(ValueError, "did not match"):
+            create_sbom(
+                [self.cargo], self.npm, commit=COMMIT,
+                license_decisions=self.decisions,
+            )
 
     def test_denied_cli_preserves_machine_readable_failure_evidence(self):
         self.write_inputs(cargo_license="GPL-3.0-only")

@@ -113,6 +113,20 @@ cycles each of sleep/wake and lock/unlock while capture is active, plus Spaces
 and fullscreen transitions. Capture must resume only when intent remains active;
 panic or quit during suspension must prevent resurrection.
 
+### Assistive technology
+
+With VoiceOver and Full Keyboard Access enabled, traverse onboarding, the control
+panel, Settings, region/class/app toggles, and the Mini HUD without a pointer.
+Every custom toggle must announce its purpose and current On/Off value; critical
+actions must expose the stable identifiers checked by
+`tools/test_macos_accessibility.py`. With **Reduce motion** enabled, toggle slides
+must change without animation and status dots must not pulse. Confirm focus is
+visible, labels do not depend on color, dynamic frame status announces measured
+state rather than a fixed cadence, and both required permission explanations
+match their implemented use. Source tests and hosted compilation prove only the
+semantic seams; this manual VoiceOver/keyboard pass remains required before
+accessibility certification.
+
 ### Displays, panic, and soak
 
 Test one, two, and three displays, primary-display changes, negative origins,

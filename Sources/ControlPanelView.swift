@@ -83,7 +83,9 @@ struct ControlPanelView: View {
             LBToggle(isOn: Binding(
                 get: { controller.isRunning },
                 set: { _ in controller.toggleCapture() }
-            ), size: .sm)
+            ), accessibilityName: "Screen blocking",
+               accessibilityIdentifier: "control-panel.capture-toggle",
+               size: .sm)
             .help(controller.isRunning ? "Stop blocking (\u{2318}\u{21E7}L)" : "Start blocking (\u{2318}\u{21E7}L)")
 
             Button(action: openSettings) {
@@ -94,7 +96,9 @@ struct ControlPanelView: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut(",", modifiers: [.command])
-            .help("Open Preferences (\u{2318},)")
+            .accessibilityLabel("Open Settings")
+            .accessibilityIdentifier("control-panel.open-settings")
+            .help("Open Settings (\u{2318},)")
         }
     }
 
@@ -103,7 +107,6 @@ struct ControlPanelView: View {
         var b = AttributedString("Block")
         b.foregroundColor = Theme.accent
         s += b
-        s += AttributedString("er")
         return s
     }
 
@@ -215,6 +218,7 @@ struct ControlPanelView: View {
             controller.toggleEditor()
         }
         .keyboardShortcut("b", modifiers: [.command, .shift])
+        .accessibilityIdentifier("control-panel.mark-region")
         .help("Drag a rectangle on screen to block (\u{2318}\u{21E7}B)")
     }
 
@@ -227,6 +231,7 @@ struct ControlPanelView: View {
                 controller.captureScreenshotForLabeling()
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
+            .accessibilityIdentifier("control-panel.capture-labeling-frame")
             .help("Snapshot the screen for labeling (\u{2318}\u{21E7}S). Starts capture if needed.")
 
             LBButton(title: "Label (\(controller.screenshotCount))",
@@ -234,12 +239,14 @@ struct ControlPanelView: View {
                      systemIcon: "rectangle.and.pencil.and.ellipsis", fullWidth: true) {
                 controller.showLabelingWindow()
             }
+            .accessibilityIdentifier("control-panel.open-labeling")
             .help("Open the labeling window")
 
             LBButton(title: "Train", variant: .secondary, size: .md,
                      systemIcon: "brain.head.profile", fullWidth: true) {
                 controller.showTrainingDashboard()
             }
+            .accessibilityIdentifier("control-panel.open-training")
             .help("Open the Training Dashboard")
         }
     }
@@ -332,7 +339,9 @@ struct ControlPanelView: View {
             LBToggle(isOn: Binding(
                 get: { controller.regionEnabled(id: region.id) },
                 set: { controller.setRegionEnabled(id: region.id, on: $0) }
-            ), size: .sm)
+            ), accessibilityName: "Region \(index + 1) enabled",
+               accessibilityIdentifier: "control-panel-region-toggle.\(region.id.uuidString)",
+               size: .sm)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 10)

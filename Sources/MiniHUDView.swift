@@ -57,6 +57,9 @@ struct MiniHUDView: View {
                     .foregroundStyle(Theme.ink1)
             }
             .padding(.horizontal, 12)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Blocking status")
+            .accessibilityValue(statusWord)
 
             divider
 
@@ -69,6 +72,9 @@ struct MiniHUDView: View {
                 stat("\(controller.screenshotCount)", "today", color: Theme.accent)
             }
             .padding(.horizontal, 12)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Live statistics")
+            .accessibilityValue("\(controller.regionCount) regions, \(frameMS) milliseconds frame cost, \(controller.screenshotCount) captures today")
 
             divider
 
@@ -79,6 +85,7 @@ struct MiniHUDView: View {
                 size: .sm,
                 systemIcon: isBlocking ? "pause.fill" : (controller.isRunning ? "stop.fill" : "play.fill")
             ) { controller.toggleCapture() }
+            .accessibilityIdentifier("mini-hud.capture-toggle")
             .help(isBlocking ? "Pause blocking" : (controller.isRunning ? "Stop blocking" : "Resume blocking"))
         }
         .frame(height: 36)

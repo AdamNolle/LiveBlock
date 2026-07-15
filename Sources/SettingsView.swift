@@ -64,13 +64,20 @@ struct SettingsView: View {
         .preferredColorScheme(.dark)
     }
 
+    private var measuredCaptureSummary: String {
+        let fps = controller.captureManager.framesPerSecond
+        return fps >= 0.5
+            ? String(format: "ScreenCaptureKit · %.0f fps measured", fps)
+            : "ScreenCaptureKit · starting"
+    }
+
     // MARK: - Sidebar
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 LiveBlockerLogo(size: 26, cornerRadius: 7)
-                Text("LiveBlocker")
+                Text("LiveBlock")
                     .font(Theme.display(size: 15, weight: .bold))
                     .tracking(-0.27)
                     .foregroundStyle(Theme.ink1)
@@ -95,7 +102,7 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.ink1)
                 }
                 Text(controller.isRunning
-                     ? "ScreenCaptureKit · 60 fps"
+                     ? measuredCaptureSummary
                      : "Capture paused")
                     .font(Theme.ui(size: 11))
                     .foregroundStyle(Theme.ink3)
@@ -263,7 +270,9 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.ink3)
                     LBToggle(isOn: Binding(
                         get: { controller.isRunning },
-                        set: { _ in controller.toggleCapture() }))
+                        set: { _ in controller.toggleCapture() }),
+                        accessibilityName: "Screen blocking",
+                        accessibilityIdentifier: "settings.capture-toggle")
                 }
                 .padding(.top, 18)
             }
@@ -554,7 +563,9 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.ink3)
             }
             Spacer()
-            LBToggle(isOn: isOn)
+            LBToggle(isOn: isOn,
+                     accessibilityName: label,
+                     accessibilityIdentifier: "settings.behavior.\(label.lowercased().replacingOccurrences(of: " ", with: "-"))")
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .overlay(alignment: .top) {
@@ -635,10 +646,10 @@ struct SettingsView: View {
         return VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 0) {
                 infoRow(label: "Version", value: "\(version) (build \(build))", divider: false)
-                infoRow(label: "Detector", value: "liveblock-detector CoreML (open-vocabulary — blocks logos & ads with no training)", divider: true)
-                infoRow(label: "Capture", value: "Apple ScreenCaptureKit at 60 Hz", divider: true)
+                infoRow(label: "Detector", value: "CoreML candidate; release activation requires verified promotion", divider: true)
+                infoRow(label: "Capture", value: measuredCaptureSummary, divider: true)
                 infoRow(label: "Screen access", value: controller.screenRecordingGranted ? "Granted" : "Not granted", divider: true)
-                infoRow(label: "Accessibility", value: controller.accessibilityGranted ? "Granted" : "Not granted", divider: true)
+                infoRow(label: "Accessibility for global hotkeys", value: controller.accessibilityGranted ? "Granted" : "Not granted", divider: true)
                 infoRow(label: "Inpainter", value: "Mirror-blend (sample band, reflect across edge, cross-fade)", divider: true)
                 infoRow(label: "Network", value: "None. Zero outbound traffic. No telemetry.", divider: true)
             }

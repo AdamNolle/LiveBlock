@@ -221,7 +221,9 @@ struct RegionLibraryView: View {
             LBToggle(isOn: Binding(
                 get: { controller.regionEnabled(id: r.id) },
                 set: { controller.setRegionEnabled(id: r.id, on: $0) }
-            ), size: .sm)
+            ), accessibilityName: "Region \(index + 1) enabled",
+               accessibilityIdentifier: "region-library-toggle.\(r.id.uuidString)",
+               size: .sm)
             .frame(width: wOn, alignment: .leading)
             .help(isOn ? "Disable this region (keeps it in the list)" : "Re-enable this region")
 

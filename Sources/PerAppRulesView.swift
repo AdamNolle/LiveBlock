@@ -149,6 +149,8 @@ struct PerAppRulesPane: View {
                     get: { excluded },
                     set: { rules.setExcluded(bundleID, excluded: $0) }
                 ),
+                accessibilityName: "Pause blocking for \(name)",
+                accessibilityIdentifier: "per-app-toggle.\(app.processIdentifier)",
                 size: .sm
             )
         }

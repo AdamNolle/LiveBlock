@@ -4,20 +4,20 @@ import Foundation
 /// Frame-free, process-free support snapshot suitable for attaching to a bug
 /// report. Never add screenshots, window titles, frontmost app metadata, user
 /// paths, labels, regions, or model inputs to this payload.
-struct DiagnosticsReport: Codable, Equatable {
-    struct Runtime: Codable, Equatable {
+struct DiagnosticsReport: Encodable, Equatable {
+    struct Runtime: Encodable, Equatable {
         let appVersion: String
         let appBuild: String
         let osVersion: String
         let architecture: String
     }
 
-    struct PermissionSnapshot: Codable, Equatable {
+    struct PermissionSnapshot: Encodable, Equatable {
         let screenRecording: Bool
         let accessibility: Bool
     }
 
-    struct CaptureSnapshot: Codable, Equatable {
+    struct CaptureSnapshot: Encodable, Equatable {
         let desired: Bool
         let running: Bool
         let detectionEnabled: Bool
@@ -30,7 +30,7 @@ struct DiagnosticsReport: Codable, Equatable {
         let systemSuspensions: [String]
     }
 
-    struct DisplaySnapshot: Codable, Equatable {
+    struct DisplaySnapshot: Encodable, Equatable {
         let id: UInt32
         let pointX: Double
         let pointY: Double
@@ -42,7 +42,7 @@ struct DiagnosticsReport: Codable, Equatable {
         let isSelected: Bool
     }
 
-    struct PrivacyDeclaration: Codable, Equatable {
+    struct PrivacyDeclaration: Encodable, Equatable {
         let containsFrameData = false
         let containsProcessList = false
         let containsWindowTitles = false

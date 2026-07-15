@@ -1,5 +1,7 @@
 import Foundation
 
+private let perAppRulesStorageKey = "perAppExcludedBundleIDs"
+
 /// Persists the user's per-app exclusion list. When the frontmost app's
 /// bundle identifier appears in `excludedBundleIDs`, the capture pipeline
 /// pauses (no detection, no inpaint, no patches drawn). Default is empty
@@ -10,7 +12,6 @@ import Foundation
 /// of `@AppStorage`-backed settings.
 @MainActor
 final class PerAppRulesStore: ObservableObject {
-    private static let key = "perAppExcludedBundleIDs"
     private let defaults: UserDefaults
     private let storageKey: String
 
@@ -21,7 +22,7 @@ final class PerAppRulesStore: ObservableObject {
     }
 
     init(defaults: UserDefaults = .standard,
-         storageKey: String = PerAppRulesStore.key) {
+         storageKey: String = perAppRulesStorageKey) {
         self.defaults = defaults
         self.storageKey = storageKey
         let stored = defaults.stringArray(forKey: storageKey) ?? []

@@ -155,6 +155,10 @@ function Invoke-BoundedLaunch(
         throw "$Prefix application exited before the $Seconds-second launch gate with code $($process.ExitCode)"
     }
     $processName = $process.ProcessName
+    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+    if (-not $process.WaitForExit(5000)) {
+        throw "$Prefix application did not exit within five seconds after bounded-launch termination"
+    }
     $messageObserved = $false
     $observationWaitSeconds = 0
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
@@ -162,24 +166,18 @@ function Invoke-BoundedLaunch(
             $messageObserved = $true
             break
         }
-        $process.Refresh()
-        if ($process.HasExited) {
-            throw "$Prefix application exited while awaiting empty-development-keyring evidence with code $($process.ExitCode)"
-        }
         Start-Sleep -Seconds 1
         $observationWaitSeconds += 1
     }
-    Stop-Process -Id $process.Id -Force -ErrorAction Stop
-    $process.WaitForExit(5000) | Out-Null
     if (-not $messageObserved) {
-        throw "$Prefix launch did not preserve the expected empty-development-keyring rejection within 30 seconds after the survival gate"
+        throw "$Prefix launch output did not preserve the expected empty-development-keyring rejection within 30 seconds after termination"
     }
     Add-Progress "$Prefix launch remained active for $Seconds seconds, rejected the empty keyring, and was terminated"
     return [ordered]@{
         survivedSeconds = $Seconds
         processName = $processName
         emptyDevelopmentKeyringRejected = $true
-        startupObservationWaitSeconds = $observationWaitSeconds
+        outputObservationWaitSeconds = $observationWaitSeconds
         terminatedAfterGate = $true
     }
 }

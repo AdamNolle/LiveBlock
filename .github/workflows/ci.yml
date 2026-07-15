@@ -469,6 +469,7 @@ jobs:
             --require rpm-package-metadata.txt \
             --require rpm-package-requires.txt \
             --require rpm-installed-files.txt \
+            --require rpm-runtime-linkage.txt \
             --require rpm-install.log \
             --require rpm-launch.log \
             --require rpm-uninstall.log \

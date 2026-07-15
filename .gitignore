@@ -73,9 +73,8 @@ tools/wandb/
 /.serena/
 /AGENTS.md
 
-# Rust (when core/ exists)
+# Rust workspaces (application lockfiles are tracked for reproducible evidence)
 core/target/
-core/Cargo.lock
 **/target/
 
 # swift-bridge generated glue (regenerated from build.rs each build)

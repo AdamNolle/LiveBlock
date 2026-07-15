@@ -466,7 +466,7 @@ jobs:
           mkdir -p tools/runs/ci-flatpak/bundle
           flatpak build-bundle /tmp/liveblock-flatpak-repo \
             tools/runs/ci-flatpak/bundle/LiveBlock_0.1.0_x86_64_build-only.flatpak \
-            com.adamnolle.LiveBlock 47
+            com.adamnolle.LiveBlock master
           python3 tools/release_evidence.py inventory \
             --root tools/runs/ci-flatpak/bundle \
             --output tools/runs/ci-flatpak/bundle-inventory.json \

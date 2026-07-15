@@ -136,6 +136,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("flatpak-builder --user --install-deps-from=flathub", self.workflow)
         self.assertIn("--disable-rofiles-fuse", self.workflow)
         self.assertIn("flatpak build-bundle", self.workflow)
+        self.assertIn("com.adamnolle.LiveBlock master", self.workflow)
         self.assertIn("--artifact-type flatpak-build-only", self.workflow)
         self.assertIn("Install, inspect, launch, and uninstall build-only Flatpak", self.workflow)
         self.assertIn("sandboxNetworkPermission", self.workflow)

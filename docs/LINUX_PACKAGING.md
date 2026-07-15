@@ -89,8 +89,9 @@ no-model artifacts is distributable.
 `platform/linux/flatpak/com.adamnolle.LiveBlock.json` now uses the real workspace
 paths, installs resources under `/app/lib/LiveBlock/resources`, pins both architecture
 runtime archives, and limits runtime permissions to Wayland/fallback X11, DRI,
-IPC, and the desktop portal. It intentionally has no network, all-device, host
-filesystem, FileChooser, Notifications, or RealtimeKit permission.
+IPC, the desktop portal, and `org.kde.StatusNotifierWatcher` for Tauri tray
+registration. It intentionally has no network, all-device, host filesystem,
+FileChooser, Notifications, or RealtimeKit permission.
 
 Cargo and npm build dependencies are committed as
 `cargo-sources.json` and `node-sources.json`, generated twice identically from
@@ -112,8 +113,30 @@ python3 tools/verify_flatpak_sources.py
 
 The committed manifest can therefore fetch every hash-pinned dependency before
 the sandbox build and run `npm ci --offline` plus Cargo offline inside the build.
-It remains build-only: its source is a local `type: dir`, its embedded keyring is
-empty, and it has no promoted model or signed repository metadata. Do not publish
-it or check the broad Flatpak checklist item until a pinned release source,
-production trust/model inputs, install/runtime evidence, and portal-only
-compositor behavior are present.
+It also builds pinned GTK 3 native dependencies that are absent from the GNOME
+SDK: `gtk-layer-shell` v0.8.2 at commit
+`91e5ef02b557f93337bcc11ffe8c0a251aa9ab52`, plus the vendored
+`libayatana-appindicator` module chain described in
+`platform/linux/flatpak/shared-modules/README.md`. The LLVM 18 SDK extension is
+used only to provide `libclang` for PipeWire's generated bindings.
+
+Hosted CI run
+[29380181732](https://github.com/AdamNolle/LiveBlock/actions/runs/29380181732)
+built the complete Flatpak in the sandbox, exported a local unsigned repository,
+created and verified a build-only bundle inventory, clean-installed the app,
+verified the regular ONNX Runtime/license/notices/keyring payloads, kept the app
+alive for 12 seconds under Xvfb, observed packaged ONNX Runtime 1.18.1 loading,
+empty-keyring rejection, and X11 shortcut registration, then uninstalled it.
+Artifact `8329534260` preserves the bundle, build/launch logs, inventory, checksum,
+and lifecycle summary. The x86_64 bundle SHA-256 is
+`fc09952f2414a46b4003ed7b65e62921590a75e5fbc9be6c8b48aa63345752e2` and its
+inventory aggregate is
+`b06811bb4901d128cd7de6a0871a1191a684f441621d6aed136fddd547a0bddb`.
+
+This is still build-only: its source is a local `type: dir`, its embedded keyring
+is empty, it has no promoted model or signed repository metadata, and GNOME 47 is
+now an upstream end-of-life runtime. Xvfb startup does not certify real portals,
+tray hosts, Wayland compositors, GPUs, multi-output geometry, accessibility, or
+pointer behavior. Do not publish it or check the broad Flatpak checklist item
+until a pinned release source, supported runtime, production trust/model inputs,
+signed repository, and real compositor behavior are present.

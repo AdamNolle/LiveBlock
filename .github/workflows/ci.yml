@@ -431,6 +431,60 @@ jobs:
             tools/runs/ci-linux-packages/lifecycle-summary.json
           if-no-files-found: error
 
+  rpm-lifecycle:
+    name: Fedora 44 RPM lifecycle
+    needs: linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download inventoried native packages
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-build-only-package-evidence
+          path: tools/runs/ci-linux-packages
+      - name: Exercise RPM lifecycle in checksum-pinned Fedora container
+        run: |
+          image="registry.fedoraproject.org/fedora@sha256:e70db1fd517c7d6990715fb200b1aae95ef6a1ef1492dc12c8ca25cc129a5094"
+          mapfile -t rpms < <(find tools/runs/ci-linux-packages/packages -maxdepth 1 -type f -name '*.rpm' -print)
+          test "${#rpms[@]}" -eq 1
+          docker pull "$image"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            "$image" \
+            ./tools/test_linux_rpm_lifecycle.sh \
+              --package "/workspace/${rpms[0]}" \
+              --evidence-dir /workspace/tools/runs/ci-rpm-lifecycle \
+              --launch-seconds 12
+          python3 tools/release_evidence.py inventory \
+            --root tools/runs/ci-rpm-lifecycle \
+            --output tools/runs/ci-rpm-lifecycle-inventory.json \
+            --platform linux-x86_64 \
+            --artifact-type rpm-lifecycle-build-only \
+            --commit "$GITHUB_SHA" \
+            --require rpm-package-metadata.txt \
+            --require rpm-installed-files.txt \
+            --require rpm-install.log \
+            --require rpm-launch.log \
+            --require rpm-uninstall.log \
+            --require rpm-lifecycle-summary.json
+          python3 tools/release_evidence.py verify \
+            --root tools/runs/ci-rpm-lifecycle \
+            --manifest tools/runs/ci-rpm-lifecycle-inventory.json
+      - name: Preserve RPM build-only lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-lifecycle-build-only-evidence
+          path: |
+            tools/runs/ci-rpm-lifecycle/*
+            tools/runs/ci-rpm-lifecycle-inventory.json
+          if-no-files-found: warn
+
   flatpak:
     name: Flatpak offline build and lifecycle
     runs-on: ubuntu-24.04

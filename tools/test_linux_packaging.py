@@ -29,6 +29,7 @@ class LinuxPackagingContractTests(unittest.TestCase):
             if isinstance(module, dict) and module["name"] == "liveblock-linux"
         )
         self.workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.rpm_lifecycle = (ROOT / "tools/test_linux_rpm_lifecycle.sh").read_text()
         self.packaging_docs = (ROOT / "docs/LINUX_PACKAGING.md").read_text()
 
     def test_runtime_permissions_are_portal_and_dri_minimized(self):
@@ -190,6 +191,27 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("sandboxNetworkPermission", self.workflow)
         self.assertIn("portalAndCompositorCertification", self.workflow)
         self.assertIn("flatpak-build-only-evidence", self.workflow)
+
+    def test_fedora_rpm_lifecycle_is_pinned_bounded_and_inventoried(self):
+        image = (
+            "registry.fedoraproject.org/fedora@sha256:"
+            "e70db1fd517c7d6990715fb200b1aae95ef6a1ef1492dc12c8ca25cc129a5094"
+        )
+        self.assertIn("Fedora 44 RPM lifecycle", self.workflow)
+        self.assertIn("needs: linux", self.workflow)
+        self.assertIn(image, self.workflow)
+        self.assertIn("test_linux_rpm_lifecycle.sh", self.workflow)
+        self.assertIn("--artifact-type rpm-lifecycle-build-only", self.workflow)
+        self.assertIn("rpm-lifecycle-build-only-evidence", self.workflow)
+        self.assertIn("rpm -V", self.rpm_lifecycle)
+        self.assertIn("rpm -ql --dump", self.rpm_lifecycle)
+        self.assertIn("timeout --kill-after=5s", self.rpm_lifecycle)
+        self.assertIn("Loaded ONNX Runtime dylib with version '1.18.1'", self.rpm_lifecycle)
+        self.assertIn("trusted model keyring is empty", self.rpm_lifecycle)
+        self.assertIn("X11 global shortcuts registered", self.rpm_lifecycle)
+        self.assertIn("uninstallRemovedApplicationPayload", self.rpm_lifecycle)
+        self.assertIn('"nativeFedoraHost": False', self.rpm_lifecycle)
+        self.assertIn('"hardwareCertification": False', self.rpm_lifecycle)
 
     def test_hosted_lifecycle_evidence_is_bounded_and_build_only(self):
         self.assertIn("Exercise build-only deb and AppImage lifecycle", self.workflow)

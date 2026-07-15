@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
+import create_flatpak_fixture_manifest as fixture_manifest
 import stage_linux_onnxruntime as staging
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +33,32 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.rpm_lifecycle = (ROOT / "tools/test_linux_rpm_lifecycle.sh").read_text()
         self.packaging_docs = (ROOT / "docs/LINUX_PACKAGING.md").read_text()
+
+    def test_flatpak_fixture_manifest_is_create_new_and_marker_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.json"
+            output = Path(directory) / "fixture.json"
+            source.write_text(json.dumps(self.flatpak), encoding="utf-8")
+            fixture_manifest.create_fixture(source, output)
+            generated = json.loads(output.read_text())
+            module = next(
+                item
+                for item in generated["modules"]
+                if isinstance(item, dict) and item.get("name") == "liveblock-linux"
+            )
+            marker_commands = [
+                command
+                for command in module["build-commands"]
+                if fixture_manifest.MARKER_DESTINATION in command
+            ]
+            self.assertEqual(len(marker_commands), 1)
+            self.assertIn(fixture_manifest.MARKER_SOURCE, marker_commands[0])
+            with self.assertRaises(ValueError):
+                fixture_manifest.create_fixture(source, output)
+        self.assertEqual(
+            (ROOT / "platform/linux/flatpak/build-only-version-fixture.txt").read_text(),
+            "0.0.9\n",
+        )
 
     def test_flatpak_targets_supported_gnome_runtime(self):
         self.assertEqual(self.flatpak["runtime"], "org.gnome.Platform")
@@ -234,6 +262,11 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("com.adamnolle.LiveBlock master", self.workflow)
         self.assertIn("--artifact-type flatpak-build-only", self.workflow)
         self.assertIn("Install, inspect, launch, and uninstall build-only Flatpak", self.workflow)
+        self.assertIn("create_flatpak_fixture_manifest.py", self.workflow)
+        self.assertIn("liveblock-build-only-version-fixture", self.workflow)
+        self.assertIn("sameVersionUpdateRetainedCurrent", self.workflow)
+        self.assertIn("standardUpdateDidNotDowngrade", self.workflow)
+        self.assertIn("userDataSentinelPreservedAcrossUpdateAndUninstall", self.workflow)
         self.assertIn("sandboxNetworkPermission", self.workflow)
         self.assertIn("portalAndCompositorCertification", self.workflow)
         self.assertIn("flatpak-build-only-evidence", self.workflow)
@@ -260,6 +293,8 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("sameVersionRepair", self.rpm_lifecycle)
         self.assertIn("defaultDowngradeRetainedCurrent", self.rpm_lifecycle)
         self.assertIn("debDefaultDowngradeRejected", self.workflow)
+        self.assertIn("debUserDataSentinelPreservedAcrossTransitionsAndUninstall", self.workflow)
+        self.assertIn("userDataSentinelPreservedAcrossTransitionsAndUninstall", self.rpm_lifecycle)
         self.assertIn("harnessRemovedEmptyPackageDirectories", self.rpm_lifecycle)
         self.assertIn("rpm-uninstall-residue.txt", self.workflow)
         self.assertIn('"nativeFedoraHost": False', self.rpm_lifecycle)

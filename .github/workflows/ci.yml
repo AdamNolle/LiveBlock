@@ -392,6 +392,14 @@ jobs:
           test -n "$package_id"
           test "$current_version" = 0.1.0
           test "$previous_version" = 0.0.9
+          mkdir -m 700 "$evidence/deb-home"
+          mkdir -m 700 -p "$evidence/deb-home/.local/share/LiveBlock"
+          user_data_sentinel="$evidence/deb-home/.local/share/LiveBlock/package-transition-sentinel.txt"
+          printf %s liveblock-package-transition-sentinel-v1 > "$user_data_sentinel"
+          chmod 600 "$user_data_sentinel"
+          assert_user_data_sentinel() {
+            test "$(cat "$user_data_sentinel")" = liveblock-package-transition-sentinel-v1
+          }
           test ! -e /usr/bin/liveblock-linux
           if dpkg-query --show "$package_id" >/dev/null 2>&1; then
             echo "package unexpectedly installed before clean-install test: $package_id" >&2
@@ -399,19 +407,23 @@ jobs:
           fi
           sudo apt-get install -y "$GITHUB_WORKSPACE/$previous_deb" > "$evidence/deb-install.log" 2>&1
           test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$previous_version"
+          assert_user_data_sentinel
           sudo apt-get install -y "$GITHUB_WORKSPACE/$deb" > "$evidence/deb-upgrade.log" 2>&1
           test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$current_version"
+          assert_user_data_sentinel
           sudo apt-get install --reinstall -y "$GITHUB_WORKSPACE/$deb" > "$evidence/deb-repair.log" 2>&1
           test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$current_version"
+          assert_user_data_sentinel
           set +e
           sudo apt-get install -y "$GITHUB_WORKSPACE/$previous_deb" > "$evidence/deb-downgrade.log" 2>&1
           deb_downgrade_status=$?
           set -e
           test "$deb_downgrade_status" -ne 0
           test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$current_version"
+          assert_user_data_sentinel
           test -x /usr/bin/liveblock-linux
           test -f /usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so
-          mkdir -m 700 "$evidence/deb-home" "$evidence/deb-runtime"
+          mkdir -m 700 "$evidence/deb-runtime"
           set +e
           timeout --kill-after=5s 12s env \
             HOME="$GITHUB_WORKSPACE/$evidence/deb-home" \
@@ -428,6 +440,7 @@ jobs:
           sudo apt-get remove -y "$package_id" > "$evidence/deb-uninstall.log" 2>&1
           test ! -e /usr/bin/liveblock-linux
           test ! -e /usr/lib/LiveBlock
+          assert_user_data_sentinel
           mkdir -m 700 "$evidence/appimage-home" "$evidence/appimage-runtime"
           set +e
           timeout --kill-after=5s 12s env \
@@ -457,6 +470,7 @@ jobs:
               "debSameVersionRepair": True,
               "debDefaultDowngradeRejected": True,
               "debDowngradeExitStatus": int(downgrade_status),
+              "debUserDataSentinelPreservedAcrossTransitionsAndUninstall": True,
               "debLaunchSurvivedSeconds": 12,
               "debLaunchTimeoutStatus": int(deb_status),
               "debUninstallRemovedSystemPayload": True,
@@ -589,14 +603,38 @@ jobs:
       - name: Build sandboxed build-only Flatpak
         run: |
           set -o pipefail
-          mkdir -p tools/runs/ci-flatpak
+          evidence=tools/runs/ci-flatpak
+          fixture_manifest=platform/linux/flatpak/com.adamnolle.LiveBlock.fixture.json
+          mkdir -p "$evidence"
+          python3 tools/create_flatpak_fixture_manifest.py \
+            --source platform/linux/flatpak/com.adamnolle.LiveBlock.json \
+            --output "$fixture_manifest"
+          trap 'rm -f "$fixture_manifest"' EXIT
+          flatpak-builder --user --install-deps-from=flathub --force-clean \
+            --disable-rofiles-fuse \
+            --state-dir=/tmp/liveblock-flatpak-state \
+            --repo=/tmp/liveblock-flatpak-repo \
+            /tmp/liveblock-flatpak-previous-build \
+            "$fixture_manifest" \
+            2>&1 | tee "$evidence/previous-build.log"
+          remote="file:///tmp/liveblock-flatpak-repo"
+          flatpak remote-add --user --if-not-exists --no-gpg-verify liveblock-ci "$remote"
+          if flatpak info --user com.adamnolle.LiveBlock >/dev/null 2>&1; then
+            echo "LiveBlock unexpectedly installed before prior Flatpak fixture" >&2
+            exit 1
+          fi
+          flatpak install --user -y --noninteractive liveblock-ci com.adamnolle.LiveBlock
+          flatpak info --user --show-commit com.adamnolle.LiveBlock > "$evidence/previous-commit.txt"
+          flatpak run --user --command=sh com.adamnolle.LiveBlock -c \
+            'test "$(cat /app/share/liveblock-build-only-version-fixture)" = 0.0.9'
+          rm -f "$fixture_manifest"
           flatpak-builder --user --install-deps-from=flathub --force-clean \
             --disable-rofiles-fuse \
             --state-dir=/tmp/liveblock-flatpak-state \
             --repo=/tmp/liveblock-flatpak-repo \
             /tmp/liveblock-flatpak-build \
             platform/linux/flatpak/com.adamnolle.LiveBlock.json \
-            2>&1 | tee tools/runs/ci-flatpak/build.log
+            2>&1 | tee "$evidence/build.log"
           mkdir -p tools/runs/ci-flatpak/bundle
           flatpak build-bundle /tmp/liveblock-flatpak-repo \
             tools/runs/ci-flatpak/bundle/LiveBlock_0.1.0_x86_64_build-only.flatpak \
@@ -618,11 +656,34 @@ jobs:
           evidence=tools/runs/ci-flatpak
           remote="file:///tmp/liveblock-flatpak-repo"
           flatpak remote-add --user --if-not-exists --no-gpg-verify liveblock-ci "$remote"
-          if flatpak info --user com.adamnolle.LiveBlock >/dev/null 2>&1; then
-            echo "LiveBlock unexpectedly installed before clean-install test" >&2
+          if ! flatpak info --user com.adamnolle.LiveBlock >/dev/null 2>&1; then
+            echo "Prior Flatpak fixture is not installed before update test" >&2
             exit 1
           fi
-          flatpak install --user -y --noninteractive liveblock-ci com.adamnolle.LiveBlock
+          previous_commit="$(cat "$evidence/previous-commit.txt")"
+          user_data_root="$HOME/.var/app/com.adamnolle.LiveBlock/data/LiveBlock"
+          user_data_sentinel="$user_data_root/package-transition-sentinel.txt"
+          mkdir -p -m 700 "$user_data_root"
+          printf %s liveblock-package-transition-sentinel-v1 > "$user_data_sentinel"
+          chmod 600 "$user_data_sentinel"
+          assert_flatpak_user_data() {
+            test "$(cat "$user_data_sentinel")" = liveblock-package-transition-sentinel-v1
+          }
+          flatpak update --user -y --noninteractive com.adamnolle.LiveBlock \
+            > "$evidence/upgrade.log" 2>&1
+          current_commit="$(flatpak info --user --show-commit com.adamnolle.LiveBlock)"
+          test "$current_commit" != "$previous_commit"
+          assert_flatpak_user_data
+          flatpak run --user --command=sh com.adamnolle.LiveBlock -c \
+            'test ! -e /app/share/liveblock-build-only-version-fixture'
+          flatpak update --user -y --noninteractive com.adamnolle.LiveBlock \
+            > "$evidence/repair.log" 2>&1
+          test "$(flatpak info --user --show-commit com.adamnolle.LiveBlock)" = "$current_commit"
+          assert_flatpak_user_data
+          flatpak update --user -y --noninteractive com.adamnolle.LiveBlock \
+            > "$evidence/downgrade.log" 2>&1
+          test "$(flatpak info --user --show-commit com.adamnolle.LiveBlock)" = "$current_commit"
+          assert_flatpak_user_data
           flatpak run --user --command=sh com.adamnolle.LiveBlock -c '
             test -x /app/bin/liveblock-linux &&
             test -f /app/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so &&
@@ -648,15 +709,24 @@ jobs:
             echo "Flatpak uninstall left LiveBlock installed" >&2
             exit 1
           fi
+          assert_flatpak_user_data
+          rm -rf "$HOME/.var/app/com.adamnolle.LiveBlock"
           flatpak remote-delete --user --force liveblock-ci
-          python3 - "$evidence/lifecycle-summary.json" "$launch_status" <<'PY'
+          python3 - "$evidence/lifecycle-summary.json" "$launch_status" "$previous_commit" "$current_commit" <<'PY'
           import json, sys
           from pathlib import Path
-          output, launch_status = sys.argv[1:]
+          output, launch_status, previous_commit, current_commit = sys.argv[1:]
           Path(output).write_text(json.dumps({
               "schemaVersion": 1,
               "evidenceClass": "build-only-hosted-flatpak",
-              "cleanInstall": True,
+              "cleanPriorFixtureInstall": True,
+              "priorFixtureMarker": "0.0.9",
+              "priorCommit": previous_commit,
+              "upgradeToCurrent": True,
+              "currentCommit": current_commit,
+              "sameVersionUpdateRetainedCurrent": True,
+              "standardUpdateDidNotDowngrade": True,
+              "userDataSentinelPreservedAcrossUpdateAndUninstall": True,
               "requiredPayloadPathsVerified": True,
               "launchSurvivedSeconds": 12,
               "launchTimeoutStatus": int(launch_status),
@@ -676,6 +746,11 @@ jobs:
           name: flatpak-build-only-evidence
           path: |
             tools/runs/ci-flatpak/build.log
+            tools/runs/ci-flatpak/previous-build.log
+            tools/runs/ci-flatpak/previous-commit.txt
+            tools/runs/ci-flatpak/upgrade.log
+            tools/runs/ci-flatpak/repair.log
+            tools/runs/ci-flatpak/downgrade.log
             tools/runs/ci-flatpak/bundle/*.flatpak
             tools/runs/ci-flatpak/bundle-inventory.json
             tools/runs/ci-flatpak/bundle.sha256

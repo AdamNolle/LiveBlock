@@ -67,7 +67,8 @@ untimestamped, no-model `windows-installers-build-only` manifest. The script:
    the UI process to remain alive for a bounded 12-second window;
 3. force-stops that process, silently uninstalls the current MSI, and waits for
    both the payload and uninstall registration to disappear;
-4. repeats clean install, installed-payload inventory, bounded launch, and
+4. repeats prior install, current upgrade, same-version reinstall, standard
+   downgrade-retention, installed-payload inventory, bounded launch, and
    uninstall through the NSIS current-user installer; and
 5. preserves verbose MSI logs, NSIS stdout/stderr, launch logs, a progress
    journal, both installed-payload inventories, and a machine-readable summary.
@@ -80,9 +81,11 @@ loadability, the expected BuildOnly trust payload, bounded UI startup, and MSI
 package-manager transitions only on the hosted Windows image. The `0.0.9`
 fixture changes installer metadata while intentionally using the same source
 payload; it proves mechanics, not compatibility with a historical release.
-It does not prove signatures, promoted-model authentication, DirectML/GPU
-execution, capture, anti-cheat, mixed-DPI, lifecycle recovery, accessibility,
-NSIS upgrade/downgrade policy, application updates, or sustained use.
+A create-new sentinel under `%APPDATA%\LiveBlock` must survive every MSI/NSIS
+transition and both uninstalls. It does not prove signatures, promoted-model
+authentication, DirectML/GPU execution, capture, anti-cheat, mixed-DPI,
+lifecycle recovery, accessibility, application-update transport, or sustained
+use.
 
 ## Credential-gated execution
 

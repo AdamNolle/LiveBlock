@@ -190,6 +190,11 @@ jobs:
           }
           $env:LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING = "1"
           cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets --release
+      - name: Build prior-version Windows package fixture
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/release_windows.ps1 -Mode BuildOnly `
+            -BuildOnlyFixtureVersion 0.0.9 -OutputDir tools/runs/ci-windows-previous
       - name: Build and inventory unsigned build-only Windows installers
         shell: pwsh
         run: |
@@ -198,7 +203,8 @@ jobs:
         shell: pwsh
         run: |
           pwsh -NoProfile -File tools/test_windows_package_lifecycle.ps1 `
-            -EvidenceDir tools/runs/ci-windows-package -LaunchSeconds 12
+            -EvidenceDir tools/runs/ci-windows-package `
+            -PreviousEvidenceDir tools/runs/ci-windows-previous -LaunchSeconds 12
       - name: Preserve Windows build-only package evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -214,6 +220,10 @@ jobs:
             tools/runs/ci-windows-package/msi-extracted/**
             tools/runs/ci-windows-package/release-manifest.json
             tools/runs/ci-windows-package/lifecycle/**
+            tools/runs/ci-windows-previous/packages/*
+            tools/runs/ci-windows-previous/package-inventory.json
+            tools/runs/ci-windows-previous/package.sha256
+            tools/runs/ci-windows-previous/release-manifest.json
           if-no-files-found: warn
 
   linux:
@@ -269,9 +279,32 @@ jobs:
           grep -q "release package runtime file is missing" missing-ort.log
           LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1 \
             cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release
-      - name: Stage pinned ONNX Runtime and build native build-only bundles
+      - name: Stage runtime and build prior-version Linux package fixtures
         run: |
           python3 tools/stage_linux_onnxruntime.py --architecture x86_64
+          cd platform/linux/src-tauri
+          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 \
+            ../../_shared-frontend/node_modules/.bin/tauri build --bundles deb,rpm --ci \
+              --config '{"version":"0.0.9"}'
+          cd "$GITHUB_WORKSPACE"
+          fixture=tools/runs/ci-linux-previous
+          mkdir -p "$fixture/packages"
+          mapfile -t debs < <(find platform/linux/target/release/bundle/deb -maxdepth 1 -type f -name '*0.0.9*.deb' -print)
+          mapfile -t rpms < <(find platform/linux/target/release/bundle/rpm -maxdepth 1 -type f -name '*0.0.9*.rpm' -print)
+          test "${#debs[@]}" -eq 1
+          test "${#rpms[@]}" -eq 1
+          cp "${debs[0]}" "${rpms[0]}" "$fixture/packages/"
+          python3 tools/release_evidence.py inventory \
+            --root "$fixture/packages" --output "$fixture/package-inventory.json" \
+            --platform linux-x86_64 --artifact-type native-version-fixtures-build-only \
+            --commit "$GITHUB_SHA" \
+            --require "$(basename "${debs[0]}")" --require "$(basename "${rpms[0]}")"
+          python3 tools/release_evidence.py verify \
+            --root "$fixture/packages" --manifest "$fixture/package-inventory.json"
+          (cd "$fixture/packages" && sha256sum * > ../packages.sha256)
+          rm -rf platform/linux/target/release/bundle/deb platform/linux/target/release/bundle/rpm
+      - name: Build current native build-only bundles
+        run: |
           cd platform/linux/src-tauri
           LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 \
             ../../_shared-frontend/node_modules/.bin/tauri build --bundles deb,rpm,appimage --ci
@@ -351,15 +384,31 @@ jobs:
         run: |
           evidence=tools/runs/ci-linux-packages
           deb="$(find "$evidence/packages" -maxdepth 1 -type f -name '*.deb' -print)"
+          previous_deb="$(find tools/runs/ci-linux-previous/packages -maxdepth 1 -type f -name '*.deb' -print)"
           appimage_root="$evidence/appimage-extract/squashfs-root"
           package_id="$(dpkg-deb --field "$deb" Package)"
+          current_version="$(dpkg-deb --field "$deb" Version)"
+          previous_version="$(dpkg-deb --field "$previous_deb" Version)"
           test -n "$package_id"
+          test "$current_version" = 0.1.0
+          test "$previous_version" = 0.0.9
           test ! -e /usr/bin/liveblock-linux
           if dpkg-query --show "$package_id" >/dev/null 2>&1; then
             echo "package unexpectedly installed before clean-install test: $package_id" >&2
             exit 1
           fi
-          sudo apt-get install -y "$GITHUB_WORKSPACE/$deb" > "$evidence/deb-install.log" 2>&1
+          sudo apt-get install -y "$GITHUB_WORKSPACE/$previous_deb" > "$evidence/deb-install.log" 2>&1
+          test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$previous_version"
+          sudo apt-get install -y "$GITHUB_WORKSPACE/$deb" > "$evidence/deb-upgrade.log" 2>&1
+          test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$current_version"
+          sudo apt-get install --reinstall -y "$GITHUB_WORKSPACE/$deb" > "$evidence/deb-repair.log" 2>&1
+          test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$current_version"
+          set +e
+          sudo apt-get install -y "$GITHUB_WORKSPACE/$previous_deb" > "$evidence/deb-downgrade.log" 2>&1
+          deb_downgrade_status=$?
+          set -e
+          test "$deb_downgrade_status" -ne 0
+          test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$current_version"
           test -x /usr/bin/liveblock-linux
           test -f /usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so
           mkdir -m 700 "$evidence/deb-home" "$evidence/deb-runtime"
@@ -394,15 +443,20 @@ jobs:
           grep -q "Loaded ONNX Runtime dylib with version '1.18.1'" "$evidence/appimage-launch.log"
           grep -q "trusted model keyring is empty" "$evidence/appimage-launch.log"
           grep -q "X11 global shortcuts registered" "$evidence/appimage-launch.log"
-          python3 - "$evidence/lifecycle-summary.json" "$package_id" "$deb_launch_status" "$appimage_launch_status" <<'PY'
+          python3 - "$evidence/lifecycle-summary.json" "$package_id" "$deb_launch_status" "$appimage_launch_status" "$previous_version" "$current_version" "$deb_downgrade_status" <<'PY'
           import json, sys
           from pathlib import Path
-          output, package_id, deb_status, appimage_status = sys.argv[1:]
+          output, package_id, deb_status, appimage_status, previous_version, current_version, downgrade_status = sys.argv[1:]
           Path(output).write_text(json.dumps({
               "schemaVersion": 1,
               "evidenceClass": "build-only-hosted-ubuntu",
               "debPackage": package_id,
-              "debCleanInstall": True,
+              "debCleanPriorVersionInstall": True,
+              "debPriorVersionFixture": previous_version,
+              "debUpgradeToCurrent": current_version,
+              "debSameVersionRepair": True,
+              "debDefaultDowngradeRejected": True,
+              "debDowngradeExitStatus": int(downgrade_status),
               "debLaunchSurvivedSeconds": 12,
               "debLaunchTimeoutStatus": int(deb_status),
               "debUninstallRemovedSystemPayload": True,
@@ -429,6 +483,18 @@ jobs:
             tools/runs/ci-linux-packages/*-launch.log
             tools/runs/ci-linux-packages/*-uninstall.log
             tools/runs/ci-linux-packages/lifecycle-summary.json
+            tools/runs/ci-linux-packages/*-upgrade.log
+            tools/runs/ci-linux-packages/*-repair.log
+            tools/runs/ci-linux-packages/*-downgrade.log
+          if-no-files-found: error
+      - name: Preserve Linux prior-version fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-version-fixture-evidence
+          path: |
+            tools/runs/ci-linux-previous/packages/*
+            tools/runs/ci-linux-previous/package-inventory.json
+            tools/runs/ci-linux-previous/packages.sha256
           if-no-files-found: error
 
   rpm-lifecycle:
@@ -446,11 +512,18 @@ jobs:
         with:
           name: linux-build-only-package-evidence
           path: tools/runs/ci-linux-packages
+      - name: Download prior-version Linux fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-version-fixture-evidence
+          path: tools/runs/ci-linux-previous
       - name: Exercise RPM lifecycle in checksum-pinned Fedora container
         run: |
           image="registry.fedoraproject.org/fedora@sha256:e70db1fd517c7d6990715fb200b1aae95ef6a1ef1492dc12c8ca25cc129a5094"
           mapfile -t rpms < <(find tools/runs/ci-linux-packages/packages -maxdepth 1 -type f -name '*.rpm' -print)
+          mapfile -t previous_rpms < <(find tools/runs/ci-linux-previous/packages -maxdepth 1 -type f -name '*.rpm' -print)
           test "${#rpms[@]}" -eq 1
+          test "${#previous_rpms[@]}" -eq 1
           docker pull "$image"
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/workspace" \
@@ -458,6 +531,7 @@ jobs:
             "$image" \
             ./tools/test_linux_rpm_lifecycle.sh \
               --package "/workspace/${rpms[0]}" \
+              --previous-package "/workspace/${previous_rpms[0]}" \
               --evidence-dir /workspace/tools/runs/ci-rpm-lifecycle \
               --launch-seconds 12
           python3 tools/release_evidence.py inventory \
@@ -471,6 +545,9 @@ jobs:
             --require rpm-installed-files.txt \
             --require rpm-runtime-linkage.txt \
             --require rpm-install.log \
+            --require rpm-upgrade.log \
+            --require rpm-repair.log \
+            --require rpm-downgrade.log \
             --require rpm-launch.log \
             --require rpm-uninstall.log \
             --require rpm-uninstall-residue.txt \

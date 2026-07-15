@@ -56,14 +56,17 @@ After package and payload inventories pass, the Windows 11 hosted runner execute
 `tools/test_windows_package_lifecycle.ps1` against only an unsigned,
 untimestamped, no-model `windows-installers-build-only` manifest. The script:
 
-1. requires that no LiveBlock uninstall registration exists;
-2. silently installs the MSI, inventories and reverifies the installed
-   executable/runtime/license/notices/keyring tree, parses the schema-1 empty
-   development keyring, loads and frees the packaged `onnxruntime.dll` through
-   .NET's native-library API, and requires the UI process to remain alive for a
-   bounded 12-second window;
-3. force-stops that process, silently uninstalls the MSI, and waits for both the
-   payload and uninstall registration to disappear;
+1. requires that no LiveBlock uninstall registration exists and validates a
+   separately inventoried unsigned `0.0.9` package-mechanics fixture;
+2. silently installs the prior MSI, upgrades it to current `0.1.0`, verifies a
+   single current registration, runs same-version `/fa` repair, requires the
+   prior MSI downgrade attempt to fail while current remains registered, then
+   inventories and reverifies the installed executable/runtime/license/notices/
+   keyring tree, parses the schema-1 empty development keyring, loads and frees
+   the packaged `onnxruntime.dll` through .NET's native-library API, and requires
+   the UI process to remain alive for a bounded 12-second window;
+3. force-stops that process, silently uninstalls the current MSI, and waits for
+   both the payload and uninstall registration to disappear;
 4. repeats clean install, installed-payload inventory, bounded launch, and
    uninstall through the NSIS current-user installer; and
 5. preserves verbose MSI logs, NSIS stdout/stderr, launch logs, a progress
@@ -73,11 +76,13 @@ The test has `finally` cleanup and the artifact upload runs even after failure s
 partial diagnostics remain available. The payload checks are deliberately
 separate from the window-subsystem process, whose stdout/stderr are not a stable
 release-mode attestation channel. This proves installer mechanics, packaged DLL
-loadability, the expected BuildOnly trust payload, and bounded UI startup only
-on the hosted Windows image. It does not prove signatures,
-promoted-model authentication, DirectML/GPU execution, capture, anti-cheat,
-mixed-DPI, lifecycle recovery, accessibility, same-version repair, prior-version
-upgrade, application updates, or sustained use.
+loadability, the expected BuildOnly trust payload, bounded UI startup, and MSI
+package-manager transitions only on the hosted Windows image. The `0.0.9`
+fixture changes installer metadata while intentionally using the same source
+payload; it proves mechanics, not compatibility with a historical release.
+It does not prove signatures, promoted-model authentication, DirectML/GPU
+execution, capture, anti-cheat, mixed-DPI, lifecycle recovery, accessibility,
+NSIS upgrade/downgrade policy, application updates, or sustained use.
 
 ## Credential-gated execution
 

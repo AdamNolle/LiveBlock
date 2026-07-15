@@ -3,6 +3,7 @@ param(
     [ValidateSet("DryRun", "BuildOnly", "Execute")]
     [string]$Mode = "DryRun",
     [string]$OutputDir = "",
+    [string]$BuildOnlyFixtureVersion = "",
     [switch]$AllowDirty
 )
 
@@ -57,6 +58,21 @@ function Find-SignTool {
 if (-not $IsWindows) { throw "Windows release packaging must run on Windows" }
 foreach ($tool in @("git", "cargo", "node", "python")) { Require-Command $tool }
 
+$TauriConfig = Join-Path $Root "platform\windows\src-tauri\tauri.conf.json"
+$currentPackageVersion = [Version]((Get-Content -LiteralPath $TauriConfig -Raw | ConvertFrom-Json).version)
+$fixtureVersion = $null
+if ($BuildOnlyFixtureVersion) {
+    if ($Mode -ne "BuildOnly") {
+        throw "BuildOnlyFixtureVersion is allowed only in BuildOnly mode"
+    }
+    try { $fixtureVersion = [Version]$BuildOnlyFixtureVersion } catch {
+        throw "BuildOnlyFixtureVersion must be a numeric dotted version"
+    }
+    if ($fixtureVersion -ge $currentPackageVersion) {
+        throw "BuildOnlyFixtureVersion must be lower than current package version $currentPackageVersion"
+    }
+}
+
 $Tauri = Join-Path $Root "platform\_shared-frontend\node_modules\.bin\tauri.cmd"
 if (-not (Test-Path -LiteralPath $Tauri -PathType Leaf)) {
     throw "Missing pinned Tauri CLI; run npm ci in platform/_shared-frontend"
@@ -98,6 +114,7 @@ python tools/validate_model_keyring.py --keyring $DevelopmentKeyring --allow-emp
 if ($LASTEXITCODE -ne 0) { throw "Development keyring validation failed" }
 
 $buildCommand = "& '$Tauri' build --bundles msi,nsis --ci"
+if ($fixtureVersion) { $buildCommand += " --config '{`"version`":`"$fixtureVersion`"}'" }
 if ($Mode -eq "DryRun") {
     $signToolDisplay = "<Windows SDK signtool.exe>"
     Write-Host "Windows release dry-run passed local preflight."
@@ -152,11 +169,20 @@ try {
     python tools/stage_windows_onnxruntime.py
     if ($LASTEXITCODE -ne 0) { throw "Pinned ONNX Runtime DirectML staging failed" }
     $stagedRuntime = $true
+    $TargetRoot = Join-Path $Root "platform\windows\target"
+    if (Test-Path -LiteralPath $TargetRoot -PathType Container) {
+        Get-ChildItem -LiteralPath $TargetRoot -Directory -Recurse |
+            Where-Object { $_.Name -in @("msi", "nsis") -and $_.Parent.Name -eq "bundle" } |
+            Remove-Item -Recurse -Force
+    }
+    $tauriArguments = @("build", "--bundles", "msi,nsis", "--ci")
+    if ($fixtureVersion) {
+        $tauriArguments += @("--config", (@{ version = $fixtureVersion.ToString() } | ConvertTo-Json -Compress))
+    }
     Push-Location (Join-Path $Root "platform\windows\src-tauri")
-    try { & $Tauri build --bundles msi,nsis --ci } finally { Pop-Location }
+    try { & $Tauri @tauriArguments } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw "Tauri Windows bundle build failed" }
 
-    $TargetRoot = Join-Path $Root "platform\windows\target"
     $packages = @(Get-ChildItem -Path $TargetRoot -Recurse -File |
         Where-Object {
             ($_.Extension -eq ".msi" -and $_.Directory.Name -eq "msi") -or
@@ -225,7 +251,13 @@ try {
     $commit = (git rev-parse HEAD).Trim()
     $required = @()
     foreach ($package in $copied) { $required += @("--require", $package.Name) }
-    $artifactType = if ($Mode -eq "Execute") { "windows-installers-signed" } else { "windows-installers-build-only" }
+    $artifactType = if ($Mode -eq "Execute") {
+        "windows-installers-signed"
+    } elseif ($fixtureVersion) {
+        "windows-installers-version-fixture-build-only"
+    } else {
+        "windows-installers-build-only"
+    }
     python tools/release_evidence.py inventory --root $PackageDir --output $Inventory --platform windows-x86_64 --artifact-type $artifactType --commit $commit @required
     if ($LASTEXITCODE -ne 0) { throw "Package inventory creation failed" }
     python tools/release_evidence.py verify --root $PackageDir --manifest $Inventory
@@ -243,6 +275,7 @@ try {
         signed = ($Mode -eq "Execute")
         timestamped = ($Mode -eq "Execute")
         promotedModelEmbedded = ($Mode -eq "Execute")
+        packageFixtureVersion = if ($fixtureVersion) { $fixtureVersion.ToString() } else { $null }
         packages = @($copied | Sort-Object Name | ForEach-Object { $_.Name })
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutputDir "release-manifest.json") -Encoding utf8NoBOM

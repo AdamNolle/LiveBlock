@@ -42,6 +42,8 @@ class LinuxPackagingContractTests(unittest.TestCase):
         self.assertIn("cd platform/linux/src-tauri", commands)
         self.assertIn("platform/linux/target/release/liveblock-linux", commands)
         self.assertIn("/app/lib/LiveBlock/resources", commands)
+        self.assertIn("platform/linux/src-tauri/icons/icon.png", commands)
+        self.assertNotIn("platform/linux/icons/icon.png", commands)
         self.assertNotIn("cargo tauri build --bundles deb", commands)
         self.assertEqual(self.flatpak["command"], "liveblock-linux")
 

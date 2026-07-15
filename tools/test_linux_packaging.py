@@ -91,6 +91,9 @@ class LinuxPackagingContractTests(unittest.TestCase):
             self.flatpak["modules"],
         )
         self.assertEqual(self.appindicator["name"], "libayatana-appindicator")
+        self.assertIn(
+            "-DCMAKE_INSTALL_LIBDIR=lib", self.appindicator["config-opts"]
+        )
         appindicator_source = self.appindicator["sources"][0]
         self.assertEqual(appindicator_source["tag"], "0.5.94")
         self.assertEqual(
@@ -110,9 +113,17 @@ class LinuxPackagingContractTests(unittest.TestCase):
             nested["ayatana-ido"]["sources"][0]["commit"],
             "f968079b09e2310fefc3fc307359025f1c74b3eb",
         )
+        self.assertIn(
+            "-DCMAKE_INSTALL_LIBDIR=lib",
+            nested["ayatana-ido"]["config-opts"],
+        )
         self.assertEqual(
             nested["libayatana-indicator"]["sources"][0]["commit"],
             "611bb384b73fa6311777ba4c41381a06f5b99dad",
+        )
+        self.assertIn(
+            "-DCMAKE_INSTALL_LIBDIR=lib",
+            nested["libayatana-indicator"]["config-opts"],
         )
 
     def test_flatpak_sdk_includes_libclang_for_pipewire_bindgen(self):

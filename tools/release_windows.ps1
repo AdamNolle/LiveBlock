@@ -133,6 +133,7 @@ if (Test-Path -LiteralPath $OutputDir) {
 $originalKeyring = [IO.File]::ReadAllBytes($DevelopmentKeyring)
 $stagedProduction = $false
 $stagedRuntime = $false
+$fixtureConfigOverride = $null
 $oldOverride = $env:LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING
 try {
     if ($Mode -eq "Execute") {
@@ -177,7 +178,15 @@ try {
     }
     $tauriArguments = @("build", "--bundles", "msi,nsis", "--ci")
     if ($fixtureVersion) {
-        $tauriArguments += @("--config", (@{ version = $fixtureVersion.ToString() } | ConvertTo-Json -Compress))
+        $fixtureConfigOverride = Join-Path ([IO.Path]::GetTempPath()) "liveblock-windows-fixture-$PID.json"
+        $fixtureJson = @{ version = $fixtureVersion.ToString() } | ConvertTo-Json -Compress
+        $fixtureBytes = [Text.UTF8Encoding]::new($false).GetBytes($fixtureJson)
+        $fixtureStream = [IO.File]::Open($fixtureConfigOverride, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $fixtureStream.Write($fixtureBytes, 0, $fixtureBytes.Length)
+            $fixtureStream.Flush($true)
+        } finally { $fixtureStream.Dispose() }
+        $tauriArguments += @("--config", $fixtureConfigOverride)
     }
     Push-Location (Join-Path $Root "platform\windows\src-tauri")
     try { & $Tauri @tauriArguments } finally { Pop-Location }
@@ -281,6 +290,9 @@ try {
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutputDir "release-manifest.json") -Encoding utf8NoBOM
     Write-Host "Verified Windows package evidence: $OutputDir"
 } finally {
+    if ($fixtureConfigOverride) {
+        Remove-Item -LiteralPath $fixtureConfigOverride -Force -ErrorAction SilentlyContinue
+    }
     if ($stagedRuntime) {
         Remove-Item -LiteralPath $RuntimeStaging -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $RuntimeNoticesStaging -Force -ErrorAction SilentlyContinue

@@ -141,15 +141,17 @@ python3 tools/verify_dependency_obligations.py \
 The shared job also reruns focused legacy-schema migrations, atomic installer
 behavior, signed CoreML bundle tamper rejection, and ONNX update rollback/crash
 recovery tests. These are deterministic implementation tests. Linux hosted CI
-extracts/inventories all three native formats, clean-installs and removes the deb,
-and bounded-smoke-launches both installed deb and extracted AppImage payloads.
-It does not run a native RPM transaction, Flatpak build/install, prior-version
-upgrade, portal/compositor flow, or production model authentication. Windows CI
-builds and inventories unsigned MSI/NSIS bytes under
+extracts/inventories all three native formats, exercises prior/current deb
+transitions and AppImage launch on Ubuntu, exercises prior/current RPM
+transitions in checksum-pinned Fedora userspace, and builds/updates/launches a
+local GNOME 50 Flatpak repository. These jobs do not certify a real portal,
+compositor, GPU, native Fedora kernel/desktop, or production repository metadata.
+Windows CI builds and inventories unsigned MSI/NSIS bytes under
 `windows-installers-build-only` and the administratively extracted MSI payload
-under a separate build-only inventory. Hosted Windows then clean-installs,
-inventories, bounded-smoke-launches, and uninstalls each BuildOnly format while
-preserving lifecycle logs and an explicit no-production-model/no-signature
-summary. CI does not test production package signing, repair/prior-version
-upgrade, power loss, model parity, capture, or hardware execution. Those remain
-open until exact production artifacts and suitable hosts/credentials exist.
+under a separate build-only inventory. Hosted Windows exercises prior install,
+current upgrade, same-version repair/reinstall, downgrade rejection, inventory,
+bounded launch, user-data preservation, and uninstall for both formats. CI does
+not test production package signing, genuinely shipped historical payloads,
+MSIX/application-update distribution, power loss, model parity, capture, or
+hardware execution. Those remain open until exact production artifacts and
+suitable hosts/credentials exist.

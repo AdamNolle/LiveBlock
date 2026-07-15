@@ -140,6 +140,33 @@ function Write-InstalledInventory(
     return $installRoot
 }
 
+function Test-BuildOnlyRuntimePayload([string]$InstallRoot, [string]$Prefix) {
+    $keyringPath = Join-Path $InstallRoot "resources/trusted-model-keys.json"
+    $keyring = Get-Content -LiteralPath $keyringPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    if ($keyring.schemaVersion -ne 1 -or @($keyring.keys).Count -ne 0) {
+        throw "$Prefix BuildOnly package must contain the schema-1 empty development keyring"
+    }
+
+    $runtimePath = Join-Path $InstallRoot "resources/onnxruntime.dll"
+    $runtimeHandle = [IntPtr]::Zero
+    try {
+        $runtimeHandle = [Runtime.InteropServices.NativeLibrary]::Load($runtimePath)
+        if ($runtimeHandle -eq [IntPtr]::Zero) {
+            throw "$Prefix packaged ONNX Runtime returned a null native-library handle"
+        }
+    }
+    finally {
+        if ($runtimeHandle -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.NativeLibrary]::Free($runtimeHandle)
+        }
+    }
+    Add-Progress "$Prefix payload has an empty development keyring and a loadable packaged ONNX Runtime"
+    return [ordered]@{
+        emptyDevelopmentKeyringVerified = $true
+        packagedOnnxRuntimeLoadable = $true
+    }
+}
+
 function Invoke-BoundedLaunch(
     [IO.FileInfo]$Application,
     [string]$Prefix,
@@ -159,25 +186,10 @@ function Invoke-BoundedLaunch(
     if (-not $process.WaitForExit(5000)) {
         throw "$Prefix application did not exit within five seconds after bounded-launch termination"
     }
-    $messageObserved = $false
-    $observationWaitSeconds = 0
-    for ($attempt = 0; $attempt -lt 30; $attempt++) {
-        if (Select-String -LiteralPath $stdout -SimpleMatch "trusted model keyring is empty" -Quiet) {
-            $messageObserved = $true
-            break
-        }
-        Start-Sleep -Seconds 1
-        $observationWaitSeconds += 1
-    }
-    if (-not $messageObserved) {
-        throw "$Prefix launch output did not preserve the expected empty-development-keyring rejection within 30 seconds after termination"
-    }
-    Add-Progress "$Prefix launch remained active for $Seconds seconds, rejected the empty keyring, and was terminated"
+    Add-Progress "$Prefix launch remained active for $Seconds seconds and was terminated"
     return [ordered]@{
         survivedSeconds = $Seconds
         processName = $processName
-        emptyDevelopmentKeyringRejected = $true
-        outputObservationWaitSeconds = $observationWaitSeconds
         terminatedAfterGate = $true
     }
 }
@@ -252,7 +264,8 @@ try {
     $msiApplication = Find-InstalledApplication $expectedExecutableName $msiEntries
     $msiApplicationPath = $msiApplication.FullName
     $msiInventory = Join-Path $LifecycleDir "msi-installed-payload-inventory.json"
-    [void](Write-InstalledInventory $msiApplication $msiInventory "windows-build-only-msi-installed" $commit)
+    $msiInstallRoot = Write-InstalledInventory $msiApplication $msiInventory "windows-build-only-msi-installed" $commit
+    $msiPayloadCheck = Test-BuildOnlyRuntimePayload $msiInstallRoot "msi"
     $msiLaunch = Invoke-BoundedLaunch $msiApplication "msi" $LaunchSeconds
 
     $msiUninstallLog = Join-Path $LifecycleDir "msi-uninstall.log"
@@ -276,6 +289,7 @@ try {
     $nsisApplicationPath = $nsisApplication.FullName
     $nsisInventory = Join-Path $LifecycleDir "nsis-installed-payload-inventory.json"
     $nsisInstallRoot = Write-InstalledInventory $nsisApplication $nsisInventory "windows-build-only-nsis-installed" $commit
+    $nsisPayloadCheck = Test-BuildOnlyRuntimePayload $nsisInstallRoot "nsis"
     $nsisUninstaller = Resolve-NsisUninstaller $nsisEntries $nsisInstallRoot
     $nsisLaunch = Invoke-BoundedLaunch $nsisApplication "nsis" $LaunchSeconds
 
@@ -300,6 +314,7 @@ try {
             sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $msiPackages[0].FullName).Hash.ToLowerInvariant()
             cleanInstall = $true
             installedPayloadInventory = "msi-installed-payload-inventory.json"
+            payloadCheck = $msiPayloadCheck
             launch = $msiLaunch
             uninstallRemovedPayloadAndRegistration = $true
         }
@@ -308,6 +323,7 @@ try {
             sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $nsisPackages[0].FullName).Hash.ToLowerInvariant()
             cleanInstall = $true
             installedPayloadInventory = "nsis-installed-payload-inventory.json"
+            payloadCheck = $nsisPayloadCheck
             launch = $nsisLaunch
             uninstallRemovedPayloadAndRegistration = $true
         }

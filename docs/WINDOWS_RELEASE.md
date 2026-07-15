@@ -58,9 +58,10 @@ untimestamped, no-model `windows-installers-build-only` manifest. The script:
 
 1. requires that no LiveBlock uninstall registration exists;
 2. silently installs the MSI, inventories and reverifies the installed
-   executable/runtime/license/notices/keyring tree, requires the UI process to
-   remain alive for a bounded 12-second window, and confirms the expected empty
-   development keyring rejection was logged;
+   executable/runtime/license/notices/keyring tree, parses the schema-1 empty
+   development keyring, loads and frees the packaged `onnxruntime.dll` through
+   .NET's native-library API, and requires the UI process to remain alive for a
+   bounded 12-second window;
 3. force-stops that process, silently uninstalls the MSI, and waits for both the
    payload and uninstall registration to disappear;
 4. repeats clean install, installed-payload inventory, bounded launch, and
@@ -69,8 +70,11 @@ untimestamped, no-model `windows-installers-build-only` manifest. The script:
    journal, both installed-payload inventories, and a machine-readable summary.
 
 The test has `finally` cleanup and the artifact upload runs even after failure so
-partial diagnostics remain available. It proves installer mechanics and bounded
-UI startup only on the hosted Windows image. It does not prove signatures,
+partial diagnostics remain available. The payload checks are deliberately
+separate from the window-subsystem process, whose stdout/stderr are not a stable
+release-mode attestation channel. This proves installer mechanics, packaged DLL
+loadability, the expected BuildOnly trust payload, and bounded UI startup only
+on the hosted Windows image. It does not prove signatures,
 promoted-model authentication, DirectML/GPU execution, capture, anti-cheat,
 mixed-DPI, lifecycle recovery, accessibility, same-version repair, prior-version
 upgrade, application updates, or sustained use.

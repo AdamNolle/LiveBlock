@@ -46,7 +46,10 @@ rpm -K "$package" | tee "$evidence_dir/rpm-signature-status.log"
 rpm -qp --queryformat 'name=%{NAME}\nversion=%{VERSION}\nrelease=%{RELEASE}\narch=%{ARCH}\nnevra=%{NEVRA}\n' \
   "$package" > "$evidence_dir/rpm-package-metadata.txt"
 rpm -qp --requires "$package" | sort -u > "$evidence_dir/rpm-package-requires.txt"
-grep -Fxq "gtk-layer-shell" "$evidence_dir/rpm-package-requires.txt"
+for requirement in \
+  gtk-layer-shell pipewire-libs libX11 libXcomposite libXfixes libXinerama libxkbcommon wayland-libs; do
+  grep -Fxq "$requirement" "$evidence_dir/rpm-package-requires.txt"
+done
 
 installed=false
 cleanup() {
@@ -83,7 +86,9 @@ for relative in \
 done
 rpm -V "$package_name" > "$evidence_dir/rpm-verify-installed.log"
 rpm -ql --dump "$package_name" > "$evidence_dir/rpm-installed-files.txt"
-log_progress "installed payload verified by RPM database"
+ldd /usr/bin/liveblock-linux | tee "$evidence_dir/rpm-runtime-linkage.txt"
+! grep -q "not found" "$evidence_dir/rpm-runtime-linkage.txt"
+log_progress "installed payload and runtime linkage verified"
 
 user_name=liveblock-ci
 useradd --create-home --home-dir /tmp/liveblock-ci-home --shell /sbin/nologin "$user_name"

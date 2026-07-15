@@ -158,8 +158,38 @@ class LinuxPackagingContractTests(unittest.TestCase):
     def test_native_bundle_is_recursive_and_targets_expected_formats(self):
         bundle = self.tauri["bundle"]
         self.assertEqual(bundle["targets"], ["deb", "rpm", "appimage"])
-        self.assertIn("libgtk-layer-shell0", bundle["linux"]["deb"]["depends"])
-        self.assertIn("gtk-layer-shell", bundle["linux"]["rpm"]["depends"])
+        self.assertEqual(
+            set(bundle["linux"]["deb"]["depends"]),
+            {
+                "libwebkit2gtk-4.1-0",
+                "libgtk-3-0",
+                "libayatana-appindicator3-1",
+                "libgtk-layer-shell0",
+                "libpipewire-0.3-0",
+                "libx11-6",
+                "libxcomposite1",
+                "libxfixes3",
+                "libxinerama1",
+                "libxkbcommon0",
+                "libwayland-client0",
+            },
+        )
+        self.assertEqual(
+            set(bundle["linux"]["rpm"]["depends"]),
+            {
+                "webkit2gtk4.1",
+                "gtk3",
+                "libappindicator-gtk3",
+                "gtk-layer-shell",
+                "pipewire-libs",
+                "libX11",
+                "libXcomposite",
+                "libXfixes",
+                "libXinerama",
+                "libxkbcommon",
+                "wayland-libs",
+            },
+        )
         self.assertIn("resources/**/*", bundle["resources"])
         self.assertEqual(
             self.tauri["build"]["beforeBuildCommand"],

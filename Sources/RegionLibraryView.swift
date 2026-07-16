@@ -104,10 +104,7 @@ struct RegionLibraryView: View {
     private var footRow: some View {
         HStack(spacing: 10) {
             let shown = filteredRegions.count
-            (Text("Showing ")
-             + Text("\(shown)").font(Theme.mono(size: 12, weight: .medium)).foregroundColor(Theme.ink1)
-             + Text(" of ")
-             + Text("\(controller.regionCount)").font(Theme.mono(size: 12, weight: .medium)).foregroundColor(Theme.ink1))
+            Text("Showing \(Text("\(shown)").font(Theme.mono(size: 12, weight: .medium)).foregroundColor(Theme.ink1)) of \(Text("\(controller.regionCount)").font(Theme.mono(size: 12, weight: .medium)).foregroundColor(Theme.ink1))")
                 .font(Theme.ui(size: 12))
                 .foregroundStyle(Theme.ink3)
             Spacer(minLength: 0)

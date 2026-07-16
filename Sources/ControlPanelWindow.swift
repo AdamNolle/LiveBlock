@@ -45,18 +45,22 @@ final class ControlPanelWindow: NSPanel, NSWindowDelegate {
         self.delegate = self
     }
 
-    /// On the first time the user closes the Control Panel, post a quick
-    /// notification reminding them the app keeps running in the menu bar.
-    /// Without this, new users will think LiveBlock crashed because the
-    /// Dock icon stays but the panel disappears.
+    /// On the first time the user closes the Control Panel, show a local
+    /// accessible reminder that the app keeps running in the menu bar. Using an
+    /// NSAlert avoids both a surprise notification-permission prompt and the
+    /// deprecated NSUserNotification API.
     func windowWillClose(_ notification: Notification) {
         let key = "didShowMenuBarHint"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
         UserDefaults.standard.set(true, forKey: key)
-        let n = NSUserNotification()
-        n.title = "LiveBlock keeps running"
-        n.informativeText = "Click the shield icon in your menu bar to bring this back, or press \u{2318}\u{21E7}L to toggle blocking from anywhere."
-        NSUserNotificationCenter.default.deliver(n)
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "LiveBlock keeps running"
+            alert.informativeText = "Click the shield icon in your menu bar to bring the control panel back, or press \u{2318}\u{21E7}L to toggle blocking from anywhere."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Got it")
+            alert.runModal()
+        }
     }
 
     override var canBecomeKey: Bool { true }

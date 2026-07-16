@@ -250,10 +250,7 @@ struct SettingsView: View {
                 }
                 .padding(.bottom, 12)
 
-                (Text("Set, and forgotten.\n")
-                    .foregroundColor(Theme.ink1)
-                 + Text("The detector keeps catching ads on its own, frame by frame.")
-                    .foregroundColor(Theme.ink3))
+                Text("\(Text("Set, and forgotten.\n").foregroundColor(Theme.ink1))\(Text("The detector keeps catching ads on its own, frame by frame.").foregroundColor(Theme.ink3))")
                     .font(Theme.display(size: 28, weight: .semibold))
                     .tracking(-0.7)
                     .lineSpacing(2)
@@ -334,16 +331,7 @@ struct SettingsView: View {
                 }
             }
             .padding(.top, 6)
-            (Text("\(controller.captureManager.currentPatches.count)")
-                .font(Theme.mono(size: 12))
-                .foregroundColor(Theme.ink2)
-             + Text(" live patches this frame · ")
-                .foregroundColor(Theme.ink3)
-             + Text("\(controller.regionCount)")
-                .font(Theme.mono(size: 12))
-                .foregroundColor(Theme.ink2)
-             + Text(" active regions")
-                .foregroundColor(Theme.ink3))
+            Text("\(Text("\(controller.captureManager.currentPatches.count)").font(Theme.mono(size: 12)).foregroundColor(Theme.ink2))\(Text(" live patches this frame · ").foregroundColor(Theme.ink3))\(Text("\(controller.regionCount)").font(Theme.mono(size: 12)).foregroundColor(Theme.ink2))\(Text(" active regions").foregroundColor(Theme.ink3))")
                 .font(Theme.ui(size: 12))
                 .padding(.top, 10)
 

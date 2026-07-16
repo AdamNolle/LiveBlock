@@ -71,9 +71,9 @@ final class FramePipelinePerformanceTests: XCTestCase {
 
     func testPendingSnapshotIsCancelledBeforeLaterCaptureGeneration() async {
         let storage = LatestBufferStorage()
-        let request = Task { await storage.requestSnapshot(timeout: 10, generation: 7) }
-        for _ in 0..<100 where storage.pendingCount() == 0 { await Task.yield() }
-        XCTAssertEqual(storage.pendingCount(), 1)
+        let request = Task.detached { await storage.requestSnapshot(timeout: 10, generation: 7) }
+        let requestRegistered = await waitForPendingRequest(in: storage)
+        XCTAssertTrue(requestRegistered)
 
         storage.ingest(makePixelBuffer(width: 16, height: 16),
                        context: CIContext(options: [.useSoftwareRenderer: true]),
@@ -86,9 +86,9 @@ final class FramePipelinePerformanceTests: XCTestCase {
 
     func testSnapshotIsDeliveredOnlyForMatchingCaptureGeneration() async {
         let storage = LatestBufferStorage()
-        let request = Task { await storage.requestSnapshot(timeout: 10, generation: 9) }
-        for _ in 0..<100 where storage.pendingCount() == 0 { await Task.yield() }
-        XCTAssertEqual(storage.pendingCount(), 1)
+        let request = Task.detached { await storage.requestSnapshot(timeout: 10, generation: 9) }
+        let requestRegistered = await waitForPendingRequest(in: storage)
+        XCTAssertTrue(requestRegistered)
 
         storage.ingest(makePixelBuffer(width: 16, height: 16),
                        context: CIContext(options: [.useSoftwareRenderer: true]),
@@ -119,6 +119,14 @@ final class FramePipelinePerformanceTests: XCTestCase {
 
         XCTAssertFalse(SnapshotPNGWriter.write(image, to: url))
         XCTAssertEqual(try Data(contentsOf: url), first)
+    }
+
+    private func waitForPendingRequest(in storage: LatestBufferStorage) async -> Bool {
+        for _ in 0..<1_000 {
+            if storage.pendingCount() == 1 { return true }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return false
     }
 
     private func makePixelBuffer(width: Int, height: Int) -> CVPixelBuffer {

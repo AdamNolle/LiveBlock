@@ -83,6 +83,9 @@ class MacOSFailureModeContractTests(unittest.TestCase):
             "testSnapshotWriterIsPrivateCreateNewAndPreservesExistingBytes",
         ):
             self.assertIn(test_name, PERFORMANCE_TESTS)
+        self.assertIn("Task.detached", PERFORMANCE_TESTS)
+        self.assertIn("waitForPendingRequest", PERFORMANCE_TESTS)
+        self.assertNotIn("where storage.pendingCount() == 0 { await Task.yield() }", PERFORMANCE_TESTS)
         self.assertIn("generation(ifMatching: stream)", CAPTURE)
         self.assertIn("requestSnapshot(\n                timeout: 2.0,\n                generation: expectedGeneration", CAPTURE)
         self.assertIn("currentLifecycleGeneration == expectedGeneration", CONTROLLER)

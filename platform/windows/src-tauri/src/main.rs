@@ -863,13 +863,28 @@ fn start_capture_inner(
         let mut protected = protected_detector.lock();
         if let Some(value) = protected.observe_bgra(&frame.bytes, frame.width, frame.height) {
             telemetry_for_frame.set_protected(value);
+            if value {
+                // Remove stale patches before publishing the uncertain
+                // protected/unavailable state, even if the render window is gone.
+                last_detection.lock().1.clear();
+                let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+            }
+            if let Some(window) = app.get_webview_window("render") {
+                if value {
+                    // Hide the entire overlay surface; transparency alone must not
+                    // be relied upon to suppress stale or recursively captured UI.
+                    let _ = window.hide();
+                } else {
+                    // This callback is generation-guarded, so only the active
+                    // capture can restore the renderer after visible frames return.
+                    let _ = window.show();
+                }
+            }
             let _ = app.emit("protected-content-changed", value);
         }
         if protected.is_protected() {
             telemetry_for_frame.protected_frame();
-            last_detection.lock().1.clear();
             drop(protected);
-            let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
             return;
         }
         drop(protected);

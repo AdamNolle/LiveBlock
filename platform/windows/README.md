@@ -1,6 +1,6 @@
-# LiveBlocker — Windows port
+# LiveBlock — Windows port
 
-Rust + Tauri 2 + windows-rs port of the macOS LiveBlocker app. The hot
+Rust + Tauri 2 + windows-rs port of the macOS LiveBlock app. The hot
 path (capture → detection → inpainting → overlay) is native Rust; the UI
 is a Tauri webview. The frontend HTML/CSS/TS lives in
 [`../_shared-frontend/`](../_shared-frontend/) and is shared with the
@@ -27,13 +27,19 @@ isolated D3D11 compute device when available, then read back for PNG/webview
 composition; setup, dispatch, or timeout failure permanently falls back to CPU.
 Native power/session/display
 observation now preserves user intent and retries runtime recovery after
-0.5/1/2/4 seconds, but real sleep/lock/device-loss execution, packaging, and
-GPU/DPI/multi-monitor certification remain open.
+0.5/1/2/4 seconds. Sustained near-total opaque-black input clears patches and
+hides the render surface until visible frames return. Real sleep/lock/device-loss,
+protected-content, game/anti-cheat, and GPU/DPI/multi-monitor execution remains
+uncertified. Credential-free MSI/NSIS mechanics exist, but current packages are
+explicitly BuildOnly and undistributable.
 
 ## Prerequisites
 
-- Windows 10 build 18362 (1903) or newer.
-- DirectX 12-capable GPU for DirectML acceleration (CPU fallback works).
+- Windows 11 x64 is the release target. Windows 10 build 18362+ source
+  compatibility is retained where low-cost but is not release-certified.
+- A WGC/D3D11-compatible display adapter. ONNX CPU fallback works; DirectML
+  registration and D3D11 compute availability are runtime-dependent and not
+  physical-GPU execution evidence.
 - [Rust](https://rustup.rs/) — latest stable.
 - [Visual Studio Build Tools 2022](https://visualstudio.microsoft.com/downloads/)
   with the "Desktop development with C++" workload.
@@ -45,12 +51,12 @@ GPU/DPI/multi-monitor certification remain open.
 ```pwsh
 # One-time: install shared frontend deps
 cd platform\_shared-frontend
-npm install
+npm ci
 
 # Build + run the Windows app
 cd ..\windows\src-tauri
-cargo tauri dev      # dev mode with hot reload
-cargo tauri build    # release MSI under src-tauri\target\release\bundle\
+..\..\_shared-frontend\node_modules\.bin\tauri.cmd dev
+# Production packaging uses tools\release_windows.ps1 and its fail-closed inputs.
 ```
 
 ## Hotkeys
@@ -80,10 +86,12 @@ data round-trips across platforms.
 
 ## Known limitations
 
-- DRM-protected windows can return black via Windows.Graphics.Capture. After
-  sustained near-total opaque-black frames, LiveBlock pauses overlays and shows
-  **possible protected or unavailable content**; this conservative heuristic
-  cannot distinguish DRM from genuinely black content.
+- DRM-protected or otherwise unavailable capture can return black via
+  Windows.Graphics.Capture. After sustained near-total opaque-black frames,
+  LiveBlock clears stale patches, hides the render surface, and shows **possible
+  protected or unavailable content**. Visible frames must return before the
+  surface is restored. This conservative heuristic cannot distinguish DRM from
+  a genuinely black fullscreen surface.
 - Anti-cheat tooling may flag an always-on-top overlay. No process injection,
   game hooks, or anti-cheat bypass is attempted; game/anti-cheat real-device
   behavior remains uncertified.

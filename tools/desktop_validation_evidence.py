@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import platform
+import stat
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -22,6 +23,38 @@ EVIDENCE_STATES = {
     "blocked-credentials",
     "blocked-hardware",
     "unsupported-by-platform",
+}
+BLOCKED_EVIDENCE_STATES = {
+    "blocked-credentials",
+    "blocked-hardware",
+    "unsupported-by-platform",
+}
+ENVIRONMENT_FIELDS = {
+    "schemaVersion",
+    "createdAt",
+    "platform",
+    "gitCommit",
+    "gitDirty",
+    "hostSystem",
+    "hostRelease",
+    "machine",
+    "osBuild",
+    "hardware",
+    "gpu",
+    "displaysAndScaling",
+    "packageSha256",
+    "evidenceState",
+}
+VERIFIED_HOST_SYSTEMS = {"macos": "Darwin", "windows": "Windows", "linux": "Linux"}
+RESULT_FIELDS = {
+    "scenario",
+    "result",
+    "startedAt",
+    "finishedAt",
+    "recordedAt",
+    "operator",
+    "notes",
+    "evidence",
 }
 
 
@@ -79,6 +112,11 @@ def init_run(args: argparse.Namespace) -> None:
         raise ValueError("validation evidence requires a clean git worktree")
     if dirty and args.evidence_state != "build-only":
         raise ValueError("dirty worktrees may only create explicitly build-only evidence")
+    host_system = platform.system()
+    if args.evidence_state.startswith("verified-") and host_system != VERIFIED_HOST_SYSTEMS[
+        args.platform
+    ]:
+        raise ValueError("verified evidence must run on the declared native platform")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     (output / "screenshots").mkdir(mode=0o700)
@@ -88,14 +126,14 @@ def init_run(args: argparse.Namespace) -> None:
         "platform": args.platform,
         "gitCommit": git("rev-parse", "HEAD"),
         "gitDirty": dirty,
-        "hostSystem": platform.system(),
+        "hostSystem": host_system,
         "hostRelease": platform.release(),
         "machine": platform.machine(),
         "osBuild": args.os_build or platform.release(),
         "hardware": args.hardware or platform.machine(),
         "gpu": args.gpu,
         "displaysAndScaling": args.displays,
-        "packageSha256": args.package_sha256,
+        "packageSha256": args.package_sha256.lower() if args.package_sha256 else None,
         "evidenceState": args.evidence_state,
     }
     write_new_json(output / "environment.json", environment)
@@ -103,10 +141,70 @@ def init_run(args: argparse.Namespace) -> None:
     print(output)
 
 
+def read_json_regular(path: Path, label: str) -> object:
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError as error:
+        raise ValueError(f"{label} is missing") from error
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"{label} must be an immediate regular non-symlink file")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_environment(run_dir: Path) -> dict[str, object]:
+    document = read_json_regular(run_dir / "environment.json", "environment.json")
+    if not isinstance(document, dict):
+        raise ValueError("environment.json must contain an object")
+    if set(document) != ENVIRONMENT_FIELDS or document.get("schemaVersion") != 1:
+        raise ValueError("environment.json has unknown fields or schema")
+    if document.get("platform") not in PLATFORMS:
+        raise ValueError("environment.json has an invalid platform")
+    if document.get("evidenceState") not in EVIDENCE_STATES:
+        raise ValueError("environment.json has an invalid evidence state")
+    if not isinstance(document.get("gitDirty"), bool):
+        raise ValueError("environment.json gitDirty must be Boolean")
+    if document["gitDirty"] and document["evidenceState"] != "build-only":
+        raise ValueError("dirty environments may only contain build-only evidence")
+    for field in (
+        "gitCommit",
+        "hostSystem",
+        "hostRelease",
+        "machine",
+        "osBuild",
+        "hardware",
+        "gpu",
+        "displaysAndScaling",
+    ):
+        if not isinstance(document.get(field), str) or not document[field].strip():
+            raise ValueError(f"environment.json {field} must be a nonempty string")
+    if str(document["evidenceState"]).startswith("verified-") and document[
+        "hostSystem"
+    ] != VERIFIED_HOST_SYSTEMS[str(document["platform"])]:
+        raise ValueError("verified evidence must run on the declared native platform")
+    commit = str(document["gitCommit"])
+    if len(commit) not in {40, 64} or any(character not in "0123456789abcdef" for character in commit):
+        raise ValueError("environment.json gitCommit must be a full lowercase Git object ID")
+    package_hash = document.get("packageSha256")
+    if package_hash is not None and (
+        not isinstance(package_hash, str)
+        or len(package_hash) != 64
+        or any(character not in "0123456789abcdef" for character in package_hash)
+    ):
+        raise ValueError("environment.json packageSha256 must be null or lowercase SHA-256")
+    validate_timestamp(str(document.get("createdAt", "")))
+    return document
+
+
 def confined_evidence(run_dir: Path, value: str) -> str:
+    if not value or Path(value).is_absolute():
+        raise ValueError("evidence path must be a nonempty relative path")
     supplied = run_dir / value
-    if supplied.is_symlink():
-        raise ValueError(f"evidence must not be a symlink: {value}")
+    relative_supplied = supplied.relative_to(run_dir)
+    current = run_dir
+    for part in relative_supplied.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"evidence must not traverse a symlink: {value}")
     candidate = supplied.resolve()
     try:
         relative = candidate.relative_to(run_dir)
@@ -114,51 +212,99 @@ def confined_evidence(run_dir: Path, value: str) -> str:
         raise ValueError(f"evidence escapes run directory: {value}") from error
     if not candidate.is_file():
         raise ValueError(f"evidence is not a regular file: {value}")
+    if candidate.stat().st_size == 0:
+        raise ValueError(f"evidence is empty: {value}")
     return relative.as_posix()
+
+
+def validate_results_document(
+    run_dir: Path, document: object, evidence_state: str
+) -> dict[str, object]:
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schemaVersion", "results"}
+        or document.get("schemaVersion") != 1
+        or not isinstance(document.get("results"), list)
+    ):
+        raise ValueError("scenario-results.json has unknown fields or schema")
+    for entry in document["results"]:
+        if not isinstance(entry, dict) or set(entry) != RESULT_FIELDS:
+            raise ValueError("scenario result has unknown or missing fields")
+        if entry.get("result") not in RESULTS:
+            raise ValueError("scenario result is invalid")
+        if not isinstance(entry.get("scenario"), str) or not entry["scenario"].strip():
+            raise ValueError("scenario must be nonempty")
+        if not isinstance(entry.get("operator"), str) or not entry["operator"].strip():
+            raise ValueError("operator must be nonempty")
+        if not isinstance(entry.get("notes"), str):
+            raise ValueError("notes must be a string")
+        started = validate_timestamp(str(entry.get("startedAt", "")))
+        finished = validate_timestamp(str(entry.get("finishedAt", "")))
+        recorded = validate_timestamp(str(entry.get("recordedAt", "")))
+        if finished < started:
+            raise ValueError("scenario finishedAt precedes startedAt")
+        if recorded < finished:
+            raise ValueError("scenario recordedAt precedes finishedAt")
+        if evidence_state in BLOCKED_EVIDENCE_STATES and entry["result"] != "blocked":
+            raise ValueError("blocked/unsupported evidence states cannot record pass or fail")
+        if entry["result"] == "blocked" and not entry["notes"].strip():
+            raise ValueError("blocked scenarios require an explanatory note")
+        if not isinstance(entry.get("evidence"), list) or not all(
+            isinstance(value, str) for value in entry["evidence"]
+        ):
+            raise ValueError("scenario evidence must be a list of paths")
+        normalized = [confined_evidence(run_dir, value) for value in entry["evidence"]]
+        if normalized != entry["evidence"]:
+            raise ValueError("scenario evidence paths must be canonical")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("scenario evidence paths must be unique")
+        if entry["result"] == "pass" and not normalized:
+            raise ValueError("passing scenarios require at least one nonempty evidence file")
+    return document
 
 
 def record_result(args: argparse.Namespace) -> None:
     run_dir = args.run_dir.resolve()
     if (run_dir / "artifacts.sha256").exists():
         raise ValueError("sealed validation evidence cannot be modified")
+    environment = load_environment(run_dir)
     path = run_dir / "scenario-results.json"
-    document = json.loads(path.read_text(encoding="utf-8"))
-    if (
-        set(document) != {"schemaVersion", "results"}
-        or document["schemaVersion"] != 1
-        or not isinstance(document["results"], list)
-    ):
-        raise ValueError("scenario-results.json has unknown fields or schema")
-    evidence = [confined_evidence(run_dir, value) for value in args.evidence]
-    started = validate_timestamp(args.started_at)
-    finished = validate_timestamp(args.finished_at)
-    if finished < started:
-        raise ValueError("scenario finishedAt precedes startedAt")
-    document["results"].append(
-        {
-            "scenario": args.scenario,
-            "result": args.result,
-            "startedAt": args.started_at,
-            "finishedAt": args.finished_at,
-            "recordedAt": utc_now(),
-            "operator": args.operator,
-            "notes": args.notes,
-            "evidence": evidence,
-        }
-    )
+    document = read_json_regular(path, "scenario-results.json")
+    validate_results_document(run_dir, document, str(environment["evidenceState"]))
+    entry = {
+        "scenario": args.scenario,
+        "result": args.result,
+        "startedAt": args.started_at,
+        "finishedAt": args.finished_at,
+        "recordedAt": utc_now(),
+        "operator": args.operator,
+        "notes": args.notes,
+        "evidence": [confined_evidence(run_dir, value) for value in args.evidence],
+    }
+    document["results"].append(entry)
+    validate_results_document(run_dir, document, str(environment["evidenceState"]))
     replace_json(path, document)
 
 
 def hash_run(args: argparse.Namespace) -> None:
     run_dir = args.run_dir.resolve()
     output = run_dir / "artifacts.sha256"
-    results = json.loads((run_dir / "scenario-results.json").read_text(encoding="utf-8"))
-    if not isinstance(results.get("results"), list) or not results["results"]:
+    environment = load_environment(run_dir)
+    results = read_json_regular(run_dir / "scenario-results.json", "scenario-results.json")
+    validate_results_document(run_dir, results, str(environment["evidenceState"]))
+    if not results["results"]:
         raise ValueError("cannot seal validation evidence without scenario results")
     entries: list[str] = []
     for path in sorted(run_dir.rglob("*")):
-        if path == output or path.is_symlink() or not path.is_file():
+        if path == output:
             continue
+        mode = os.lstat(path).st_mode
+        if stat.S_ISLNK(mode):
+            raise ValueError(f"validation evidence contains a symlink: {path.relative_to(run_dir)}")
+        if stat.S_ISDIR(mode):
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"validation evidence contains a special file: {path.relative_to(run_dir)}")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         entries.append(f"{digest}  {path.relative_to(run_dir).as_posix()}")
     fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

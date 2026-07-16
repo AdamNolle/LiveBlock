@@ -55,10 +55,14 @@ python3 tools/desktop_validation_evidence.py hashes --run-dir "$RUN"
 test "$RESULT" = pass
 ```
 
-Use `windows` or `linux` and the actual evidence state for other targets. The
-helper creates new privacy-minimized JSON, rejects evidence outside the run or
-through symlinks, updates results atomically, and creates `artifacts.sha256` without overwriting
-an earlier seal. Once sealed, additional scenario records are rejected.
+Use `windows` or `linux` and the actual evidence state for other targets. A
+`pass` requires at least one nonempty confined evidence file. A `blocked` result
+requires an explanatory note, and `blocked-credentials`, `blocked-hardware`, or
+`unsupported-by-platform` runs cannot record `pass` or `fail`. The helper
+strictly reparses the environment and every result before sealing, rejects empty
+or duplicate evidence paths plus links/special files anywhere in the run,
+updates results atomically, and creates `artifacts.sha256` without overwriting an
+earlier seal. Once sealed, additional scenario records are rejected.
 
 ## Common source preflight
 
@@ -190,9 +194,37 @@ win against active inference, editor/label actions, and quit within 500 ms.
 
 Exercise NVIDIA, AMD, Intel, and CPU configurations separately. Record the
 actual ORT provider selected; configured DirectML does not prove it executed.
-Do not describe opaque-black detection as definitive DRM detection, and do not
-run or claim anti-cheat compatibility without the game vendor's permitted test
-environment.
+
+### Protected/unavailable content and permitted game environments
+
+Use only a synthetic fullscreen test surface for the deterministic black-frame
+scenario; never retain protected media, game frames, window/process names, or
+private desktop content. While capture is active:
+
+1. establish visible test content and at least one overlay patch;
+2. replace it with an opaque RGB `(0,0,0)` fullscreen surface for at least eight
+   processed frames;
+3. require **Possible protected or unavailable content · overlays paused**, an
+   empty patch set, and a hidden render surface (verify with an independent
+   screenshot/capture tool);
+4. restore visible test content for at least three processed frames and require
+   the render surface to return without a stale patch; and
+5. repeat with dark-but-nonblack synthetic content and require no protected-state
+   transition.
+
+Record this as `windows-protected-unavailable-safe-state` in a
+`verified-real-device` run and retain only a sanitized command/test log plus UI
+state evidence. A synthetic black surface validates the conservative safe-state
+mechanism, **not** DRM detection. Any true protected-content result is separately
+hardware/vendor evidence and must use content the operator is authorized to test.
+
+Do not run or claim game/anti-cheat compatibility without the game vendor's
+permitted test environment. When no such environment is available, create a
+separate `blocked-hardware` run, record scenario
+`windows-vendor-permitted-game-anti-cheat`, result `blocked`, and explain the
+missing environment in `--notes`; the evidence helper will reject a pass under
+that state. LiveBlock never injects into applications, hooks games, or attempts
+an anti-cheat bypass.
 
 ## Linux
 

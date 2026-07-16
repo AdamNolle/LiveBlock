@@ -13,6 +13,8 @@ TRAINING_UI = (ROOT / "platform/_shared-frontend/src/training.html").read_text()
 MAC_CONTROLLER = (ROOT / "Sources/AppController.swift").read_text()
 WINDOWS_UPDATES = (ROOT / "platform/windows/src-tauri/src/model_updates.rs").read_text()
 WINDOWS_LIFECYCLE = (ROOT / "platform/windows/src-tauri/src/lifecycle.rs").read_text()
+WINDOWS_CAPTURE_POLICY = (ROOT / "platform/windows/src-tauri/src/capture_policy.rs").read_text()
+WINDOWS_CONTROL_PANEL = (ROOT / "platform/_shared-frontend/src/control-panel.html").read_text()
 WINDOWS_DETECTION = (ROOT / "platform/windows/src-tauri/src/detection.rs").read_text()
 WINDOWS_DIRECTML_DOC = (ROOT / "docs/WINDOWS_DIRECTML.md").read_text()
 LINUX_UPDATES = (ROOT / "platform/linux/src-tauri/src/model_updates.rs").read_text()
@@ -116,6 +118,22 @@ class DesktopAdapterContractTests(unittest.TestCase):
         self.assertIn("CreateGPUAllocationFromD3DResource", WINDOWS_DIRECTML_DOC)
         self.assertIn("D3D11On12", WINDOWS_DIRECTML_DOC)
         self.assertIn("leave the texture-transport checklist item open", WINDOWS_DIRECTML_DOC)
+
+    def test_windows_protected_unavailable_state_hides_stale_output(self):
+        self.assertIn("checked_mul(height as usize)", WINDOWS_CAPTURE_POLICY)
+        self.assertIn("bytes.len() != expected", WINDOWS_CAPTURE_POLICY)
+        self.assertIn("a >= 250", WINDOWS_CAPTURE_POLICY)
+        transition = re.search(
+            r"if let Some\(value\) = protected\.observe_bgra.*?if protected\.is_protected\(\)",
+            WINDOWS,
+            re.S,
+        )
+        self.assertIsNotNone(transition)
+        source = transition.group(0)
+        self.assertLess(source.index('emit("patches-updated"'), source.index("window.hide()"))
+        self.assertLess(source.index("window.hide()"), source.index('emit("protected-content-changed"'))
+        self.assertIn("window.show()", source)
+        self.assertIn("Possible protected or unavailable content · overlays paused", WINDOWS_CONTROL_PANEL)
 
     def test_windows_lifecycle_recovery_is_fail_closed_and_bounded(self):
         for event in (

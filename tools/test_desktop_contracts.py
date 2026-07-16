@@ -225,10 +225,43 @@ class DesktopAdapterContractTests(unittest.TestCase):
         self.assertNotIn("blocked today", WINDOWS_CONTROL_PANEL)
         self.assertNotIn("statBlocked", WINDOWS_CONTROL_PANEL)
 
-        quit_body = LINUX.split("async fn quit", 1)[1].split("fn main()", 1)[0]
-        self.assertLess(quit_body.index("shutdown_requested.swap"), quit_body.index("window.hide()"))
-        self.assertLess(quit_body.index("window.hide()"), quit_body.index("stop_capture_inner"))
-        self.assertLess(quit_body.index("stop_capture_inner"), quit_body.index("app.exit(0)"))
+        linux_quit = LINUX.split("async fn quit", 1)[1].split("fn main()", 1)[0]
+        self.assertLess(
+            linux_quit.index("shutdown_requested.swap"),
+            linux_quit.index("window.hide()"),
+        )
+        self.assertLess(
+            linux_quit.index("window.hide()"),
+            linux_quit.index("stop_capture_inner"),
+        )
+        self.assertLess(
+            linux_quit.index("stop_capture_inner"),
+            linux_quit.index("state.model_update.lock()"),
+        )
+        self.assertLess(
+            linux_quit.index("state.model_update.lock()"),
+            linux_quit.index("app.exit(0)"),
+        )
+
+        windows_quit = WINDOWS.split("fn quit_action", 1)[1].split(
+            "fn panic_disable_action", 1
+        )[0]
+        self.assertLess(
+            windows_quit.index("shutting_down.swap"),
+            windows_quit.index("window.hide()"),
+        )
+        self.assertLess(
+            windows_quit.index("window.hide()"),
+            windows_quit.index("stop_capture_inner"),
+        )
+        self.assertLess(
+            windows_quit.index("stop_capture_inner"),
+            windows_quit.index("state.model_update.lock()"),
+        )
+        self.assertLess(
+            windows_quit.index("state.model_update.lock()"),
+            windows_quit.index("app.exit(0)"),
+        )
 
     def test_release_training_uses_shared_fail_closed_gate(self):
         for platform, source in (("Windows", WINDOWS), ("Linux", LINUX)):
@@ -276,6 +309,13 @@ class DesktopAdapterContractTests(unittest.TestCase):
             self.assertIn("TrustedKeyringDocument::from_json(&json, true)", source)
             self.assertIn('"resources/trusted-model-keys.json"', source)
             self.assertIn("let _update_guard = state.model_update.lock()", source)
+            self.assertIn('Err("model updates are unavailable during shutdown".into())', source)
+            shutdown_flag = "shutting_down" if platform == "windows" else "shutdown_requested"
+            self.assertEqual(
+                source.count(f"ensure_update_admitted(&state.{shutdown_flag})?"),
+                2,
+            )
+            self.assertIn("shutdown_rejects_model_update_admission", source)
             self.assertIn("let release_floor = packaged", source)
             self.assertIn("Detector::load(path)", source)
             self.assertIn("load_authenticated_packaged", source)

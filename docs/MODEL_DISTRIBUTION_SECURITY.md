@@ -114,7 +114,12 @@ swap; its marker is safely reusable after process death. A platform application
 mutex also serializes command preparation in one process. Staging paths and
 non-regular lock/backup files fail closed. A regular previous backup is never
 loaded without matching accepted state and is removed only while holding the
-next update transaction lock.
+next update transaction lock. Windows and Linux quit set their terminal flag and
+hide/stop capture before waiting on the same application update mutex. A command
+queued after that flag fails both before and after mutex acquisition; an
+authenticated transaction that already owned the mutex completes before normal
+process exit. This does not turn forced process termination or power loss into a
+clean shutdown claim—startup recovery remains authoritative for interruption.
 
 macOS CoreML activation copies to a fixed same-volume staging directory, rejects
 symlinks/special entries, re-hashes and production-loads it, synchronizes files

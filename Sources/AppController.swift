@@ -3,6 +3,11 @@ import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum SignedModelUpdateOutcome: Sendable {
+    case success(MacModelUpdateReceipt)
+    case failure(String)
+}
+
 /// Monotonic admission policy for macOS actions that can reveal capture output.
 /// Stops and panic reject already-queued starts; shutdown rejects every later
 /// action. A newer explicit user start remains allowed after stop/panic.
@@ -145,6 +150,7 @@ final class AppController: ObservableObject {
     private var autoCaptureTimer: Timer?
     private var fullscreenMonitorTimer: Timer?
     private var screenRestartTask: Task<Void, Never>?
+    private var modelUpdateTask: Task<Void, Never>?
     private var quitTask: Task<Void, Never>?
     private var quitCompletionHandlers: [() -> Void] = []
     private(set) var quitIsReady = false
@@ -297,12 +303,14 @@ final class AppController: ObservableObject {
     /// Save a privacy-minimized support snapshot. The report contains no
     /// pixels, regions, process names, window titles, user paths, or labels.
     func exportDiagnostics() {
+        guard !userActionPolicy.shutdownRequested else { return }
         refreshPermissions()
         let panel = NSSavePanel()
         panel.title = "Export LiveBlock Diagnostics"
         panel.nameFieldStringValue = "liveblock-diagnostics.json"
         panel.allowedContentTypes = [.json]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK, let url = panel.url,
+              !userActionPolicy.shutdownRequested else { return }
         do {
             try DiagnosticsReport.capture(from: self).write(to: url)
             NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -358,6 +366,7 @@ final class AppController: ObservableObject {
     }
 
     func updatePauseOnFullscreen(_ on: Bool) {
+        guard !userActionPolicy.shutdownRequested else { return }
         pauseOnFullscreenStored = on
         captureManager.pauseOnFullscreen = on
     }
@@ -382,7 +391,8 @@ final class AppController: ObservableObject {
     }
 
     func selectDisplay(id: CGDirectDisplayID) {
-        guard availableDisplays.contains(where: { $0.id == id }) else { return }
+        guard !userActionPolicy.shutdownRequested,
+              availableDisplays.contains(where: { $0.id == id }) else { return }
         let changed = selectedDisplayID != id
         selectedDisplayID = id
         UserDefaults.standard.set(Int(id), forKey: Self.selectedDisplayIDKey)
@@ -400,6 +410,7 @@ final class AppController: ObservableObject {
     }
 
     func setDetectionEnabled(_ enabled: Bool) {
+        guard !userActionPolicy.shutdownRequested else { return }
         captureManager.detectionEnabled = enabled
     }
 
@@ -426,6 +437,7 @@ final class AppController: ObservableObject {
     }
 
     func showControlPanel() {
+        guard !userActionPolicy.shutdownRequested else { return }
         controlPanel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -438,6 +450,7 @@ final class AppController: ObservableObject {
     /// every "Clear regions" entry point. Skips the dialog if there's
     /// nothing to delete.
     func clearRegionsWithConfirm() {
+        guard !userActionPolicy.shutdownRequested else { return }
         let count = regionCount
         guard count > 0 else { return }
         let alert = NSAlert()
@@ -451,7 +464,8 @@ final class AppController: ObservableObject {
             destructive.hasDestructiveAction = true
         }
         let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
+        if response == .alertFirstButtonReturn,
+           !userActionPolicy.shutdownRequested {
             regionStore.clear()
             UserDefaults.standard.removeObject(forKey: Self.disabledIdsKey)
             captureManager.setDisabledRegionIDs([])
@@ -460,6 +474,7 @@ final class AppController: ObservableObject {
     }
 
     func clearRegions() {
+        guard !userActionPolicy.shutdownRequested else { return }
         regionStore.clear()
         UserDefaults.standard.removeObject(forKey: Self.disabledIdsKey)
         captureManager.setDisabledRegionIDs([])
@@ -467,6 +482,7 @@ final class AppController: ObservableObject {
     }
 
     func deleteRegion(id: UUID) {
+        guard !userActionPolicy.shutdownRequested else { return }
         regionStore.remove(id: id)
         var disabled = Self.disabledRegionIDs()
         disabled.remove(id)
@@ -476,6 +492,7 @@ final class AppController: ObservableObject {
     }
 
     func addRegion(_ region: NormalizedRegion) {
+        guard !userActionPolicy.shutdownRequested else { return }
         regionStore.add(region)
         refreshRegionCount()
     }
@@ -501,6 +518,7 @@ final class AppController: ObservableObject {
     }
 
     func setRegionEnabled(id: UUID, on: Bool) {
+        guard !userActionPolicy.shutdownRequested else { return }
         var disabled = Self.disabledRegionIDs()
         if on { disabled.remove(id) } else { disabled.insert(id) }
         UserDefaults.standard.set(disabled.map(\.uuidString).sorted(), forKey: Self.disabledIdsKey)
@@ -524,16 +542,26 @@ final class AppController: ObservableObject {
     private func beginQuit() {
         guard quitTask == nil else { return }
         userActionPolicy.claimShutdown()
+        // Install persistence barriers before hiding windows. AppKit can still
+        // deliver retained editor/labeling close callbacks during termination.
+        regionStore.prepareForShutdown()
+        labelingController.prepareForShutdown()
+        perAppRules.prepareForShutdown()
         screenRestartWasRunning = false
         screenRestartTask?.cancel()
         autoCaptureEnabled = false
         hidePrivacyWindowsForTerminalAction()
         let trainingShutdownTask = trainingController.prepareForShutdown()
+        // A signed update already admitted before shutdown remains an atomic,
+        // crash-recoverable transaction. Normal quit waits for its worker;
+        // terminal UI callbacks are still suppressed by the action policy.
+        let signedModelUpdateTask = modelUpdateTask
         quitTask = Task { @MainActor [weak self] in
             guard let self else { return }
             if self.isRunning || self.captureManager.captureDesired {
                 await self.captureManager.stop()
             }
+            await signedModelUpdateTask?.value
             await trainingShutdownTask?.value
             self.quitIsReady = true
             let completions = self.quitCompletionHandlers
@@ -644,24 +672,29 @@ final class AppController: ObservableObject {
         modelUpdateInProgress = true
         modelUpdateStatus = "Verifying signed model update…"
         let captureManager = self.captureManager
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        let worker = Task.detached(priority: .userInitiated) {
             do {
                 let receipt = try MacModelDistribution().installUpdatePackage(at: package) {
                     captureManager.reloadDetectionModel()
                 }
-                Task { @MainActor [weak self] in
-                    guard let self, !self.userActionPolicy.shutdownRequested else { return }
-                    self.labelingController.reloadDetectionModel()
-                    self.modelUpdateStatus = "Installed model \(receipt.modelVersion) (sequence \(receipt.releaseSequence))."
-                    self.modelUpdateInProgress = false
-                }
+                return SignedModelUpdateOutcome.success(receipt)
             } catch {
-                Task { @MainActor [weak self] in
-                    guard let self, !self.userActionPolicy.shutdownRequested else { return }
-                    self.modelUpdateStatus = "Model update rejected: \(error.localizedDescription)"
-                    self.modelUpdateInProgress = false
-                }
+                return SignedModelUpdateOutcome.failure(error.localizedDescription)
             }
+        }
+        modelUpdateTask = Task { @MainActor [weak self] in
+            let outcome = await worker.value
+            guard let self else { return }
+            self.modelUpdateTask = nil
+            guard !self.userActionPolicy.shutdownRequested else { return }
+            switch outcome {
+            case .success(let receipt):
+                self.labelingController.reloadDetectionModel()
+                self.modelUpdateStatus = "Installed model \(receipt.modelVersion) (sequence \(receipt.releaseSequence))."
+            case .failure(let message):
+                self.modelUpdateStatus = "Model update rejected: \(message)"
+            }
+            self.modelUpdateInProgress = false
         }
     }
 
@@ -745,6 +778,7 @@ final class AppController: ObservableObject {
     }
 
     func refreshDisplayTargets() {
+        guard !userActionPolicy.shutdownRequested else { return }
         let descriptors = NSScreen.liveBlockDescriptors()
         let stored = UserDefaults.standard.object(forKey: Self.selectedDisplayIDKey) as? NSNumber
         let preferred = selectedDisplayID ?? stored?.uint32Value
@@ -786,13 +820,15 @@ final class AppController: ObservableObject {
     }
 
     func handleScreenConfigurationChange() {
+        guard !userActionPolicy.shutdownRequested else { return }
         screenRestartWasRunning = screenRestartWasRunning || captureManager.captureDesired
         screenRestartTask?.cancel()
         screenRestartTask = Task { @MainActor [weak self] in
             // macOS emits bursts while displays settle. Debounce them so one
             // stable configuration produces one serialized capture restart.
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled, let self,
+                  !self.userActionPolicy.shutdownRequested else { return }
             self.refreshDisplayTargets()
             guard let screen = self.currentScreen() else {
                 if self.screenRestartWasRunning {
@@ -808,7 +844,8 @@ final class AppController: ObservableObject {
             self.alignOverlays(to: screen)
             guard self.screenRestartWasRunning else { return }
             if self.isRunning { await self.captureManager.stop(preserveIntent: true) }
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  !self.userActionPolicy.shutdownRequested else { return }
             await self.captureManager.start(on: screen)
             self.screenRestartWasRunning = false
         }

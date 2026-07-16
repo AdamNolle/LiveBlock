@@ -164,7 +164,7 @@ struct MacModelUpdateState: Codable, Equatable {
     }
 }
 
-struct MacModelUpdateReceipt: Equatable {
+struct MacModelUpdateReceipt: Equatable, Sendable {
     let modelVersion: String
     let releaseSequence: UInt64
     let artifactSha256: String

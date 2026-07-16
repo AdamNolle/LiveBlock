@@ -321,7 +321,18 @@ hashes:
 7. queue region add/replace/delete/clear, labeling screenshot, label save, and
    screenshot discard IPC immediately before and after Windows/Linux quit.
    Already-admitted writes must finish before exit; commands acquiring the gate
-   after the terminal flag must fail without changing files or region state.
+   after the terminal flag must fail without changing files or region state;
+8. on macOS, begin region editing, label save/discard, per-app exclusion changes,
+   a diagnostics save panel, and display-topology notifications immediately before
+   native Command-Q. Hash region/label/defaults files before and after. Retained
+   callbacks must not persist changes, migrate a legacy label, export diagnostics,
+   or restart capture after the terminal barrier. Repeat with an already-running
+   region write to verify quit installs its store barrier synchronously;
+9. begin an authenticated macOS CoreML update, then invoke native Command-Q
+   during staging/load/swap. Normal termination must hide/stop capture and wait
+   for the admitted update task without publishing success/error UI. Separately
+   force-kill during each transaction phase and verify startup recovery; the
+   normal-quit wait is not power-loss evidence.
 
 Expected result: no partial document is accepted; authenticated previous state is
 restored where defined; future/malformed state remains untouched; no fallback to

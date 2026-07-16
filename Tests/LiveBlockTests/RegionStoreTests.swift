@@ -49,6 +49,29 @@ final class RegionStoreTests: XCTestCase {
         XCTAssertEqual(firstWidth, 0.2, accuracy: 0.001)
     }
 
+    func testShutdownBarrierRejectsAllLaterRegionMutations() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveBlockRegionShutdownTests-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let original = NormalizedRegion(x: 0.1, y: 0.1, width: 0.2, height: 0.2)
+        let store = RegionStore(storageURL: tmp)
+        store.add(original)
+        store.prepareForShutdown()
+
+        store.add(NormalizedRegion(x: 0.4, y: 0.4, width: 0.2, height: 0.2))
+        store.replace(id: original.id,
+                      with: NormalizedRegion(id: original.id,
+                                             x: 0.6, y: 0.6, width: 0.1, height: 0.1))
+        store.replace([])
+        store.remove(id: original.id)
+        store.clear()
+
+        XCTAssertEqual(store.current, [original])
+        let reopened = RegionStore(storageURL: tmp)
+        XCTAssertEqual(reopened.current, [original])
+    }
+
     func testDisabledRegionsAreExcludedFromCaptureSnapshot() {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveBlockDisabledRegionTests-\(UUID().uuidString).json")

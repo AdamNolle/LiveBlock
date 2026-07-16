@@ -200,7 +200,7 @@ struct PerAppRulesPane: View {
         HStack(spacing: 8) {
             if !rules.excludedBundleIDs.isEmpty {
                 LBButton(title: "Clear exclusions", variant: .ghost, size: .sm) {
-                    rules.excludedBundleIDs = []
+                    rules.clear()
                 }
             }
             Spacer()

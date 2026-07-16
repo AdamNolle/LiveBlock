@@ -79,6 +79,13 @@ bundle inventories.
 - Trash moves use atomic create-new semantics: Unix reserves a same-volume hard
   link before removing the source, while Windows rename fails when the
   destination exists. An existing destination is never replaced.
+- macOS installs terminal barriers in the region store, labeling controller,
+  and per-app exclusion store before hiding windows. Retained AppKit/editor
+  callbacks cannot add/replace/delete regions, save/migrate/discard labels, or
+  change exclusions afterward. Diagnostics rechecks the policy after its modal
+  save panel, display selection rejects terminal actions, and delayed topology
+  work rechecks after suspension so it cannot restart capture once native
+  termination begins.
 - Windows and Linux serialize region, labeling-screenshot, label-save, and
   discard mutations through one native gate. Quit sets its terminal flag before
   waiting on that gate: an already-admitted mutation completes before exit, and

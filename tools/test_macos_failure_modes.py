@@ -5,6 +5,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE = (ROOT / "Sources/ScreenCaptureManager.swift").read_text()
 CONTROLLER = (ROOT / "Sources/AppController.swift").read_text()
+REGION_STORE = (ROOT / "Sources/RegionStore.swift").read_text()
+LABELING = (ROOT / "Sources/LabelingController.swift").read_text()
+PER_APP_RULES = (ROOT / "Sources/PerAppRulesStore.swift").read_text()
 TRAINING = (ROOT / "Sources/TrainingController.swift").read_text()
 LIVEBLOCK_APP = (ROOT / "Sources/LiveBlockApp.swift").read_text()
 PERFORMANCE_TESTS = (
@@ -52,6 +55,12 @@ class MacOSFailureModeContractTests(unittest.TestCase):
         )
         self.assertIn("if await self.captureManager.failClosedForUnavailableDisplay()", source)
         self.assertNotIn("screenRestartWasRunning = false", source)
+        handler_source = topology_handler.group(1)
+        self.assertGreaterEqual(handler_source.count("shutdownRequested"), 3)
+        self.assertLess(
+            handler_source.index("guard !userActionPolicy.shutdownRequested else { return }"),
+            handler_source.index("screenRestartTask = Task"),
+        )
 
     def test_stream_reset_clears_every_visible_or_cross_generation_seam(self):
         reset = re.search(
@@ -101,6 +110,12 @@ class MacOSFailureModeContractTests(unittest.TestCase):
         quit_source = quit_action.group(1)
         self.assertIn("guard quitTask == nil else { return }", quit_source)
         self.assertLess(quit_source.index("userActionPolicy.claimShutdown()"), quit_source.index("Task {"))
+        for barrier in (
+            "regionStore.prepareForShutdown()",
+            "labelingController.prepareForShutdown()",
+            "perAppRules.prepareForShutdown()",
+        ):
+            self.assertLess(quit_source.index(barrier), quit_source.index("hidePrivacyWindowsForTerminalAction()"))
         self.assertLess(
             quit_source.index("hidePrivacyWindowsForTerminalAction()"),
             quit_source.index("await self.captureManager.stop()"),
@@ -114,6 +129,10 @@ class MacOSFailureModeContractTests(unittest.TestCase):
             quit_source.index("Task {"),
         )
         self.assertLess(
+            quit_source.index("await signedModelUpdateTask?.value"),
+            quit_source.index("await trainingShutdownTask?.value"),
+        )
+        self.assertLess(
             quit_source.index("await trainingShutdownTask?.value"),
             quit_source.index("NSApp.terminate(nil)"),
         )
@@ -121,6 +140,23 @@ class MacOSFailureModeContractTests(unittest.TestCase):
         self.assertIn("func applicationShouldTerminate(_ sender: NSApplication)", LIVEBLOCK_APP)
         self.assertIn("return .terminateLater", LIVEBLOCK_APP)
         self.assertIn("sender.reply(toApplicationShouldTerminate: true)", LIVEBLOCK_APP)
+
+    def test_persisted_macos_editors_reject_post_shutdown_callbacks(self):
+        self.assertIn("func prepareForShutdown()", REGION_STORE)
+        self.assertEqual(REGION_STORE.count("guard !shutdownRequested else { return }"), 5)
+        self.assertIn("func prepareForShutdown()", LABELING)
+        for required in (
+            "guard !shutdownRequested else { return false }",
+            "guard !shutdownRequested, currentLabelCompatibilityError == nil else { return }",
+            "guard !shutdownRequested, let url = currentURL else { return }",
+            "if !shutdownRequested, object?[\"schemaVersion\"] == nil",
+            "guard !shutdownRequested, currentURL == url else { return }",
+        ):
+            self.assertIn(required, LABELING)
+        self.assertIn("@Published private(set) var excludedBundleIDs", PER_APP_RULES)
+        self.assertIn("guard !shutdownRequested, !bundleID.isEmpty else { return }", PER_APP_RULES)
+        self.assertIn("guard !shutdownRequested else { return }", PER_APP_RULES)
+        self.assertNotIn("rules.excludedBundleIDs = []", (ROOT / "Sources/PerAppRulesView.swift").read_text())
 
     def test_model_update_completion_cannot_publish_after_shutdown(self):
         update = re.search(
@@ -131,13 +167,12 @@ class MacOSFailureModeContractTests(unittest.TestCase):
         self.assertIsNotNone(update)
         source = update.group(1)
         self.assertIn("panel.runModal() == .OK", source)
-        self.assertGreaterEqual(source.count("shutdownRequested"), 4)
-        self.assertEqual(
-            source.count(
-                "guard let self, !self.userActionPolicy.shutdownRequested else { return }"
-            ),
-            2,
-        )
+        self.assertGreaterEqual(source.count("shutdownRequested"), 3)
+        self.assertIn("Task.detached(priority: .userInitiated)", source)
+        self.assertIn("modelUpdateTask = Task", source)
+        self.assertIn("self.modelUpdateTask = nil", source)
+        self.assertIn("guard !self.userActionPolicy.shutdownRequested else { return }", source)
+        self.assertNotIn("DispatchQueue.global", source)
 
     def test_source_training_cancellation_rejects_stale_process_callbacks(self):
         for required in (

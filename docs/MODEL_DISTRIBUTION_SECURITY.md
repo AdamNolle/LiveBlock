@@ -126,8 +126,11 @@ symlinks/special entries, re-hashes and production-loads it, synchronizes files
 and directories, and uses `renameatx_np(RENAME_SWAP)` when replacing an active
 model. Schema-1 state contains the complete accepted manifest. Startup restores
 an accepted model from staging/backup after an interrupted swap, and an injected
-state-commit failure test verifies immediate rollback. Debug/source model loading
-remains explicitly separate; Release `VisionProcessor` accepts only this path.
+state-commit failure test verifies immediate rollback. A normal macOS quit hides
+and stops capture, then awaits any signed update task admitted before the terminal
+barrier; completion UI is suppressed after shutdown. Forced termination/power
+loss still depends on startup recovery. Debug/source model loading remains
+explicitly separate; Release `VisionProcessor` accepts only this path.
 
 ## Key rotation and revocation
 

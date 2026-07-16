@@ -63,7 +63,10 @@ No current platform profile reports `releaseReady: true`.
 ### Linux
 
 - Wayland ScreenCast portal plus PipeWire capture for mapped BGRA/BGRx, NV12,
-  and YUY2 buffers; X11 virtual-root XComposite/MIT-SHM capture.
+  and YUY2 buffers; X11 virtual-root XComposite/MIT-SHM capture. Portal stream
+  errors/revocation and invalid formats fail closed; transient format removal
+  gets a bounded two-second renegotiation window, and valid format/size changes
+  replace the prior layout.
 - Local ONNX processing with CPU default/fallback, bounded wgpu/WGSL
   mirror-blend patch generation when Vulkan/GL initializes, private screenshot
   paths, and fail-closed capture state. GPU patches are read back for webview

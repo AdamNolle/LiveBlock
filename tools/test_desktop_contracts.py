@@ -20,6 +20,8 @@ WINDOWS_DIRECTML_DOC = (ROOT / "docs/WINDOWS_DIRECTML.md").read_text()
 LINUX_UPDATES = (ROOT / "platform/linux/src-tauri/src/model_updates.rs").read_text()
 LINUX_DETECTION = (ROOT / "platform/linux/src-tauri/src/detection.rs").read_text()
 LINUX_INPAINTING = (ROOT / "platform/linux/src-tauri/src/inpainting.rs").read_text()
+LINUX_WAYLAND_CAPTURE = (ROOT / "platform/linux/src-tauri/src/capture/wayland.rs").read_text()
+LINUX_CAPTURE = (ROOT / "platform/linux/src-tauri/src/capture/mod.rs").read_text()
 LINUX_WGSL = (ROOT / "platform/linux/src-tauri/src/inpainting.wgsl").read_text()
 LINUX_BUILD = (ROOT / "platform/linux/src-tauri/build.rs").read_text()
 CI = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -151,6 +153,26 @@ class DesktopAdapterContractTests(unittest.TestCase):
         self.assertIn("RECOVERY_DELAYS_MS", WINDOWS)
         self.assertIn("capture_desired", WINDOWS)
         self.assertIn("lifecycle_observer_available", WINDOWS)
+
+    def test_linux_portal_revocation_resize_and_frame_validation_fail_closed(self):
+        self.assertIn("terminal_stream_message", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("PipeWire portal stream was revoked or disconnected", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("state_stop.load(Ordering::Acquire)", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("!format_stop.load(Ordering::Acquire)", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("!format_reported.load(Ordering::Acquire)", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("process_terminal.load(Ordering::Acquire)", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("FORMAT_RENEGOTIATION_TIMEOUT", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("PipeWire video format renegotiation timed out", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("format: Option<spa::param::video::VideoInfoRaw>", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("user_data.format = Some(format)", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("Ok(CaptureEvent::Reset)", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("fn event_priority", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("Ok(CaptureEvent::Reset) => 1", LINUX_WAYLAND_CAPTURE)
+        self.assertIn("checked_mul(4)", LINUX_CAPTURE)
+        self.assertIn("Ok(CaptureEvent::Reset) =>", LINUX)
+        reset_case = LINUX.split("Ok(CaptureEvent::Reset) =>", 1)[1].split("Err(error) =>", 1)[0]
+        self.assertLess(reset_case.index("state.latest_frame.store(None)"), reset_case.index('window.hide()'))
+        self.assertIn("if !frame.is_valid_packed_bgra()", LINUX)
 
     def test_release_training_uses_shared_fail_closed_gate(self):
         for platform, source in (("Windows", WINDOWS), ("Linux", LINUX)):

@@ -2,7 +2,7 @@
 //! Portal ownership remains alive for the capture lifetime. PipeWire runs on a
 //! dedicated thread because its local main loop is intentionally !Send.
 
-use super::{CaptureSource, FrameView};
+use super::{CaptureEvent, CaptureSource, FrameView};
 use anyhow::{anyhow, Context, Result};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
 use ashpd::desktop::{PersistMode, Session};
@@ -14,10 +14,12 @@ use pw::{properties::properties, spa};
 use std::os::fd::OwnedFd;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const FORMAT_RENEGOTIATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct PipeWireWorkerGuard {
     stop_requested: Arc<AtomicBool>,
@@ -37,7 +39,7 @@ pub struct WaylandCapture {
     pub node_id: u32,
     _portal: Screencast<'static>,
     _session: Session<'static, Screencast<'static>>,
-    frames: Receiver<Result<FrameView, String>>,
+    frames: Receiver<Result<CaptureEvent, String>>,
     stop_requested: Arc<AtomicBool>,
     dropped_frames: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
@@ -142,7 +144,7 @@ impl Drop for WaylandCapture {
 
 #[async_trait::async_trait]
 impl CaptureSource for WaylandCapture {
-    async fn next_frame(&mut self) -> Result<FrameView> {
+    async fn next_event(&mut self) -> Result<CaptureEvent> {
         loop {
             match self.frames.try_recv() {
                 Ok(Ok(frame)) => return Ok(frame),
@@ -168,14 +170,75 @@ impl CaptureSource for WaylandCapture {
 }
 
 struct PipeWireUserData {
-    format: spa::param::video::VideoInfoRaw,
+    format: Option<spa::param::video::VideoInfoRaw>,
+}
+
+fn terminal_stream_message(
+    old: &pw::stream::StreamState,
+    new: &pw::stream::StreamState,
+    stop_requested: bool,
+) -> Option<String> {
+    if stop_requested {
+        return None;
+    }
+    match new {
+        pw::stream::StreamState::Error(error) => Some(format!("PipeWire stream error: {error}")),
+        pw::stream::StreamState::Unconnected
+            if !matches!(old, pw::stream::StreamState::Unconnected) =>
+        {
+            Some("PipeWire portal stream was revoked or disconnected".into())
+        }
+        _ => None,
+    }
+}
+
+fn format_renegotiation_timed_out(missing_since: Option<Instant>, now: Instant) -> bool {
+    missing_since.is_some_and(|started| {
+        now.saturating_duration_since(started) >= FORMAT_RENEGOTIATION_TIMEOUT
+    })
+}
+
+fn report_terminal(
+    sender: &Sender<Result<CaptureEvent, String>>,
+    eviction_receiver: &Receiver<Result<CaptureEvent, String>>,
+    dropped_frames: &AtomicU64,
+    reported: &AtomicBool,
+    message: String,
+) {
+    if !reported.swap(true, Ordering::AcqRel) {
+        send_latest(sender, eviction_receiver, dropped_frames, Err(message));
+    }
+}
+
+fn parse_video_info(param: &Pod) -> Result<spa::param::video::VideoInfoRaw> {
+    let (media_type, media_subtype) = spa::param::format_utils::parse_format(param)
+        .map_err(|error| anyhow!("parse PipeWire media format: {error:?}"))?;
+    if media_type != spa::param::format::MediaType::Video
+        || media_subtype != spa::param::format::MediaSubtype::Raw
+    {
+        return Err(anyhow!("PipeWire negotiated a non-raw-video format"));
+    }
+    let mut format = spa::param::video::VideoInfoRaw::default();
+    format
+        .parse(param)
+        .map_err(|error| anyhow!("parse PipeWire raw-video format: {error:?}"))?;
+    let size = format.size();
+    if size.width == 0 || size.height == 0 || size.width > 16_384 || size.height > 16_384 {
+        return Err(anyhow!(
+            "PipeWire negotiated invalid dimensions {}x{}",
+            size.width,
+            size.height
+        ));
+    }
+    RawVideoFormat::from_spa(format.format())?;
+    Ok(format)
 }
 
 fn run_pipewire(
     fd: OwnedFd,
     node_id: u32,
-    frame_tx: Sender<Result<FrameView, String>>,
-    eviction_receiver: Receiver<Result<FrameView, String>>,
+    frame_tx: Sender<Result<CaptureEvent, String>>,
+    eviction_receiver: Receiver<Result<CaptureEvent, String>>,
     setup_tx: Sender<Result<(), String>>,
     stop_requested: Arc<AtomicBool>,
     dropped_frames: Arc<AtomicU64>,
@@ -201,57 +264,102 @@ fn run_pipewire(
         let process_tx = frame_tx.clone();
         let process_eviction = eviction_receiver.clone();
         let process_dropped = dropped_frames.clone();
-        let error_tx = frame_tx.clone();
-        let error_eviction = eviction_receiver.clone();
-        let error_dropped = dropped_frames.clone();
+        let terminal_reported = Arc::new(AtomicBool::new(false));
+        let process_terminal = terminal_reported.clone();
+        let format_missing_since = Arc::new(Mutex::new(Some(Instant::now())));
+        let state_tx = frame_tx.clone();
+        let state_eviction = eviction_receiver.clone();
+        let state_dropped = dropped_frames.clone();
+        let state_stop = stop_requested.clone();
+        let state_reported = terminal_reported.clone();
+        let format_tx = frame_tx.clone();
+        let format_eviction = eviction_receiver.clone();
+        let format_dropped = dropped_frames.clone();
+        let format_stop = stop_requested.clone();
+        let format_reported = terminal_reported.clone();
+        let format_missing = format_missing_since.clone();
+        let watchdog_tx = frame_tx.clone();
+        let watchdog_eviction = eviction_receiver.clone();
+        let watchdog_dropped = dropped_frames.clone();
+        let watchdog_reported = terminal_reported.clone();
         let _listener = stream
-            .add_local_listener_with_user_data(PipeWireUserData {
-                format: Default::default(),
-            })
-            .state_changed(move |_, _, _, state| {
-                if let pw::stream::StreamState::Error(error) = state {
-                    send_latest(
-                        &error_tx,
-                        &error_eviction,
-                        &error_dropped,
-                        Err(format!("PipeWire stream error: {error}")),
+            .add_local_listener_with_user_data(PipeWireUserData { format: None })
+            .state_changed(move |_, _, old, state| {
+                if let Some(message) =
+                    terminal_stream_message(&old, &state, state_stop.load(Ordering::Acquire))
+                {
+                    report_terminal(
+                        &state_tx,
+                        &state_eviction,
+                        &state_dropped,
+                        &state_reported,
+                        message,
                     );
                 }
             })
-            .param_changed(|_, user_data, id, param| {
-                let Some(param) = param else {
-                    return;
-                };
+            .param_changed(move |_, user_data, id, param| {
                 if id != spa::param::ParamType::Format.as_raw() {
                     return;
                 }
-                let Ok((media_type, media_subtype)) = spa::param::format_utils::parse_format(param)
-                else {
+                if user_data.format.is_some() && !format_reported.load(Ordering::Acquire) {
+                    send_latest(
+                        &format_tx,
+                        &format_eviction,
+                        &format_dropped,
+                        Ok(CaptureEvent::Reset),
+                    );
+                }
+                let Some(param) = param else {
+                    user_data.format = None;
+                    *format_missing
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(Instant::now());
                     return;
                 };
-                if media_type != spa::param::format::MediaType::Video
-                    || media_subtype != spa::param::format::MediaSubtype::Raw
-                {
-                    return;
+                match parse_video_info(param) {
+                    Ok(format) => {
+                        user_data.format = Some(format);
+                        *format_missing
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = None;
+                    }
+                    Err(error) => {
+                        user_data.format = None;
+                        if !format_stop.load(Ordering::Acquire) {
+                            report_terminal(
+                                &format_tx,
+                                &format_eviction,
+                                &format_dropped,
+                                &format_reported,
+                                error.to_string(),
+                            );
+                        }
+                    }
                 }
-                let _ = user_data.format.parse(param);
             })
             .process(move |stream, user_data| {
+                if process_terminal.load(Ordering::Acquire) {
+                    return;
+                }
                 let Some(mut buffer) = stream.dequeue_buffer() else {
                     return;
                 };
-                let size = user_data.format.size();
+                let Some(video_info) = user_data.format.as_ref() else {
+                    return;
+                };
+                let size = video_info.size();
                 if size.width == 0 || size.height == 0 {
                     return;
                 }
-                let format = match RawVideoFormat::from_spa(user_data.format.format()) {
+                let format = match RawVideoFormat::from_spa(video_info.format()) {
                     Ok(format) => format,
                     Err(error) => {
-                        send_latest(
+                        report_terminal(
                             &process_tx,
                             &process_eviction,
                             &process_dropped,
-                            Err(error.to_string()),
+                            &process_terminal,
+                            error.to_string(),
                         );
                         return;
                     }
@@ -283,18 +391,19 @@ fn run_pipewire(
                         &process_tx,
                         &process_eviction,
                         &process_dropped,
-                        Ok(FrameView {
+                        Ok(CaptureEvent::Frame(FrameView {
                             pixels: Arc::from(pixels),
                             width: size.width,
                             height: size.height,
                             stride: size.width * 4,
-                        }),
+                        })),
                     ),
-                    Err(error) => send_latest(
+                    Err(error) => report_terminal(
                         &process_tx,
                         &process_eviction,
                         &process_dropped,
-                        Err(error.to_string()),
+                        &process_terminal,
+                        error.to_string(),
                     ),
                 }
             })
@@ -373,6 +482,21 @@ fn run_pipewire(
         let _ = setup_tx.send(Ok(()));
         while !stop_requested.load(Ordering::Acquire) {
             mainloop.loop_().iterate(Duration::from_millis(50));
+            let format_timed_out = format_renegotiation_timed_out(
+                *format_missing_since
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                Instant::now(),
+            );
+            if format_timed_out && !stop_requested.load(Ordering::Acquire) {
+                report_terminal(
+                    &watchdog_tx,
+                    &watchdog_eviction,
+                    &watchdog_dropped,
+                    &watchdog_reported,
+                    "PipeWire video format renegotiation timed out".into(),
+                );
+            }
         }
         stream.disconnect().context("disconnect PipeWire stream")?;
         Ok(())
@@ -384,20 +508,39 @@ fn run_pipewire(
     }
 }
 
+fn event_priority(item: &Result<CaptureEvent, String>) -> u8 {
+    match item {
+        Err(_) => 2,
+        Ok(CaptureEvent::Reset) => 1,
+        Ok(CaptureEvent::Frame(_)) => 0,
+    }
+}
+
 fn send_latest(
-    sender: &Sender<Result<FrameView, String>>,
-    eviction_receiver: &Receiver<Result<FrameView, String>>,
+    sender: &Sender<Result<CaptureEvent, String>>,
+    eviction_receiver: &Receiver<Result<CaptureEvent, String>>,
     dropped_frames: &AtomicU64,
-    item: Result<FrameView, String>,
+    item: Result<CaptureEvent, String>,
 ) {
     match sender.try_send(item) {
         Ok(()) | Err(TrySendError::Disconnected(_)) => {}
-        Err(TrySendError::Full(item)) => {
-            if eviction_receiver.try_recv().is_ok() {
-                dropped_frames.fetch_add(1, Ordering::Relaxed);
+        Err(TrySendError::Full(item)) => match eviction_receiver.try_recv() {
+            Ok(evicted) if event_priority(&evicted) > event_priority(&item) => {
+                if matches!(item, Ok(CaptureEvent::Frame(_))) {
+                    dropped_frames.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = sender.try_send(evicted);
             }
-            let _ = sender.try_send(item);
-        }
+            Ok(evicted) => {
+                if matches!(evicted, Ok(CaptureEvent::Frame(_))) {
+                    dropped_frames.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = sender.try_send(item);
+            }
+            Err(_) => {
+                let _ = sender.try_send(item);
+            }
+        },
     }
 }
 
@@ -581,6 +724,83 @@ fn write_yuv(output: &mut [u8], offset: usize, y: u8, u: u8, v: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_state_policy_reports_revocation_and_errors_but_not_expected_stop() {
+        use pw::stream::StreamState;
+
+        assert_eq!(
+            terminal_stream_message(&StreamState::Unconnected, &StreamState::Unconnected, false),
+            None
+        );
+        assert_eq!(
+            terminal_stream_message(&StreamState::Streaming, &StreamState::Unconnected, false),
+            Some("PipeWire portal stream was revoked or disconnected".into())
+        );
+        assert_eq!(
+            terminal_stream_message(
+                &StreamState::Streaming,
+                &StreamState::Error("permission revoked".into()),
+                false,
+            ),
+            Some("PipeWire stream error: permission revoked".into())
+        );
+        assert_eq!(
+            terminal_stream_message(&StreamState::Streaming, &StreamState::Unconnected, true),
+            None
+        );
+    }
+
+    #[test]
+    fn format_renegotiation_timeout_is_bounded_and_deterministic() {
+        let now = Instant::now();
+        assert!(!format_renegotiation_timed_out(None, now));
+        assert!(!format_renegotiation_timed_out(
+            Some(now - FORMAT_RENEGOTIATION_TIMEOUT + Duration::from_millis(1)),
+            now,
+        ));
+        assert!(format_renegotiation_timed_out(
+            Some(now - FORMAT_RENEGOTIATION_TIMEOUT),
+            now,
+        ));
+    }
+
+    #[test]
+    fn reset_evicts_stale_frame_and_terminal_is_single_assignment() {
+        let (sender, receiver) = bounded(1);
+        let dropped = AtomicU64::new(0);
+        send_latest(
+            &sender,
+            &receiver,
+            &dropped,
+            Ok(CaptureEvent::Frame(FrameView {
+                pixels: Arc::from(vec![0u8; 4]),
+                width: 1,
+                height: 1,
+                stride: 4,
+            })),
+        );
+        send_latest(&sender, &receiver, &dropped, Ok(CaptureEvent::Reset));
+        send_latest(
+            &sender,
+            &receiver,
+            &dropped,
+            Ok(CaptureEvent::Frame(FrameView {
+                pixels: Arc::from(vec![0u8; 4]),
+                width: 1,
+                height: 1,
+                stride: 4,
+            })),
+        );
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        assert!(matches!(receiver.recv().unwrap(), Ok(CaptureEvent::Reset)));
+
+        let reported = AtomicBool::new(false);
+        report_terminal(&sender, &receiver, &dropped, &reported, "first".into());
+        send_latest(&sender, &receiver, &dropped, Ok(CaptureEvent::Reset));
+        report_terminal(&sender, &receiver, &dropped, &reported, "second".into());
+        assert_eq!(receiver.recv().unwrap().unwrap_err(), "first");
+    }
 
     #[test]
     fn strips_bgra_row_padding_and_forces_opaque_alpha() {

@@ -9,7 +9,10 @@ Liquid Glass aesthetic.
 
 **Experimental, not release-ready.** Wayland uses the ScreenCast portal and a
 dedicated PipeWire loop with capacity-one newest-frame delivery and BGRA/BGRx,
-NV12, and YUY2 conversion. X11 captures the virtual root through XComposite and
+NV12, and YUY2 conversion. Valid PipeWire format/size renegotiation replaces the
+active layout; errors, revocation/disconnect, timed-out format removal, and
+malformed packed frames clear output and fail closed. Format removal permits a
+bounded two-second replacement window for resize. X11 captures the virtual root through XComposite and
 fd-backed MIT-SHM, converting padded 24/32-bit server pixels to packed BGRA.
 Both paths feed local ONNX detection, bounded wgpu/WGSL mirror-blend
 inpainting when Vulkan/GL initialization succeeds, explicit CPU fallback,

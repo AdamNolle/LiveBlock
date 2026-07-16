@@ -115,7 +115,13 @@ Exercise Screen Recording and Accessibility in this order: initial denial,
 relaunch, grant, active revocation, recovery, and a second relaunch. Perform 10
 cycles each of sleep/wake and lock/unlock while capture is active, plus Spaces
 and fullscreen transitions. Capture must resume only when intent remains active;
-panic or quit during suspension must prevent resurrection.
+panic or quit during suspension must prevent resurrection. During a controlled
+topology transition that temporarily exposes no usable display, require capture
+to stop, patches and detections to clear, the render surface to hide, and a
+specific unavailable-display error; reconnecting a display may resume only if
+intent remains active. Start a labeling snapshot request immediately before
+panic, then restart capture and prove that no pre-panic request consumes a frame
+or creates a screenshot from the new capture generation.
 
 ### Assistive technology
 

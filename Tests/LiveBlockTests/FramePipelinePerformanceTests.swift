@@ -1,3 +1,4 @@
+import CoreImage
 import XCTest
 @testable import LiveBlock
 
@@ -58,6 +59,66 @@ final class FramePipelinePerformanceTests: XCTestCase {
         XCTAssertFalse(tracker.shouldRender(boxes: [], styleRawValue: 0, frameIsIdle: false))
         tracker.reset()
         XCTAssertTrue(tracker.shouldRender(boxes: [], styleRawValue: 0, frameIsIdle: true))
+    }
+
+    func testFPSCounterResetDoesNotMixCaptureGenerations() {
+        let counter = FPSCounter()
+        XCTAssertEqual(counter.tick(), 1)
+        XCTAssertEqual(counter.tick(), 2)
+        counter.reset()
+        XCTAssertEqual(counter.tick(), 1)
+    }
+
+    func testPendingSnapshotIsCancelledBeforeLaterCaptureGeneration() async {
+        let storage = LatestBufferStorage()
+        let request = Task { await storage.requestSnapshot(timeout: 10, generation: 7) }
+        for _ in 0..<100 where storage.pendingCount() == 0 { await Task.yield() }
+        XCTAssertEqual(storage.pendingCount(), 1)
+
+        storage.ingest(makePixelBuffer(width: 16, height: 16),
+                       context: CIContext(options: [.useSoftwareRenderer: true]),
+                       generation: 8)
+        XCTAssertEqual(storage.pendingCount(), 1)
+        XCTAssertEqual(storage.cancelPending(), 1)
+        let cancelledImage = await request.value
+        XCTAssertNil(cancelledImage)
+    }
+
+    func testSnapshotIsDeliveredOnlyForMatchingCaptureGeneration() async {
+        let storage = LatestBufferStorage()
+        let request = Task { await storage.requestSnapshot(timeout: 10, generation: 9) }
+        for _ in 0..<100 where storage.pendingCount() == 0 { await Task.yield() }
+        XCTAssertEqual(storage.pendingCount(), 1)
+
+        storage.ingest(makePixelBuffer(width: 16, height: 16),
+                       context: CIContext(options: [.useSoftwareRenderer: true]),
+                       generation: 9)
+        let deliveredImage = await request.value
+        XCTAssertNotNil(deliveredImage)
+        XCTAssertEqual(storage.pendingCount(), 0)
+    }
+
+    func testSnapshotWriterIsPrivateCreateNewAndPreservesExistingBytes() throws {
+        let buffer = makePixelBuffer(width: 16, height: 16)
+        let image = try XCTUnwrap(
+            CIContext(options: [.useSoftwareRenderer: true]).createCGImage(
+                CIImage(cvPixelBuffer: buffer),
+                from: CGRect(x: 0, y: 0, width: 16, height: 16)
+            )
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveBlock-snapshot-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertTrue(SnapshotPNGWriter.write(image, to: url))
+        let first = try Data(contentsOf: url)
+        XCTAssertFalse(first.isEmpty)
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let mode = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber).intValue
+        XCTAssertEqual(mode & 0o777, 0o600)
+
+        XCTAssertFalse(SnapshotPNGWriter.write(image, to: url))
+        XCTAssertEqual(try Data(contentsOf: url), first)
     }
 
     private func makePixelBuffer(width: Int, height: Int) -> CVPixelBuffer {

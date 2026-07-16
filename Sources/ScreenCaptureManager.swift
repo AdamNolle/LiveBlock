@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import ScreenCaptureKit
 import CoreGraphics
 import CoreVideo
@@ -312,6 +313,21 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
         }
     }
 
+    /// Fail closed when a topology transaction resolves to no usable display.
+    /// Visible frame state is cleared immediately, while the user's intent and
+    /// target identity remain available for a later display-change recovery.
+    func failClosedForUnavailableDisplay() async -> Bool {
+        await stop(preserveIntent: true)
+        // Panic/quit/user-stop or a newer topology restart can win while
+        // stopCapture is suspended. Never overwrite that newer state or let an
+        // obsolete task hide its newly restored render surface.
+        guard !Task.isCancelled, captureDesired, !isRunning, !isStarting, stream == nil else {
+            return false
+        }
+        lastStartError = "No usable display is currently available. Capture will remain stopped until a display returns."
+        return true
+    }
+
     func setMinimumConfidence(_ value: Float) {
         visionProcessor.updateMinimumConfidence(value)
     }
@@ -346,12 +362,15 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
                             didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                             of type: SCStreamOutputType) {
         guard type == .screen,
-              activeStreamIdentity.matches(stream),
+              let streamGeneration = activeStreamIdentity.generation(ifMatching: stream),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // Resolve any pending screenshot request synchronously here so the
-        // CGImage detaches from the recycled SCStream buffer pool.
-        latestBufferStorage.ingest(pixelBuffer, context: pngContext)
+        // Resolve only requests bound to this exact capture generation. This
+        // prevents a request delayed across stop/panic from consuming a later
+        // stream's frame.
+        latestBufferStorage.ingest(pixelBuffer,
+                                   context: pngContext,
+                                   generation: streamGeneration)
 
         let bufferWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
         let bufferHeight = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
@@ -499,6 +518,8 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
         detectionCache.clear()
         blockEventTracker.reset()
         renderStateTracker.reset()
+        fpsCounter.reset()
+        latestBufferStorage.cancelPending()
         isRunning = false
         currentPatches = []
         currentDetections = []
@@ -541,31 +562,37 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
 
     // MARK: - Screenshot for labeling
 
-    /// Save the most recent captured frame as a PNG. Awaits the next stream
-    /// callback to obtain a CGImage that's detached from the SCStream buffer
-    /// pool, then PNG-encodes on a background queue.
-    nonisolated func saveLatestFrameForLabeling() async -> URL? {
-        guard let cgImage = await latestBufferStorage.requestSnapshot(timeout: 2.0) else { return nil }
-        return await withCheckedContinuation { (cont: CheckedContinuation<URL?, Never>) in
+    /// Save a frame from one exact capture generation as a PNG. A stop,
+    /// suspension, panic, topology restart, or replacement stream invalidates
+    /// the request before it can consume or retain the next generation's frame.
+    func saveLatestFrameForLabeling(expectedGeneration: UInt64) async -> URL? {
+        guard lifecycleGeneration == expectedGeneration, isRunning,
+              activeStreamIdentity.currentGeneration() == expectedGeneration,
+              let cgImage = await latestBufferStorage.requestSnapshot(
+                timeout: 2.0,
+                generation: expectedGeneration
+              ) else { return nil }
+        guard lifecycleGeneration == expectedGeneration, isRunning,
+              activeStreamIdentity.currentGeneration() == expectedGeneration else { return nil }
+        let url = await withCheckedContinuation { (cont: CheckedContinuation<URL?, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
-                TrainingPaths.ensureDirectories()
-                let stem = TrainingPaths.newScreenshotStem()
-                let url = TrainingPaths.screenshots.appendingPathComponent("\(stem).png")
-                guard let dest = CGImageDestinationCreateWithURL(url as CFURL,
-                                                                  "public.png" as CFString,
-                                                                  1, nil) else {
+                guard TrainingPaths.ensureDirectories() else {
                     cont.resume(returning: nil); return
                 }
-                CGImageDestinationAddImage(dest, cgImage, nil)
-                if CGImageDestinationFinalize(dest) {
-                    cont.resume(returning: url)
-                } else {
-                    NSLog("ScreenCaptureManager: PNG finalize failed")
-                    cont.resume(returning: nil)
-                }
+                let stem = TrainingPaths.newScreenshotStem()
+                let url = TrainingPaths.screenshots.appendingPathComponent("\(stem).png")
+                cont.resume(returning: SnapshotPNGWriter.write(cgImage, to: url) ? url : nil)
             }
         }
+        guard lifecycleGeneration == expectedGeneration, isRunning,
+              activeStreamIdentity.currentGeneration() == expectedGeneration else {
+            if let url { try? FileManager.default.removeItem(at: url) }
+            return nil
+        }
+        return url
     }
+
+    var currentLifecycleGeneration: UInt64 { lifecycleGeneration }
 
     // MARK: - Display selection (S8)
     nonisolated private func pickDisplay(for screen: NSScreen, in displays: [SCDisplay]) -> SCDisplay? {
@@ -602,6 +629,14 @@ final class AtomicObjectIdentity: @unchecked Sendable {
     func matches(_ object: AnyObject) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return identity == ObjectIdentifier(object)
+    }
+    func generation(ifMatching object: AnyObject) -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        return identity == ObjectIdentifier(object) ? generation : nil
+    }
+    func currentGeneration() -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        return identity == nil ? nil : generation
     }
     func clear() {
         lock.lock(); identity = nil; generation = 0; lock.unlock()
@@ -825,6 +860,51 @@ final class FPSCounter: @unchecked Sendable {
         }
         return Double(samples.count) / window
     }
+
+    func reset() {
+        lock.lock()
+        samples.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
+}
+
+enum SnapshotPNGWriter {
+    /// Encode before creating the destination, then create-new with private
+    /// permissions, flush to stable storage, and remove any partial write.
+    static func write(_ image: CGImage, to url: URL) -> Bool {
+        let encoded = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            encoded as CFMutableData,
+            "public.png" as CFString,
+            1,
+            nil
+        ) else { return false }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            NSLog("ScreenCaptureManager: PNG finalize failed")
+            return false
+        }
+
+        let descriptor = open(url.path,
+                              O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+                              S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            NSLog("ScreenCaptureManager: refusing to replace an existing screenshot")
+            return false
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        do {
+            try handle.write(contentsOf: encoded as Data)
+            try handle.synchronize()
+            try handle.close()
+            return true
+        } catch {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: url)
+            NSLog("ScreenCaptureManager: PNG write failed: \(error.localizedDescription)")
+            return false
+        }
+    }
 }
 
 /// Request-driven snapshot store. Avoids pinning a recycled CVPixelBuffer
@@ -832,35 +912,64 @@ final class FPSCounter: @unchecked Sendable {
 /// `ingest(...)` from the stream callback materializes a detached CGImage
 /// and resolves the continuation. After delivery, no buffer is held.
 final class LatestBufferStorage: @unchecked Sendable {
-    private let lock = NSLock()
-    private var pendingContinuations: [UUID: CheckedContinuation<CGImage?, Never>] = [:]
+    private struct Request {
+        let generation: UInt64
+        let continuation: CheckedContinuation<CGImage?, Never>
+    }
 
-    func requestSnapshot(timeout: TimeInterval) async -> CGImage? {
+    private let lock = NSLock()
+    private var pendingRequests: [UUID: Request] = [:]
+
+    func requestSnapshot(timeout: TimeInterval, generation: UInt64) async -> CGImage? {
         let requestID = UUID()
-        return await withCheckedContinuation { cont in
+        return await withCheckedContinuation { continuation in
             lock.lock()
-            pendingContinuations[requestID] = cont
+            pendingRequests[requestID] = Request(generation: generation,
+                                                 continuation: continuation)
             lock.unlock()
 
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + max(0.1, timeout)) { [weak self] in
                 guard let self else { return }
                 let timedOut: CheckedContinuation<CGImage?, Never>? = {
                     self.lock.lock(); defer { self.lock.unlock() }
-                    return self.pendingContinuations.removeValue(forKey: requestID)
+                    return self.pendingRequests.removeValue(forKey: requestID)?.continuation
                 }()
                 timedOut?.resume(returning: nil)
             }
         }
     }
 
+    func pendingCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return pendingRequests.count
+    }
+
+    /// Resolve every outstanding labeling request without a frame. Stop,
+    /// panic, suspension, and stream failure call this so an old request can
+    /// never consume a frame from a later capture generation.
+    @discardableResult
+    func cancelPending() -> Int {
+        let continuations: [CheckedContinuation<CGImage?, Never>] = {
+            lock.lock(); defer { lock.unlock() }
+            let values = pendingRequests.values.map(\.continuation)
+            pendingRequests.removeAll()
+            return values
+        }()
+        for continuation in continuations {
+            continuation.resume(returning: nil)
+        }
+        return continuations.count
+    }
+
     /// Called from the stream callback on the videoQueue. Renders only if
     /// at least one snapshot has been requested.
-    func ingest(_ pixelBuffer: CVPixelBuffer, context: CIContext) {
+    func ingest(_ pixelBuffer: CVPixelBuffer, context: CIContext, generation: UInt64) {
         let conts: [CheckedContinuation<CGImage?, Never>] = {
             lock.lock(); defer { lock.unlock() }
-            let c = Array(pendingContinuations.values)
-            pendingContinuations.removeAll()
-            return c
+            let matching = pendingRequests.compactMap { id, request in
+                request.generation == generation ? id : nil
+            }
+            return matching.compactMap { pendingRequests.removeValue(forKey: $0)?.continuation }
         }()
         guard !conts.isEmpty else { return }
 

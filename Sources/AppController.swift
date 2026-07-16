@@ -3,6 +3,79 @@ import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Monotonic admission policy for macOS actions that can reveal capture output.
+/// Stops and panic reject already-queued starts; shutdown rejects every later
+/// action. A newer explicit user start remains allowed after stop/panic.
+struct MacUserActionSequencePolicy {
+    private(set) var sequence: UInt64 = 0
+    private(set) var latestCaptureStart: UInt64 = 0
+    private(set) var stopBarrier: UInt64 = 0
+    private(set) var panicBarrier: UInt64 = 0
+    private(set) var shutdownRequested = false
+
+    private mutating func next() -> UInt64 {
+        sequence &+= 1
+        if sequence == 0 {
+            // Exhaustion is unreachable in practice; reset all nonterminal
+            // ordering state together rather than emitting the reserved zero.
+            sequence = 1
+            latestCaptureStart = 0
+            stopBarrier = 0
+            panicBarrier = 0
+        }
+        return sequence
+    }
+
+    mutating func claimCaptureStart() -> UInt64 {
+        let action = next()
+        latestCaptureStart = action
+        return action
+    }
+
+    @discardableResult
+    mutating func claimStop() -> UInt64 {
+        let action = next()
+        stopBarrier = action
+        return action
+    }
+
+    @discardableResult
+    mutating func claimPanic() -> UInt64 {
+        let action = next()
+        stopBarrier = action
+        panicBarrier = action
+        return action
+    }
+
+    @discardableResult
+    mutating func claimShutdown() -> UInt64 {
+        let action = next()
+        stopBarrier = action
+        panicBarrier = action
+        shutdownRequested = true
+        return action
+    }
+
+    func admitsCaptureStart(_ action: UInt64) -> Bool {
+        !shutdownRequested
+            && action != 0
+            && action == latestCaptureStart
+            && action > stopBarrier
+            && action > panicBarrier
+    }
+
+    func admitsDelayedAction(_ action: UInt64) -> Bool {
+        !shutdownRequested && action != 0 && action > stopBarrier && action > panicBarrier
+    }
+
+    var allowsRenderVisibility: Bool {
+        !shutdownRequested
+            && latestCaptureStart != 0
+            && latestCaptureStart > stopBarrier
+            && latestCaptureStart > panicBarrier
+    }
+}
+
 /// Central observable state for the whole app.
 ///
 /// Owns the capture manager, region store, and weak references to the three
@@ -73,6 +146,8 @@ final class AppController: ObservableObject {
     private var fullscreenMonitorTimer: Timer?
     private var screenRestartTask: Task<Void, Never>?
     private var screenRestartWasRunning = false
+    private var userActionPolicy = MacUserActionSequencePolicy()
+    private var autoCaptureGeneration: UInt64 = 0
     private var workspaceObserver: NSObjectProtocol?
     private var didBecomeActiveObserver: NSObjectProtocol?
     private static let selectedDisplayIDKey = "selectedDisplayID"
@@ -288,13 +363,18 @@ final class AppController: ObservableObject {
 
     func toggleCapture() {
         if isRunning || captureManager.captureDesired {
+            userActionPolicy.claimStop()
             screenRestartWasRunning = false
             screenRestartTask?.cancel()
             Task { await captureManager.stop() }
         } else {
+            let action = userActionPolicy.claimCaptureStart()
             guard let screen = currentScreen() else { return }
             alignOverlays(to: screen)
-            Task { await captureManager.start(on: screen) }
+            Task { @MainActor [weak self] in
+                guard let self, self.userActionPolicy.admitsCaptureStart(action) else { return }
+                await self.captureManager.start(on: screen)
+            }
         }
     }
 
@@ -306,11 +386,12 @@ final class AppController: ObservableObject {
         guard let screen = NSScreen.liveBlockScreen(id: id) else { return }
         alignOverlays(to: screen)
         guard changed, captureManager.captureDesired else { return }
+        let action = userActionPolicy.latestCaptureStart
         screenRestartTask?.cancel()
         screenRestartTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.userActionPolicy.admitsCaptureStart(action) else { return }
             await self.captureManager.stop(preserveIntent: true)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.userActionPolicy.admitsCaptureStart(action) else { return }
             await self.captureManager.start(on: screen)
         }
     }
@@ -320,6 +401,7 @@ final class AppController: ObservableObject {
     }
 
     func openEditor() {
+        guard !userActionPolicy.shutdownRequested else { return }
         guard let panel = regionEditor else {
             NSLog("AppController.openEditor: regionEditor is nil — window was never created or got deallocated.")
             assertionFailure("regionEditor missing")
@@ -424,11 +506,16 @@ final class AppController: ObservableObject {
     }
 
     func quit() {
-        Task { @MainActor in
-            screenRestartWasRunning = false
-            screenRestartTask?.cancel()
-            stopAutoCapture()
-            if isRunning || captureManager.captureDesired { await captureManager.stop() }
+        userActionPolicy.claimShutdown()
+        screenRestartWasRunning = false
+        screenRestartTask?.cancel()
+        autoCaptureEnabled = false
+        hidePrivacyWindowsForTerminalAction()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.isRunning || self.captureManager.captureDesired {
+                await self.captureManager.stop()
+            }
             NSApp.terminate(nil)
         }
     }
@@ -438,19 +525,18 @@ final class AppController: ObservableObject {
     /// Panic button. The user wants a single instant action that gets
     /// LiveBlock out of their way without quitting.
     func panicDisable() {
-        Task { @MainActor in
-            screenRestartWasRunning = false
-            screenRestartTask?.cancel()
-            stopAutoCapture()
+        userActionPolicy.claimPanic()
+        screenRestartWasRunning = false
+        screenRestartTask?.cancel()
+        autoCaptureEnabled = false
+        // Hide privacy-visible windows synchronously. SCStream teardown can
+        // suspend, so panic latency must never wait for stopCapture to return.
+        hidePrivacyWindowsForTerminalAction()
+        showControlPanel()
+        Task { @MainActor [weak self] in
             // Always clear desired intent, including while system-suspended,
             // so wake/unlock or a queued recovery can never resurrect capture.
-            await captureManager.stop()
-            renderLayer?.orderOut(nil)
-            if isEditorOpen { closeEditor() }
-            labelingWindow?.orderOut(nil)
-            trainingDashboardWindow?.orderOut(nil)
-            miniHUDWindow?.orderOut(nil)
-            showControlPanel()
+            await self?.captureManager.stop()
         }
     }
 
@@ -461,33 +547,40 @@ final class AppController: ObservableObject {
     /// running — visual users shouldn't have to first toggle capture before
     /// being able to grab a screenshot.
     func captureScreenshotForLabeling() {
-        Task { @MainActor in
-            let startedForSnapshot = !isRunning
+        let action = userActionPolicy.claimCaptureStart()
+        Task { @MainActor [weak self] in
+            guard let self, self.userActionPolicy.admitsCaptureStart(action) else { return }
+            let startedForSnapshot = !self.isRunning
             if startedForSnapshot {
-                guard let screen = currentScreen() else {
+                guard let screen = self.currentScreen() else {
                     NSLog("AppController: no screen to start capture on.")
                     return
                 }
-                alignOverlays(to: screen)
-                await captureManager.start(on: screen)
-                guard captureManager.isRunning else {
+                self.alignOverlays(to: screen)
+                await self.captureManager.start(on: screen)
+                guard self.userActionPolicy.admitsCaptureStart(action), self.captureManager.isRunning else {
                     NSLog("AppController: capture could not start; screenshot cancelled.")
                     return
                 }
             }
-            let expectedGeneration = captureManager.currentLifecycleGeneration
+            let expectedGeneration = self.captureManager.currentLifecycleGeneration
             if startedForSnapshot {
                 // Give SCStream one frame to land before we ask for it. The
                 // generation guard below makes this sleep safe across panic,
                 // suspension, display restart, or explicit stop.
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
-            guard captureManager.isRunning,
-                  captureManager.currentLifecycleGeneration == expectedGeneration else { return }
-            let url = await captureManager.saveLatestFrameForLabeling(
+            guard self.userActionPolicy.admitsCaptureStart(action),
+                  self.captureManager.isRunning,
+                  self.captureManager.currentLifecycleGeneration == expectedGeneration else { return }
+            let url = await self.captureManager.saveLatestFrameForLabeling(
                 expectedGeneration: expectedGeneration
             )
             if url != nil {
+                guard self.userActionPolicy.admitsCaptureStart(action) else {
+                    if let url { try? FileManager.default.removeItem(at: url) }
+                    return
+                }
                 self.lastCaptureTimestamp = Date()
                 self.labelingController.refresh()
                 NSSound(named: NSSound.Name("Tink"))?.play()
@@ -498,6 +591,7 @@ final class AppController: ObservableObject {
     }
 
     func showLabelingWindow() {
+        guard !userActionPolicy.shutdownRequested else { return }
         labelingController.refresh()
         guard let win = labelingWindow else {
             NSLog("AppController.showLabelingWindow: labelingWindow is nil.")
@@ -544,6 +638,7 @@ final class AppController: ObservableObject {
     }
 
     func showTrainingDashboard() {
+        guard !userActionPolicy.shutdownRequested else { return }
         guard let win = trainingDashboardWindow else {
             NSLog("AppController.showTrainingDashboard: trainingDashboardWindow is nil.")
             assertionFailure("trainingDashboardWindow missing")
@@ -554,6 +649,7 @@ final class AppController: ObservableObject {
     }
 
     func showMiniHUD() {
+        guard !userActionPolicy.shutdownRequested else { return }
         miniHUDWindow?.orderFrontRegardless()
     }
     func hideMiniHUD() {
@@ -576,19 +672,34 @@ final class AppController: ObservableObject {
     }
 
     private func stopAutoCapture() {
+        autoCaptureGeneration &+= 1
+        if autoCaptureGeneration == 0 { autoCaptureGeneration = 1 }
         autoCaptureTimer?.invalidate()
         autoCaptureTimer = nil
     }
 
     private func updateAutoCaptureTimer() {
         stopAutoCapture()
-        guard autoCaptureEnabled else { return }
+        guard autoCaptureEnabled, !userActionPolicy.shutdownRequested else { return }
         let interval = max(5.0, autoCaptureIntervalSeconds)
+        let generation = autoCaptureGeneration
         autoCaptureTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.captureScreenshotForLabeling()
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.autoCaptureEnabled,
+                      self.autoCaptureGeneration == generation,
+                      !self.userActionPolicy.shutdownRequested else { return }
+                self.captureScreenshotForLabeling()
             }
         }
+    }
+
+    private func hidePrivacyWindowsForTerminalAction() {
+        if isEditorOpen { closeEditor() }
+        labelingWindow?.orderOut(nil)
+        trainingDashboardWindow?.orderOut(nil)
+        miniHUDWindow?.orderOut(nil)
+        renderLayer?.orderOut(nil)
     }
 
     // MARK: - Helpers
@@ -619,9 +730,29 @@ final class AppController: ObservableObject {
     }
 
     func handleActiveSpaceChange() {
-        guard captureManager.captureDesired, let screen = currentScreen() else { return }
+        guard userActionPolicy.allowsRenderVisibility,
+              captureManager.captureDesired,
+              let screen = currentScreen() else { return }
         alignOverlays(to: screen)
         if isRunning, !isEditorOpen { renderLayer?.orderFrontRegardless() }
+    }
+
+    var allowsRenderVisibility: Bool { userActionPolicy.allowsRenderVisibility }
+
+    func startFirstBlockFromOnboarding() {
+        let action = userActionPolicy.claimCaptureStart()
+        Task { @MainActor [weak self] in
+            guard let self, self.userActionPolicy.admitsCaptureStart(action) else { return }
+            if !self.isRunning {
+                guard let screen = self.currentScreen() else { return }
+                self.alignOverlays(to: screen)
+                await self.captureManager.start(on: screen)
+            }
+            guard self.userActionPolicy.admitsDelayedAction(action) else { return }
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled, self.userActionPolicy.admitsDelayedAction(action) else { return }
+            self.openEditor()
+        }
     }
 
     func handleScreenConfigurationChange() {

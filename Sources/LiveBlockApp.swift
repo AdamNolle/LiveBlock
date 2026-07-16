@@ -271,13 +271,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.controller.onboardingWindow?.close()
                 },
                 onTryFirstBlock: { [weak self] in
-                    // Start blocking AND open the editor in one click — the
-                    // visual-first replacement for "memorize ⌘⇧B".
-                    guard let self else { return }
-                    if !self.controller.isRunning { self.controller.toggleCapture() }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                        self?.controller.openEditor()
-                    }
+                    // Start blocking AND open the editor through one sequenced
+                    // action. Panic/stop/quit can invalidate the delayed open.
+                    self?.controller.startFirstBlockFromOnboarding()
                 }
             ))
         )
@@ -300,7 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         .receive(on: RunLoop.main)
         .sink { [weak self] running, editing in
             guard let self else { return }
-            if running && !editing {
+            if running && !editing && self.controller.allowsRenderVisibility {
                 self.controller.renderLayer?.orderFrontRegardless()
             } else {
                 self.controller.renderLayer?.orderOut(nil)

@@ -5,9 +5,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE = (ROOT / "Sources/ScreenCaptureManager.swift").read_text()
 CONTROLLER = (ROOT / "Sources/AppController.swift").read_text()
+LIVEBLOCK_APP = (ROOT / "Sources/LiveBlockApp.swift").read_text()
 PERFORMANCE_TESTS = (
     ROOT / "Tests/LiveBlockTests/FramePipelinePerformanceTests.swift"
 ).read_text()
+ACTION_TESTS = (ROOT / "Tests/LiveBlockTests/UserActionSequenceTests.swift").read_text()
 RUNBOOK = (ROOT / "docs/DESKTOP_VALIDATION_RUNBOOKS.md").read_text()
 
 
@@ -27,9 +29,15 @@ class MacOSFailureModeContractTests(unittest.TestCase):
         self.assertIn("!isRunning, !isStarting, stream == nil", source)
         self.assertIn("No usable display is currently available", source)
 
+        topology_handler = re.search(
+            r"func handleScreenConfigurationChange\(\) \{(.*?)\n    \}",
+            CONTROLLER,
+            re.S,
+        )
+        self.assertIsNotNone(topology_handler)
         topology = re.search(
             r"guard let screen = self\.currentScreen\(\) else \{(.*?)\n            \}",
-            CONTROLLER,
+            topology_handler.group(1),
             re.S,
         )
         self.assertIsNotNone(topology)
@@ -71,6 +79,43 @@ class MacOSFailureModeContractTests(unittest.TestCase):
         self.assertIn("guard systemSuspensionReasons.isEmpty, captureDesired else { return }", CAPTURE)
         self.assertIn("guard captureDesired, systemSuspensionReasons.isEmpty else { return }", CAPTURE)
         self.assertIn("guard !Task.isCancelled, let self, self.captureDesired", CAPTURE)
+
+    def test_panic_and_quit_install_synchronous_action_barriers(self):
+        panic = re.search(r"func panicDisable\(\) \{(.*?)\n    \}", CONTROLLER, re.S)
+        self.assertIsNotNone(panic)
+        panic_source = panic.group(1)
+        self.assertLess(panic_source.index("userActionPolicy.claimPanic()"), panic_source.index("Task {"))
+        self.assertLess(panic_source.index("autoCaptureEnabled = false"), panic_source.index("Task {"))
+        self.assertLess(
+            panic_source.index("hidePrivacyWindowsForTerminalAction()"),
+            panic_source.index("await self?.captureManager.stop()"),
+        )
+
+        quit_action = re.search(r"func quit\(\) \{(.*?)\n    \}", CONTROLLER, re.S)
+        self.assertIsNotNone(quit_action)
+        quit_source = quit_action.group(1)
+        self.assertLess(quit_source.index("userActionPolicy.claimShutdown()"), quit_source.index("Task {"))
+        self.assertLess(
+            quit_source.index("hidePrivacyWindowsForTerminalAction()"),
+            quit_source.index("await self.captureManager.stop()"),
+        )
+        self.assertIn("allowsRenderVisibility", LIVEBLOCK_APP)
+
+    def test_auto_capture_and_onboarding_delays_are_panic_guarded(self):
+        self.assertIn("autoCaptureGeneration &+= 1", CONTROLLER)
+        self.assertIn("self.autoCaptureGeneration == generation", CONTROLLER)
+        self.assertIn("self.autoCaptureEnabled", CONTROLLER)
+        self.assertIn("startFirstBlockFromOnboarding()", LIVEBLOCK_APP)
+        self.assertNotIn("DispatchQueue.main.asyncAfter(deadline: .now() + 0.4)", LIVEBLOCK_APP)
+        for test_name in (
+            "testNewerCaptureStartSupersedesQueuedStart",
+            "testStopRejectsQueuedStartAndDelayedWindowUntilExplicitRestart",
+            "testPanicRejectsPrePanicSnapshotAndOnboardingOpen",
+            "testShutdownIsTerminalEvenForLaterClaimedActions",
+        ):
+            self.assertIn(test_name, ACTION_TESTS)
+        self.assertIn("queued auto-capture", RUNBOOK)
+        self.assertIn("delayed onboarding", RUNBOOK)
 
     def test_single_flight_static_reuse_and_generation_cancellation_have_tests(self):
         for test_name in (

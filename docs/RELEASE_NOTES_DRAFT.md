@@ -45,7 +45,9 @@ No current platform profile reports `releaseReady: true`.
   cancellation, and fail-closed permission/display resolution. A topology with
   no usable display clears visible state and hides rendering while retaining
   intent; stop/panic also cancels pending labeling snapshots so they cannot
-  consume a later capture generation.
+  consume a later capture generation. Monotonic macOS action barriers reject
+  pre-stop/pre-panic capture and delayed onboarding work, panic disables queued
+  auto-capture, and privacy-visible windows hide before stream teardown awaits.
 - Offline authenticated precompiled CoreML update installation and startup
   recovery.
 - Credential-free release preflight plus credential-gated Developer ID,

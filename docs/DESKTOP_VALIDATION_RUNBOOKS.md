@@ -121,7 +121,12 @@ to stop, patches and detections to clear, the render surface to hide, and a
 specific unavailable-display error; reconnecting a display may resume only if
 intent remains active. Start a labeling snapshot request immediately before
 panic, then restart capture and prove that no pre-panic request consumes a frame
-or creates a screenshot from the new capture generation.
+or creates a screenshot from the new capture generation. Enable automatic
+labeling capture, arrange for a queued auto-capture callback and the delayed onboarding
+**Try your first block** action immediately before panic, and verify neither can
+restart capture nor reopen a privacy-visible window afterward. Panic must turn
+auto-capture off. Repeat while stream teardown is deliberately slow and verify
+render/editor/labeling/training/HUD windows hide before teardown completes.
 
 ### Assistive technology
 

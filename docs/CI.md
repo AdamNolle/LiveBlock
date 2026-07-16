@@ -28,9 +28,12 @@ prerelease versions do not compile together.
 The shared job uploads `release-dependency-integrity-evidence`: a deterministic
 CycloneDX 1.5 build-input SBOM, declared-license policy/report, component-bound
 OR selections, MPL source-offer/license evidence, obligation-verification report,
-the blocked hash-bound Windows DirectML transport-readiness summary, a verified
-schema-1 inventory of the built webview payload, and a deterministic tar plus
-SHA-256 preserving the exact inventoried bytes/modes for independent recheck. See
+the blocked hash-bound Windows DirectML transport-readiness summary, a closed
+schema-1 release-blocker diagnostic, a verified schema-1 inventory of the built
+webview payload, and a deterministic tar plus SHA-256 preserving the exact
+inventoried bytes/modes for independent recheck. Clean CI intentionally lacks the
+ignored human-review pool and promotion report, so the diagnostic records those
+inputs as missing rather than inferring local evidence. See
 [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md). This webview payload is explicitly `build-only`; it is not an installer or
 signed production package. The Linux job separately uploads
 `linux-build-only-package-evidence` containing the exact deb/rpm/AppImage,

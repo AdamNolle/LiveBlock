@@ -33,8 +33,10 @@ use crate::labels::{LabelDocument, ScreenshotEntry};
 use crate::regions::{NormalizedRegion, RegionStore, SharedRegionStore};
 use crate::session::detect_session;
 use crate::state::{
-    advance_capture_generation, frame_belongs_to_active_generation,
-    take_finished_capture_runtime, AppState, CaptureRuntime, CaptureTelemetrySnapshot, LatestFrame,
+    advance_capture_generation, claim_user_action, frame_belongs_to_active_generation,
+    take_finished_capture_runtime, user_action_is_current,
+    window_action_is_newer_than_barriers, AppState, CaptureRuntime, CaptureTelemetrySnapshot,
+    LatestFrame,
 };
 
 #[tauri::command]
@@ -92,23 +94,71 @@ fn get_capabilities(
 
 static USER_ACTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+fn next_user_action_sequence() -> u64 {
+    loop {
+        let current = USER_ACTION_SEQUENCE.load(Ordering::SeqCst);
+        let next = current.wrapping_add(1).max(1);
+        if USER_ACTION_SEQUENCE
+            .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
+fn action_sequence_was_allocated(action_sequence: u64) -> bool {
+    action_sequence != 0 && action_sequence <= USER_ACTION_SEQUENCE.load(Ordering::SeqCst)
+}
+
+fn claim_action(state: &AppState, action_sequence: u64) -> bool {
+    action_sequence_was_allocated(action_sequence)
+        && claim_user_action(
+            &state.latest_action_sequence,
+            state.shutdown_requested.load(Ordering::SeqCst),
+            action_sequence,
+        )
+}
+
+fn action_is_current(state: &AppState, action_sequence: u64) -> bool {
+    user_action_is_current(
+        &state.latest_action_sequence,
+        state.shutdown_requested.load(Ordering::SeqCst),
+        action_sequence,
+    )
+}
+
+fn window_action_is_allowed(state: &AppState, action_sequence: u64) -> bool {
+    action_sequence_was_allocated(action_sequence)
+        && window_action_is_newer_than_barriers(
+            action_sequence,
+            state.latest_action_sequence.load(Ordering::SeqCst),
+            state.last_panic_action.load(Ordering::SeqCst),
+            state.shutdown_requested.load(Ordering::SeqCst),
+        )
+}
+
 #[tauri::command]
 fn begin_user_action() -> u64 {
-    USER_ACTION_SEQUENCE.fetch_add(1, Ordering::SeqCst).wrapping_add(1)
+    next_user_action_sequence()
 }
 
 #[tauri::command]
 async fn start_capture(
     monitor_id: String,
-    _action_sequence: u64,
+    action_sequence: u64,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    start_capture_inner(monitor_id, app, state.inner().clone()).await
+    if !claim_action(state.inner(), action_sequence) {
+        return Ok(());
+    }
+    start_capture_inner(monitor_id, action_sequence, app, state.inner().clone()).await
 }
 
 async fn start_capture_inner(
     monitor_id: String,
+    action_sequence: u64,
     app: AppHandle,
     state: Arc<AppState>,
 ) -> Result<(), String> {
@@ -125,6 +175,9 @@ async fn start_capture_inner(
     if let Some(previous) = lifecycle.take() {
         previous.stop_requested.store(true, Ordering::Release);
         let _ = previous.task.await;
+    }
+    if !action_is_current(&state, action_sequence) {
+        return Ok(());
     }
     let generation = advance_capture_generation(&state.capture_generation);
     state.capture_telemetry.reset();
@@ -156,17 +209,27 @@ async fn start_capture_inner(
 
 #[tauri::command]
 async fn stop_capture(
-    _action_sequence: u64,
+    action_sequence: u64,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    stop_capture_inner(app, state.inner().clone()).await
+    if !claim_action(state.inner(), action_sequence) {
+        return Ok(());
+    }
+    stop_capture_inner(app, state.inner().clone(), Some(action_sequence)).await
 }
 
-async fn stop_capture_inner(app: AppHandle, state: Arc<AppState>) -> Result<(), String> {
+async fn stop_capture_inner(
+    app: AppHandle,
+    state: Arc<AppState>,
+    expected_action: Option<u64>,
+) -> Result<(), String> {
     // Hold the lifecycle lock through join and global-state cleanup so a new
     // start cannot be overwritten by the previous generation's teardown.
     let mut lifecycle = state.capture.lock().await;
+    if expected_action.is_some_and(|sequence| !action_is_current(&state, sequence)) {
+        return Ok(());
+    }
     let runtime = lifecycle.take();
     if let Some(runtime) = &runtime {
         runtime.stop_requested.store(true, Ordering::Release);
@@ -636,8 +699,12 @@ fn validate_label_binding(path: &std::path::Path, doc: &LabelDocument) -> Result
 }
 
 async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: Arc<AppState>) {
+    let action_sequence = next_user_action_sequence();
     match action {
         hotkeys::HotkeyAction::ToggleCapture => {
+            if !claim_action(&state, action_sequence) {
+                return;
+            }
             let finished = {
                 let mut lifecycle = state.capture.lock().await;
                 take_finished_capture_runtime(&mut lifecycle)
@@ -652,7 +719,7 @@ async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: A
             }
             let has_runtime = state.capture.lock().await.is_some();
             if has_runtime {
-                let _ = stop_capture_inner(app, state).await;
+                let _ = stop_capture_inner(app, state, Some(action_sequence)).await;
             } else {
                 let target = match detect_session() {
                     session::SessionType::Wayland => Some("portal-selection"),
@@ -660,13 +727,26 @@ async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: A
                     session::SessionType::Unknown => None,
                 };
                 if let Some(target) = target {
-                    if let Err(error) = start_capture_inner(target.into(), app.clone(), state).await {
-                        let _ = app.emit("capture-runtime-error", error);
+                    let start_state = state.clone();
+                    if let Err(error) = start_capture_inner(
+                        target.into(),
+                        action_sequence,
+                        app.clone(),
+                        state,
+                    )
+                    .await
+                    {
+                        if action_is_current(&start_state, action_sequence) {
+                            let _ = app.emit("capture-runtime-error", error);
+                        }
                     }
                 }
             }
         }
         hotkeys::HotkeyAction::ToggleEditor => {
+            if !window_action_is_allowed(&state, action_sequence) {
+                return;
+            }
             if let Some(window) = app.get_webview_window("editor") {
                 if window.is_visible().unwrap_or(false) {
                     let _ = window.hide();
@@ -677,6 +757,9 @@ async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: A
             }
         }
         hotkeys::HotkeyAction::CaptureForLabeling => {
+            if !window_action_is_allowed(&state, action_sequence) {
+                return;
+            }
             if capture_screenshot_serialized(&state)
                 .await
                 .ok()
@@ -690,6 +773,12 @@ async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: A
             }
         }
         hotkeys::HotkeyAction::PanicDisable => {
+            state
+                .last_panic_action
+                .fetch_max(action_sequence, Ordering::SeqCst);
+            if !claim_action(&state, action_sequence) {
+                return;
+            }
             // Clear every privacy-visible window before awaiting source/GPU teardown.
             for label in ["editor", "render", "labeling", "training"] {
                 if let Some(window) = app.get_webview_window(label) {
@@ -701,7 +790,7 @@ async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: A
                 let _ = window.set_focus();
             }
             let _ = app.emit("panic-disabled", ());
-            let _ = stop_capture_inner(app.clone(), state).await;
+            let _ = stop_capture_inner(app.clone(), state, Some(action_sequence)).await;
         }
     }
 }
@@ -724,24 +813,51 @@ fn cancel_training() -> Result<(), String> {
 // ---------- Window lifecycle ----------
 
 #[tauri::command]
-fn show_window(app: AppHandle, label: &str) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window(label) {
-        let _ = w.show();
-        let _ = w.set_focus();
+fn show_window(
+    app: AppHandle,
+    label: &str,
+    action_sequence: u64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if !matches!(label, "editor" | "labeling" | "training") {
+        return Err(format!("window is not renderer-openable: {label}"));
     }
-    Ok(())
+    if !window_action_is_allowed(state.inner(), action_sequence) {
+        return Ok(());
+    }
+    let window = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("window is unavailable: {label}"))?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn hide_window(app: AppHandle, label: &str) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window(label) {
-        let _ = w.hide();
+    if !matches!(label, "editor" | "labeling" | "training") {
+        return Err(format!("window is not renderer-hideable: {label}"));
     }
-    Ok(())
+    app.get_webview_window(label)
+        .ok_or_else(|| format!("window is unavailable: {label}"))?
+        .hide()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn quit(app: AppHandle) {
+async fn quit(app: AppHandle, state: State<'_, Arc<AppState>>) {
+    let action_sequence = next_user_action_sequence();
+    state
+        .latest_action_sequence
+        .fetch_max(action_sequence, Ordering::SeqCst);
+    if state.shutdown_requested.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    for label in ["editor", "render", "labeling", "training"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.hide();
+        }
+    }
+    let _ = stop_capture_inner(app.clone(), state.inner().clone(), None).await;
     app.exit(0);
 }
 

@@ -18,7 +18,6 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from corpus.review_labels import load_plan_paths, review_plan_status
 from promotion_contract import (
     GATE_SCHEMA,
     artifact_sha256,
@@ -167,6 +166,10 @@ def assess_human_review(root: Path) -> dict[str, Any]:
         return _nullable_human_gate("human-review-input-missing")
     status_payload: bytes | None = None
     try:
+        # Keep clean hosted release-contract checks lightweight: the corpus module
+        # imports Pillow, which is needed only when ignored local review inputs exist.
+        from corpus.review_labels import load_plan_paths, review_plan_status
+
         plan, _plan_payload = _load_json(plan_path)
         if not isinstance(plan, dict) or set(plan) != {
             "remaining_deficits",

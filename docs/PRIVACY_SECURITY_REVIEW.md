@@ -64,6 +64,9 @@ bundle inventories.
 
 - macOS uses `TrainingPaths` beneath Application Support and native controllers
   derive screenshot/label paths rather than accepting renderer-provided paths.
+  Snapshot requests and delivery are bound to one capture generation; stop/panic
+  cancels pending continuations. PNGs are encoded before create-new
+  `O_EXCL|O_NOFOLLOW` `0600` writes, synchronized, and partial-cleaned.
 - Windows uses `%APPDATA%\LiveBlock`; Windows user-profile ACLs are the outer
   boundary. Screenshot creation is create-new, flushed, and synchronized.
 - Linux uses `$XDG_DATA_HOME/LiveBlock`; directories are forced to `0700`, and

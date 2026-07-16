@@ -38,7 +38,10 @@ No current platform profile reports `releaseReady: true`.
   pixel geometry, single-flight inpainting, stale work dropping, static-frame
   reuse, manual regions, local labeling, and frontmost-app/fullscreen pause.
 - Bounded capture retry policy across sleep/display sleep/session lock, panic
-  cancellation, and fail-closed permission/display resolution.
+  cancellation, and fail-closed permission/display resolution. A topology with
+  no usable display clears visible state and hides rendering while retaining
+  intent; stop/panic also cancels pending labeling snapshots so they cannot
+  consume a later capture generation.
 - Offline authenticated precompiled CoreML update installation and startup
   recovery.
 - Credential-free release preflight plus credential-gated Developer ID,

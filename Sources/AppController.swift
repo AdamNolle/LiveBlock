@@ -462,7 +462,8 @@ final class AppController: ObservableObject {
     /// being able to grab a screenshot.
     func captureScreenshotForLabeling() {
         Task { @MainActor in
-            if !isRunning {
+            let startedForSnapshot = !isRunning
+            if startedForSnapshot {
                 guard let screen = currentScreen() else {
                     NSLog("AppController: no screen to start capture on.")
                     return
@@ -473,10 +474,19 @@ final class AppController: ObservableObject {
                     NSLog("AppController: capture could not start; screenshot cancelled.")
                     return
                 }
-                // Give SCStream one frame to land before we ask for it.
+            }
+            let expectedGeneration = captureManager.currentLifecycleGeneration
+            if startedForSnapshot {
+                // Give SCStream one frame to land before we ask for it. The
+                // generation guard below makes this sleep safe across panic,
+                // suspension, display restart, or explicit stop.
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
-            let url = await captureManager.saveLatestFrameForLabeling()
+            guard captureManager.isRunning,
+                  captureManager.currentLifecycleGeneration == expectedGeneration else { return }
+            let url = await captureManager.saveLatestFrameForLabeling(
+                expectedGeneration: expectedGeneration
+            )
             if url != nil {
                 self.lastCaptureTimestamp = Date()
                 self.labelingController.refresh()
@@ -624,7 +634,14 @@ final class AppController: ObservableObject {
             guard !Task.isCancelled, let self else { return }
             self.refreshDisplayTargets()
             guard let screen = self.currentScreen() else {
-                self.screenRestartWasRunning = false
+                if self.screenRestartWasRunning {
+                    // Do not leave the last display's stream or patches visible
+                    // while macOS reports no usable target. Intent is retained so
+                    // a later topology notification can restart on a valid screen.
+                    if await self.captureManager.failClosedForUnavailableDisplay() {
+                        self.renderLayer?.orderOut(nil)
+                    }
+                }
                 return
             }
             self.alignOverlays(to: screen)

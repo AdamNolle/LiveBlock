@@ -105,7 +105,7 @@ final class RegionStoreTests: XCTestCase {
     func testSnapshotRequestTimesOutWithoutCapturedFrame() async {
         let storage = LatestBufferStorage()
         let started = Date()
-        let result = await storage.requestSnapshot(timeout: 0.1)
+        let result = await storage.requestSnapshot(timeout: 0.1, generation: 1)
         XCTAssertNil(result)
         XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
     }

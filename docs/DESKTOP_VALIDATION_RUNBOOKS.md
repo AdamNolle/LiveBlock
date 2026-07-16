@@ -272,13 +272,19 @@ renegotiated format/size must replace the old dimensions. Format removal must
 clear the active layout immediately, allow at most two seconds for a replacement,
 and then fail closed; malformed, unsupported, zero, or over-16384 format data
 must fail immediately rather than process a stale layout. For X11, test
-MIT-SHM/XComposite availability and a real
-`XGrabKey` conflict. Test multi-output layouts, negative origins where exposed,
+MIT-SHM/XComposite availability, root geometry/stride changes, and a real
+`XGrabKey` conflict. A virtual-root resize must clear old output before the
+pre-created replacement SHM mapping publishes a new frame; mapping/reply failures
+must stop rather than reuse stale dimensions. Test multi-output layouts,
+negative origins where exposed,
 scaling, hot-plug, 10 suspend/resume and lock/unlock cycles, and compositor
 restart. Verify layer-shell/XFixes click-through using an independent pointer
 observer. GNOME evidence must use the bounded movable preview and must not claim
 click-through parity. Panic must immediately hide render state, then complete
-source teardown within 500 ms.
+source teardown within 500 ms. Start a labeling capture immediately before each
+stop/panic/restart probe and verify generation invalidation prevents a stale
+capture task from publishing patches or retaining a screenshot written after
+that boundary.
 
 CPU is the only packaging baseline today. CUDA, ROCm, OpenVINO, and TensorRT are
 blocked until provider libraries are packaged and selected-provider evidence is

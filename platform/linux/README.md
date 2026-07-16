@@ -12,11 +12,15 @@ dedicated PipeWire loop with capacity-one newest-frame delivery and BGRA/BGRx,
 NV12, and YUY2 conversion. Valid PipeWire format/size renegotiation replaces the
 active layout; errors, revocation/disconnect, timed-out format removal, and
 malformed packed frames clear output and fail closed. Format removal permits a
-bounded two-second replacement window for resize. X11 captures the virtual root through XComposite and
-fd-backed MIT-SHM, converting padded 24/32-bit server pixels to packed BGRA.
+bounded two-second replacement window for resize. X11 captures the virtual root
+through XComposite and fd-backed MIT-SHM, converting padded 24/32-bit server
+pixels to packed BGRA. It polls root geometry at a bounded cadence and replaces
+the SHM mapping/stride behind a reset event when the virtual desktop resizes.
 Both paths feed local ONNX detection, bounded wgpu/WGSL mirror-blend
 inpainting when Vulkan/GL initialization succeeds, explicit CPU fallback,
-webview patch compositing, telemetry, and labeling screenshots. GPU output is
+webview patch compositing, telemetry, and labeling screenshots. Capture tasks
+and screenshots are generation-bound so stop, panic, and restart invalidate
+stale publication. GPU output is
 read back for PNG patch transport; this is not DMA-BUF or zero-copy rendering.
 Native CI proves compilation, WGSL parsing, CPU policy tests, and opportunistic
 software-adapter parity where available; real compositor/server, multi-output,

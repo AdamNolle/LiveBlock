@@ -7,11 +7,15 @@ use anyhow::{anyhow, Context, Result};
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::File;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::composite::ConnectionExt as _;
 use x11rb::protocol::shm::ConnectionExt as _;
+use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::xproto::{ImageFormat, ImageOrder, Screen};
 use x11rb::rust_connection::RustConnection;
+
+const ROOT_GEOMETRY_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy)]
 struct ColorMasks {
@@ -25,19 +29,81 @@ pub struct X11Capture {
     root: u32,
     width: u16,
     height: u16,
+    depth: u8,
     stride: usize,
     bits_per_pixel: u8,
+    scanline_pad: u8,
     lsb_first: bool,
     color_masks: ColorMasks,
     shm_seg: u32,
     mapping: MmapMut,
     shm_attached: bool,
+    last_geometry_check: Instant,
+}
+
+fn geometry_check_due(last_check: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_check) >= ROOT_GEOMETRY_CHECK_INTERVAL
+}
+
+fn packed_stride(width: u16, bits_per_pixel: u8, scanline_pad: u8) -> Result<usize> {
+    let pad_bits = usize::from(scanline_pad);
+    if width == 0 || bits_per_pixel == 0 || pad_bits == 0 || pad_bits % 8 != 0 {
+        return Err(anyhow!(
+            "unsupported X11 packed layout width={width} bpp={bits_per_pixel} pad={scanline_pad}"
+        ));
+    }
+    let row_bits = usize::from(width)
+        .checked_mul(usize::from(bits_per_pixel))
+        .ok_or_else(|| anyhow!("X11 row size overflow"))?;
+    let padded_units = row_bits
+        .checked_add(pad_bits - 1)
+        .ok_or_else(|| anyhow!("X11 padded row size overflow"))?
+        / pad_bits;
+    padded_units
+        .checked_mul(pad_bits / 8)
+        .ok_or_else(|| anyhow!("X11 packed stride overflow"))
+}
+
+fn create_shm_mapping(conn: &RustConnection, stride: usize, height: u16) -> Result<(u32, MmapMut)> {
+    if height == 0 {
+        return Err(anyhow!("X11 root height is zero"));
+    }
+    let byte_len = stride
+        .checked_mul(usize::from(height))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| anyhow!("X11 capture dimensions overflow shared-memory size"))?;
+    let shm_seg = conn.generate_id().context("allocate XShm segment id")?;
+    let reply = conn
+        .shm_create_segment(shm_seg, byte_len, false)?
+        .reply()
+        .context("XShm create_segment (MIT-SHM 1.2 fd transport required)")?;
+    let file = File::from(reply.shm_fd);
+    match unsafe { MmapOptions::new().len(byte_len as usize).map_mut(&file) } {
+        Ok(mapping) => Ok((shm_seg, mapping)),
+        Err(error) => {
+            if let Ok(cookie) = conn.shm_detach(shm_seg) {
+                let _ = cookie.check();
+            }
+            let _ = conn.flush();
+            Err(error).context("map XShm capture segment")
+        }
+    }
 }
 
 impl X11Capture {
     pub fn new() -> Result<Self> {
         let (conn, screen_num) = x11rb::connect(None).context("X11 connect")?;
-        let (root, width, height, depth, stride, bits_per_pixel, lsb_first, color_masks) = {
+        let (
+            root,
+            width,
+            height,
+            depth,
+            stride,
+            bits_per_pixel,
+            scanline_pad,
+            lsb_first,
+            color_masks,
+        ) = {
             let setup = conn.setup();
             let screen: &Screen = &setup.roots[screen_num];
             let format = setup
@@ -56,18 +122,19 @@ impl X11Capture {
                         .find(|visual| visual.visual_id == screen.root_visual)
                 })
                 .ok_or_else(|| anyhow!("X11 root visual metadata is unavailable"))?;
-            let row_bits = screen.width_in_pixels as usize * format.bits_per_pixel as usize;
-            let pad_bits = format.scanline_pad as usize;
-            if pad_bits == 0 || pad_bits % 8 != 0 {
-                return Err(anyhow!("unsupported X11 scanline padding {pad_bits}"));
-            }
+            let stride = packed_stride(
+                screen.width_in_pixels,
+                format.bits_per_pixel,
+                format.scanline_pad,
+            )?;
             (
                 screen.root,
                 screen.width_in_pixels,
                 screen.height_in_pixels,
                 screen.root_depth,
-                row_bits.div_ceil(pad_bits) * (pad_bits / 8),
+                stride,
                 format.bits_per_pixel,
+                format.scanline_pad,
                 setup.image_byte_order == ImageOrder::LSB_FIRST,
                 ColorMasks {
                     red: visual.red_mask,
@@ -86,32 +153,65 @@ impl X11Capture {
             .reply()
             .context("XComposite query_version")?;
 
-        let shm_seg = conn.generate_id().context("allocate XShm segment id")?;
-        let byte_len = stride
-            .checked_mul(height as usize)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| anyhow!("X11 capture dimensions overflow shared-memory size"))?;
-        let reply = conn
-            .shm_create_segment(shm_seg, byte_len, false)?
-            .reply()
-            .context("XShm create_segment (MIT-SHM 1.2 fd transport required)")?;
-        let file = File::from(reply.shm_fd);
-        let mapping = unsafe { MmapOptions::new().len(byte_len as usize).map_mut(&file) }
-            .context("map XShm capture segment")?;
+        let (shm_seg, mapping) = create_shm_mapping(&conn, stride, height)?;
 
         Ok(Self {
             conn,
             root,
             width,
             height,
+            depth,
             stride,
             bits_per_pixel,
+            scanline_pad,
             lsb_first,
             color_masks,
             shm_seg,
             mapping,
             shm_attached: true,
+            last_geometry_check: Instant::now(),
         })
+    }
+
+    fn refresh_root_geometry(&mut self) -> Result<bool> {
+        let geometry = self
+            .conn
+            .get_geometry(self.root)?
+            .reply()
+            .context("query current X11 root geometry")?;
+        if geometry.depth != self.depth {
+            return Err(anyhow!(
+                "X11 root depth changed from {} to {}",
+                self.depth,
+                geometry.depth
+            ));
+        }
+        if geometry.width == self.width && geometry.height == self.height {
+            return Ok(false);
+        }
+        let stride = packed_stride(geometry.width, self.bits_per_pixel, self.scanline_pad)?;
+        let (new_shm_seg, new_mapping) = create_shm_mapping(&self.conn, stride, geometry.height)?;
+        let detach_result = (|| -> Result<()> {
+            self.conn
+                .shm_detach(self.shm_seg)?
+                .check()
+                .context("detach previous XShm capture segment")?;
+            self.conn.flush().context("flush XShm resize")?;
+            Ok(())
+        })();
+        if let Err(error) = detach_result {
+            if let Ok(cookie) = self.conn.shm_detach(new_shm_seg) {
+                let _ = cookie.check();
+            }
+            let _ = self.conn.flush();
+            return Err(error);
+        }
+        self.shm_seg = new_shm_seg;
+        self.mapping = new_mapping;
+        self.width = geometry.width;
+        self.height = geometry.height;
+        self.stride = stride;
+        Ok(true)
     }
 
     fn capture_frame(&mut self) -> Result<FrameView> {
@@ -164,7 +264,23 @@ impl Drop for X11Capture {
 #[async_trait::async_trait]
 impl CaptureSource for X11Capture {
     async fn next_event(&mut self) -> Result<CaptureEvent> {
-        self.capture_frame().map(CaptureEvent::Frame)
+        let now = Instant::now();
+        if geometry_check_due(self.last_geometry_check, now) {
+            self.last_geometry_check = now;
+            if self.refresh_root_geometry()? {
+                return Ok(CaptureEvent::Reset);
+            }
+        }
+        match self.capture_frame() {
+            Ok(frame) => Ok(CaptureEvent::Frame(frame)),
+            Err(frame_error) => match self.refresh_root_geometry() {
+                Ok(true) => Ok(CaptureEvent::Reset),
+                Ok(false) => Err(frame_error),
+                Err(geometry_error) => Err(anyhow!(
+                    "X11 frame failed ({frame_error}); geometry recovery failed ({geometry_error})"
+                )),
+            },
+        }
     }
     async fn stop(&mut self) {
         self.cleanup();
@@ -231,6 +347,17 @@ mod tests {
         green: 0x0000ff00,
         blue: 0x000000ff,
     };
+
+    #[test]
+    fn geometry_polling_and_stride_are_bounded() {
+        let now = Instant::now();
+        assert!(!geometry_check_due(now, now));
+        assert!(geometry_check_due(now - ROOT_GEOMETRY_CHECK_INTERVAL, now,));
+        assert_eq!(packed_stride(3, 24, 32).unwrap(), 12);
+        assert_eq!(packed_stride(3, 32, 32).unwrap(), 12);
+        assert!(packed_stride(0, 32, 32).is_err());
+        assert!(packed_stride(3, 32, 7).is_err());
+    }
 
     #[test]
     fn converts_padded_lsb_bgrx_to_packed_bgra() {

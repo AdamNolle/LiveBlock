@@ -32,7 +32,10 @@ use crate::inpainting::PatchPayload;
 use crate::labels::{LabelDocument, ScreenshotEntry};
 use crate::regions::{NormalizedRegion, RegionStore, SharedRegionStore};
 use crate::session::detect_session;
-use crate::state::{AppState, CaptureRuntime, CaptureTelemetrySnapshot};
+use crate::state::{
+    advance_capture_generation, frame_belongs_to_active_generation,
+    take_finished_capture_runtime, AppState, CaptureRuntime, CaptureTelemetrySnapshot, LatestFrame,
+};
 
 #[tauri::command]
 fn get_behavior_contract() -> Result<liveblock_config::DesktopBehaviorContract, String> {
@@ -123,17 +126,25 @@ async fn start_capture_inner(
         previous.stop_requested.store(true, Ordering::Release);
         let _ = previous.task.await;
     }
+    let generation = advance_capture_generation(&state.capture_generation);
     state.capture_telemetry.reset();
     state.latest_frame.store(None);
     state.capture_running.store(false, Ordering::SeqCst);
+    *state.current_patches.lock() = Vec::new();
+    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    if let Some(window) = app.get_webview_window("render") {
+        let _ = window.hide();
+    }
+    let _ = app.emit("capture-state-changed", false);
     let stop_requested = Arc::new(AtomicBool::new(false));
     let task_stop = stop_requested.clone();
     let task_state = state.clone();
     let task_app = app.clone();
     let task = tokio::spawn(async move {
-        run_capture_task(task_stop, task_state, task_app).await;
+        run_capture_task(generation, task_stop, task_state, task_app).await;
     });
     *lifecycle = Some(CaptureRuntime {
+        generation,
         stop_requested,
         task,
     });
@@ -160,14 +171,15 @@ async fn stop_capture_inner(app: AppHandle, state: Arc<AppState>) -> Result<(), 
     if let Some(runtime) = &runtime {
         runtime.stop_requested.store(true, Ordering::Release);
     }
+    advance_capture_generation(&state.capture_generation);
     state.capture_running.store(false, Ordering::SeqCst);
     state.latest_frame.store(None);
     *state.current_patches.lock() = Vec::new();
-    let _ = app.emit("capture-state-changed", false);
     let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
     if let Some(window) = app.get_webview_window("render") {
         let _ = window.hide();
     }
+    let _ = app.emit("capture-state-changed", false);
     if let Some(runtime) = runtime {
         let _ = runtime.task.await;
     }
@@ -203,6 +215,7 @@ fn list_monitors() -> Vec<serde_json::Value> {
 }
 
 async fn run_capture_task(
+    generation: u64,
     stop_requested: Arc<AtomicBool>,
     state: Arc<AppState>,
     app: AppHandle,
@@ -211,20 +224,32 @@ async fn run_capture_task(
         source = open_capture() => match source {
             Ok(source) => source,
             Err(error) => {
-                let message = error.to_string();
-                tracing::error!("Linux capture startup failed: {message}");
-                let _ = app.emit("capture-runtime-error", message);
-                let _ = app.emit("capture-state-changed", false);
+                if owns_capture_generation(&state, &stop_requested, generation) {
+                    let message = error.to_string();
+                    tracing::error!("Linux capture startup failed: {message}");
+                    let _ = app.emit("capture-runtime-error", message);
+                    let _ = app.emit("capture-state-changed", false);
+                }
                 return;
             }
         },
         _ = wait_for_stop(stop_requested.clone()) => return,
     };
-    run_capture_loop(source, stop_requested, state, app).await;
+    run_capture_loop(source, generation, stop_requested, state, app).await;
+}
+
+fn owns_capture_generation(
+    state: &AppState,
+    stop_requested: &AtomicBool,
+    generation: u64,
+) -> bool {
+    !stop_requested.load(Ordering::Acquire)
+        && state.capture_generation.load(Ordering::SeqCst) == generation
 }
 
 async fn run_capture_loop(
     mut source: Box<dyn CaptureSource>,
+    generation: u64,
     stop_requested: Arc<AtomicBool>,
     state: Arc<AppState>,
     app: AppHandle,
@@ -236,7 +261,7 @@ async fn run_capture_loop(
     );
     let mut failure = None;
     let mut announced_running = false;
-    while !stop_requested.load(Ordering::Acquire) {
+    while owns_capture_generation(&state, &stop_requested, generation) {
         let frame_result = tokio::select! {
             frame = source.next_event() => Some(frame),
             _ = wait_for_stop(stop_requested.clone()) => None,
@@ -245,6 +270,9 @@ async fn run_capture_loop(
         let frame = match frame_result {
             Ok(CaptureEvent::Frame(frame)) => frame,
             Ok(CaptureEvent::Reset) => {
+                if !owns_capture_generation(&state, &stop_requested, generation) {
+                    break;
+                }
                 announced_running = false;
                 recent_detections = (
                     Instant::now() - Duration::from_secs(1),
@@ -266,6 +294,9 @@ async fn run_capture_loop(
                 break;
             }
         };
+        if !owns_capture_generation(&state, &stop_requested, generation) {
+            break;
+        }
         if !frame.is_valid_packed_bgra() {
             state.capture_telemetry.copy_error();
             failure = Some("capture backend returned an invalid BGRA frame".into());
@@ -281,7 +312,10 @@ async fn run_capture_loop(
             }
             let _ = app.emit("capture-state-changed", true);
         }
-        state.latest_frame.store(Some(Arc::new(frame.clone())));
+        state.latest_frame.store(Some(Arc::new(LatestFrame {
+            generation,
+            frame: frame.clone(),
+        })));
         frame_number = frame_number.wrapping_add(1);
 
         if state.detection_enabled.load(Ordering::Relaxed) && frame_number % 4 == 0 {
@@ -308,6 +342,9 @@ async fn run_capture_loop(
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => tracing::warn!("Linux detector frame failed: {error}"),
                 Err(error) => tracing::error!("Linux detector worker failed: {error}"),
+            }
+            if !owns_capture_generation(&state, &stop_requested, generation) {
+                break;
             }
         }
 
@@ -347,23 +384,28 @@ async fn run_capture_loop(
                 break;
             }
         };
+        if !owns_capture_generation(&state, &stop_requested, generation) {
+            break;
+        }
         *state.current_patches.lock() = patches.clone();
         state.capture_telemetry.processed();
         let _ = app.emit("patches-updated", &patches);
         tokio::time::sleep(Duration::from_millis(33)).await;
     }
     source.stop().await;
-    state.capture_running.store(false, Ordering::SeqCst);
-    state.latest_frame.store(None);
-    *state.current_patches.lock() = Vec::new();
-    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
-    if let Some(window) = app.get_webview_window("render") {
-        let _ = window.hide();
-    }
-    let _ = app.emit("capture-state-changed", false);
-    if let Some(message) = failure {
-        tracing::error!("Linux capture stopped: {message}");
-        let _ = app.emit("capture-runtime-error", message);
+    if state.capture_generation.load(Ordering::SeqCst) == generation {
+        state.capture_running.store(false, Ordering::SeqCst);
+        state.latest_frame.store(None);
+        *state.current_patches.lock() = Vec::new();
+        let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+        if let Some(window) = app.get_webview_window("render") {
+            let _ = window.hide();
+        }
+        let _ = app.emit("capture-state-changed", false);
+        if let Some(message) = failure {
+            tracing::error!("Linux capture stopped: {message}");
+            let _ = app.emit("capture-runtime-error", message);
+        }
     }
 }
 
@@ -417,16 +459,33 @@ fn clear_regions(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 // ---------- Labeling pipeline ----------
 
 #[tauri::command]
-fn capture_screenshot_for_labeling(
+async fn capture_screenshot_for_labeling(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<PathBuf>, String> {
-    capture_screenshot_inner(state.inner().as_ref())
+    capture_screenshot_serialized(state.inner()).await
+}
+
+async fn capture_screenshot_serialized(state: &Arc<AppState>) -> Result<Option<PathBuf>, String> {
+    let lifecycle = state.capture.lock().await;
+    let runtime_is_current = lifecycle.as_ref().is_some_and(|runtime| {
+        !runtime.task.is_finished()
+            && runtime.generation == state.capture_generation.load(Ordering::SeqCst)
+    });
+    if !runtime_is_current {
+        return Ok(None);
+    }
+    capture_screenshot_inner(state.as_ref())
 }
 
 fn capture_screenshot_inner(state: &AppState) -> Result<Option<PathBuf>, String> {
-    let Some(frame) = state.latest_frame.load_full() else {
+    let Some(latest) = state.latest_frame.load_full() else {
         return Ok(None);
     };
+    let generation = latest.generation;
+    if !screenshot_generation_is_current(state, generation) {
+        return Ok(None);
+    }
+    let frame = &latest.frame;
     paths::ensure_directories().map_err(|error| error.to_string())?;
     let stem = paths::new_screenshot_stem();
     let destination = paths::screenshots_dir().join(format!("{stem}.png"));
@@ -436,6 +495,9 @@ fn capture_screenshot_inner(state: &AppState) -> Result<Option<PathBuf>, String>
     }
     let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(frame.width, frame.height, rgba)
         .ok_or("invalid captured frame")?;
+    if !screenshot_generation_is_current(state, generation) {
+        return Ok(None);
+    }
     let write_result = (|| -> Result<(), String> {
         use std::io::Write;
         let file = paths::create_private_file(&destination).map_err(|error| error.to_string())?;
@@ -450,7 +512,20 @@ fn capture_screenshot_inner(state: &AppState) -> Result<Option<PathBuf>, String>
         let _ = std::fs::remove_file(&destination);
         return Err(error);
     }
+    if !screenshot_generation_is_current(state, generation) {
+        std::fs::remove_file(&destination)
+            .map_err(|error| format!("remove stale labeling screenshot: {error}"))?;
+        return Ok(None);
+    }
     Ok(Some(destination))
+}
+
+fn screenshot_generation_is_current(state: &AppState, generation: u64) -> bool {
+    frame_belongs_to_active_generation(
+        state.capture_generation.load(Ordering::SeqCst),
+        state.capture_running.load(Ordering::SeqCst),
+        generation,
+    )
 }
 
 #[tauri::command]
@@ -563,6 +638,18 @@ fn validate_label_binding(path: &std::path::Path, doc: &LabelDocument) -> Result
 async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: Arc<AppState>) {
     match action {
         hotkeys::HotkeyAction::ToggleCapture => {
+            let finished = {
+                let mut lifecycle = state.capture.lock().await;
+                take_finished_capture_runtime(&mut lifecycle)
+            };
+            if let Some(finished) = finished {
+                if let Err(error) = finished.task.await {
+                    tracing::error!(
+                        generation = finished.generation,
+                        "completed Linux capture task join failed: {error}"
+                    );
+                }
+            }
             let has_runtime = state.capture.lock().await.is_some();
             if has_runtime {
                 let _ = stop_capture_inner(app, state).await;
@@ -590,7 +677,12 @@ async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: A
             }
         }
         hotkeys::HotkeyAction::CaptureForLabeling => {
-            if capture_screenshot_inner(state.as_ref()).ok().flatten().is_some() {
+            if capture_screenshot_serialized(&state)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
                 if let Some(window) = app.get_webview_window("labeling") {
                     let _ = window.show();
                     let _ = window.set_focus();

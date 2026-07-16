@@ -182,11 +182,17 @@ impl ProtectedFrameDetector {
 /// Sample the frame and require near-total opaque black. This is deliberately
 /// conservative: merely dark video or a dark desktop must not trigger.
 pub fn looks_like_protected_black(bytes: &[u8], width: u32, height: u32) -> bool {
-    let expected = width as usize * height as usize * 4;
-    if width < 16 || height < 16 || bytes.len() < expected {
+    let Some(pixels) = (width as usize).checked_mul(height as usize) else {
+        return false;
+    };
+    let Some(expected) = pixels.checked_mul(4) else {
+        return false;
+    };
+    // FrameView is a packed application-owned BGRA buffer. Reject truncated or
+    // oversized inputs rather than classifying a malformed buffer as protected.
+    if width < 16 || height < 16 || bytes.len() != expected {
         return false;
     }
-    let pixels = width as usize * height as usize;
     let step = (pixels / 2048).max(1);
     let mut sampled = 0usize;
     let mut black = 0usize;
@@ -275,6 +281,23 @@ mod tests {
             }
         }
         assert!(!looks_like_protected_black(&dark, 64, 64));
+    }
+
+    #[test]
+    fn malformed_or_transparent_black_frames_never_claim_protection() {
+        let black = vec![0, 0, 0, 255].repeat(64 * 64);
+        assert!(!looks_like_protected_black(
+            &black[..black.len() - 4],
+            64,
+            64
+        ));
+
+        let mut oversized = black.clone();
+        oversized.extend_from_slice(&[0, 0, 0, 255]);
+        assert!(!looks_like_protected_black(&oversized, 64, 64));
+
+        let transparent = vec![0, 0, 0, 0].repeat(64 * 64);
+        assert!(!looks_like_protected_black(&transparent, 64, 64));
     }
 
     #[test]

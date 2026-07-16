@@ -23,17 +23,27 @@ enum TrainingPaths {
     static var exports: URL     { root.appendingPathComponent("exports", isDirectory: true) }
     static var trash: URL       { root.appendingPathComponent("trash", isDirectory: true) }
 
-    /// Ensure all subdirectories exist. Idempotent.
+    /// Ensure the labeling root and all subdirectories are owner-only. Existing
+    /// directories are tightened on every call so older installs do not retain
+    /// umask-derived group/world access to full-resolution screenshots.
     @discardableResult
-    static func ensureDirectories() -> Bool {
+    static func ensureDirectories(at rootURL: URL = root) -> Bool {
         let fm = FileManager.default
+        let directories = [
+            rootURL,
+            rootURL.appendingPathComponent("screenshots", isDirectory: true),
+            rootURL.appendingPathComponent("labels", isDirectory: true),
+            rootURL.appendingPathComponent("exports", isDirectory: true),
+            rootURL.appendingPathComponent("trash", isDirectory: true),
+        ]
         do {
-            for url in [screenshots, labels, exports, trash] {
+            for url in directories {
                 try fm.createDirectory(at: url, withIntermediateDirectories: true)
+                try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
             }
             return true
         } catch {
-            NSLog("TrainingPaths: failed to create directories: \(error.localizedDescription)")
+            NSLog("TrainingPaths: failed to create private directories: \(error.localizedDescription)")
             return false
         }
     }

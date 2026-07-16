@@ -7,6 +7,7 @@ CAPTURE = (ROOT / "Sources/ScreenCaptureManager.swift").read_text()
 CONTROLLER = (ROOT / "Sources/AppController.swift").read_text()
 REGION_STORE = (ROOT / "Sources/RegionStore.swift").read_text()
 LABELING = (ROOT / "Sources/LabelingController.swift").read_text()
+TRAINING_PATHS = (ROOT / "Sources/TrainingPaths.swift").read_text()
 PER_APP_RULES = (ROOT / "Sources/PerAppRulesStore.swift").read_text()
 TRAINING = (ROOT / "Sources/TrainingController.swift").read_text()
 LIVEBLOCK_APP = (ROOT / "Sources/LiveBlockApp.swift").read_text()
@@ -16,6 +17,9 @@ PERFORMANCE_TESTS = (
 ACTION_TESTS = (ROOT / "Tests/LiveBlockTests/UserActionSequenceTests.swift").read_text()
 TRAINING_TESTS = (
     ROOT / "Tests/LiveBlockTests/TrainingOperationPolicyTests.swift"
+).read_text()
+LABELING_PERSISTENCE_TESTS = (
+    ROOT / "Tests/LiveBlockTests/LabelingPersistenceTests.swift"
 ).read_text()
 RUNBOOK = (ROOT / "docs/DESKTOP_VALIDATION_RUNBOOKS.md").read_text()
 
@@ -157,6 +161,21 @@ class MacOSFailureModeContractTests(unittest.TestCase):
         self.assertIn("guard !shutdownRequested, !bundleID.isEmpty else { return }", PER_APP_RULES)
         self.assertIn("guard !shutdownRequested else { return }", PER_APP_RULES)
         self.assertNotIn("rules.excludedBundleIDs = []", (ROOT / "Sources/PerAppRulesView.swift").read_text())
+
+    def test_labeling_storage_is_private_and_discard_is_no_replace(self):
+        self.assertIn(".posixPermissions: 0o700", TRAINING_PATHS)
+        self.assertIn("enum LabelingFileMover", LABELING)
+        self.assertIn("movePairToTrashNoReplace", LABELING)
+        self.assertIn("try? fileManager.moveItem(at: labelDestination, to: label)", LABELING)
+        self.assertNotIn("try? fm.removeItem(at: dest)", LABELING)
+        self.assertNotIn("try? fm.removeItem(at: labelDest)", LABELING)
+        for test_name in (
+            "testTrainingDirectoriesAreOwnerOnly",
+            "testPairedDiscardMovesScreenshotAndLabelWithoutChangingBytes",
+            "testPairedDiscardPreservesExistingDestinationAndSources",
+            "testPairedDiscardRollsBackLabelWhenScreenshotMoveFails",
+        ):
+            self.assertIn(test_name, LABELING_PERSISTENCE_TESTS)
 
     def test_model_update_completion_cannot_publish_after_shutdown(self):
         update = re.search(

@@ -56,6 +56,9 @@ No current platform profile reports `releaseReady: true`.
   persist data or restart capture during termination. If an authenticated CoreML
   update was already admitted, normal quit suppresses its completion UI and waits
   for the atomic task before exiting; forced termination still uses startup recovery.
+- Labeling storage directories are owner-only; screenshot/sidecar discard is a
+  paired no-replace move with rollback instead of deleting an existing trash
+  entry.
 - Offline authenticated precompiled CoreML update installation and startup
   recovery.
 - Credential-free release preflight plus credential-gated Developer ID,

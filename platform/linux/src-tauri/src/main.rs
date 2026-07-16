@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
-use crate::capture::{open_capture, CaptureEvent, CaptureSource, FrameView};
+use crate::capture::{open_capture, CaptureEvent, CaptureSource};
 use crate::detection::DetBox;
 use crate::inpainting::PatchPayload;
 use crate::labels::{LabelDocument, ScreenshotEntry};
@@ -844,13 +844,13 @@ fn hide_window(app: AppHandle, label: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn quit(app: AppHandle, state: State<'_, Arc<AppState>>) {
+async fn quit(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let action_sequence = next_user_action_sequence();
     state
         .latest_action_sequence
         .fetch_max(action_sequence, Ordering::SeqCst);
     if state.shutdown_requested.swap(true, Ordering::SeqCst) {
-        return;
+        return Ok(());
     }
     for label in ["editor", "render", "labeling", "training"] {
         if let Some(window) = app.get_webview_window(label) {
@@ -859,6 +859,7 @@ async fn quit(app: AppHandle, state: State<'_, Arc<AppState>>) {
     }
     let _ = stop_capture_inner(app.clone(), state.inner().clone(), None).await;
     app.exit(0);
+    Ok(())
 }
 
 fn main() {

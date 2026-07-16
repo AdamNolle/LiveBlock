@@ -93,7 +93,10 @@ No current platform profile reports `releaseReady: true`.
 ### Windows
 
 - Captured D3D textures are copied to CPU memory before ORT preprocessing.
-  Zero-copy DirectML texture inference is not implemented.
+  Zero-copy DirectML texture inference is not implemented. The machine-readable
+  readiness record is blocked/deferred at 0/8 gates: the current capture device
+  is plain D3D11 with unshared textures, no adapter-bound D3D11On12 path exists,
+  and the pinned ORT wrapper lacks the required DML allocation lifetime API.
 - D3D11 compute inpainting uses an isolated CPU-uploaded device and reads raw
   patches back for PNG/webview composition. It is not zero-copy, production does
   not select WARP, and real NVIDIA/AMD/Intel execution remains uncertified; a

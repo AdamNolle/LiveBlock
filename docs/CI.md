@@ -1,6 +1,6 @@
 # Desktop CI evidence boundaries
 
-`.github/workflows/ci.yml` runs four independent jobs:
+`.github/workflows/ci.yml` runs six independent jobs:
 
 - shared Rust contracts/tests, managed-path confinement, schema parsing,
   Python adapter/model-distribution/documentation claim tests, focused
@@ -16,7 +16,11 @@
   compile-only empty-keyring/runtime overrides; then CI checksum-stages the
   pinned CPU runtime, builds build-only `.deb`, `.rpm`, and `.AppImage` bundles,
   closes package bytes and extracted application payloads in canonical
-  byte/mode inventories, and runs bounded hosted-Ubuntu lifecycle smoke checks.
+  byte/mode inventories, and runs bounded hosted-Ubuntu lifecycle smoke checks;
+- a checksum-pinned Fedora 44 userspace container exercises prior/current RPM
+  transitions, linkage, launch, data preservation, and uninstall; and
+- a GNOME 50/Freedesktop 25.08 Flatpak job verifies lock-derived sources, builds
+  offline, performs a real local OSTree update, bounded-launches, and uninstalls.
 
 Cargo lockfiles pin `ort`, `ort-sys`, and `ndarray` exactly because mismatched
 prerelease versions do not compile together.
@@ -24,7 +28,8 @@ prerelease versions do not compile together.
 The shared job uploads `release-dependency-integrity-evidence`: a deterministic
 CycloneDX 1.5 build-input SBOM, declared-license policy/report, component-bound
 OR selections, MPL source-offer/license evidence, obligation-verification report,
-a verified schema-1 inventory of the built webview payload, and a deterministic tar plus
+the blocked hash-bound Windows DirectML transport-readiness summary, a verified
+schema-1 inventory of the built webview payload, and a deterministic tar plus
 SHA-256 preserving the exact inventoried bytes/modes for independent recheck. See
 [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md). This webview payload is explicitly `build-only`; it is not an installer or
 signed production package. The Linux job separately uploads
@@ -39,15 +44,16 @@ one unsigned MSI, one unsigned NSIS executable, basename-rerunnable SHA-256 line
 a verified package-byte inventory, an MSI administrative-extraction payload and
 inventory, and a manifest whose signed/timestamped/promoted flags are false. The
 extracted payload must include the executable, ONNX Runtime DLL, and keyring.
-Hosted Windows then clean-installs, inventories, bounded-smoke-launches, and
-uninstalls both BuildOnly formats, preserving lifecycle logs and a limitations
-summary. See
+Hosted Windows then exercises prior/current upgrade, same-version repair/reinstall,
+downgrade rejection, inventory, bounded launch, data preservation, and uninstall
+for both BuildOnly formats, preserving lifecycle logs and a limitations summary. See
 [`LINUX_PACKAGING.md`](LINUX_PACKAGING.md) and
 [`WINDOWS_RELEASE.md`](WINDOWS_RELEASE.md).
 
 A green compile job proves source/build compatibility on that hosted image. It
 does **not** certify DirectML/CUDA/ROCm/CoreML performance, capture permission
 flows, display hot-plug, DRM behavior, network-denied operation, click-through overlays, compositor
-support, signing, notarization, production installer trust, upgrade/repair
-behavior, RPM transactions, or real-hardware reliability. Those remain separate release-matrix
-evidence gates.
+support, signing, notarization, production installer trust, genuinely shipped
+historical compatibility, or real-hardware reliability. Fedora/Flatpak package
+transactions remain userspace/build-only mechanics rather than compositor or
+hardware certification. Those remain separate release-matrix evidence gates.

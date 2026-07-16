@@ -702,6 +702,10 @@ fn get_capabilities(
         ),
         None => "detector backend: no authenticated model loaded; DirectML execution is unobserved".into(),
     });
+    profile.limitations.push(
+        "DirectML texture transport: blocked (0/8 readiness gates); capture uses a plain unshared D3D11 texture and ORT receives CPU-uploaded NCHW"
+            .into(),
+    );
     profile.validate().map_err(str::to_string)?;
     Ok(profile)
 }

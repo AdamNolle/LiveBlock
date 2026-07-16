@@ -69,6 +69,12 @@ class MacAccessibilityContractTests(unittest.TestCase):
         self.assertIn('Text("LiveBlock")', ONBOARDING)
         self.assertIn('Text("LiveBlock")', SETTINGS)
 
+    def test_macos_source_deprecations_are_absent(self):
+        combined = "\n".join(path.read_text() for path in SOURCES.glob("*.swift"))
+        self.assertNotRegex(combined, r"\+\s*Text\(")
+        self.assertNotIn("NSUserNotification()", combined)
+        self.assertNotIn("NSUserNotificationCenter.", combined)
+
     def test_onboarding_explains_only_permissions_used_by_runtime_features(self):
         self.assertIn("case screenCapture, accessibility", ONBOARDING)
         self.assertIn("requestAccessibility", ONBOARDING)

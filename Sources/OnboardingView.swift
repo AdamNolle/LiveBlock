@@ -60,12 +60,7 @@ struct OnboardingView: View {
 
             LiveBlockerLogo(size: 76, cornerRadius: 18)
 
-            (
-                Text("Take the ads\n")
-                    .foregroundColor(Theme.ink1)
-                + Text("out of your screen.")
-                    .foregroundColor(Theme.accent)
-            )
+            Text("\(Text("Take the ads\n").foregroundColor(Theme.ink1))\(Text("out of your screen.").foregroundColor(Theme.accent))")
             .font(Theme.display(size: 30, weight: .bold))
             .tracking(-0.75)
             .lineSpacing(2)
@@ -134,12 +129,7 @@ struct OnboardingView: View {
                 Image(systemName: "lock")
                     .font(.system(size: 14, weight: .regular))
                     .foregroundStyle(Theme.ml)
-                (
-                    Text("Frames are processed locally with GPU or CPU fallback and discarded after processing. ")
-                        .foregroundColor(Theme.ink3)
-                    + Text("Nothing is saved.")
-                        .foregroundColor(Theme.ink2)
-                )
+                Text("\(Text("Frames are processed locally with GPU or CPU fallback and discarded after processing. ").foregroundColor(Theme.ink3))\(Text("Nothing is saved.").foregroundColor(Theme.ink2))")
                 .font(Theme.ui(size: 12))
                 .lineSpacing(2)
                 Spacer(minLength: 0)

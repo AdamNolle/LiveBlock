@@ -37,6 +37,40 @@ struct LabelDocument: Codable, Sendable {
     var labeledAt: Date
 }
 
+enum LabelingFileMover {
+    /// Move a screenshot and optional sidecar into trash without replacing any
+    /// existing bytes. Moving the label first permits rollback if the screenshot
+    /// move fails, matching the paired no-replace behavior of other adapters.
+    static func movePairToTrashNoReplace(
+        screenshot: URL,
+        label: URL,
+        trash: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        let screenshotDestination = trash.appendingPathComponent(screenshot.lastPathComponent)
+        let labelDestination = trash.appendingPathComponent(label.lastPathComponent)
+        let labelExists = fileManager.fileExists(atPath: label.path)
+        guard !fileManager.fileExists(atPath: screenshotDestination.path),
+              !labelExists || !fileManager.fileExists(atPath: labelDestination.path) else {
+            throw CocoaError(.fileWriteFileExists)
+        }
+
+        var movedLabel = false
+        if labelExists {
+            try fileManager.moveItem(at: label, to: labelDestination)
+            movedLabel = true
+        }
+        do {
+            try fileManager.moveItem(at: screenshot, to: screenshotDestination)
+        } catch {
+            if movedLabel {
+                try? fileManager.moveItem(at: labelDestination, to: label)
+            }
+            throw error
+        }
+    }
+}
+
 extension LabelDocument {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, image, imageWidth, imageHeight, boxes, labeledAt
@@ -273,19 +307,20 @@ final class LabelingController: ObservableObject {
     func discardCurrent() {
         guard !shutdownRequested, let url = currentURL else { return }
         let label = TrainingPaths.labelURL(forScreenshot: url)
-        let fm = FileManager.default
-        TrainingPaths.ensureDirectories()
-        let dest = TrainingPaths.trash.appendingPathComponent(url.lastPathComponent)
-        let labelDest = TrainingPaths.trash.appendingPathComponent(label.lastPathComponent)
-        try? fm.removeItem(at: dest)
-        try? fm.removeItem(at: labelDest)
-        try? fm.moveItem(at: url, to: dest)
-        // Preserve sidecars—including unknown future schemas—beside the
-        // discarded screenshot rather than deleting or rewriting them.
-        if fm.fileExists(atPath: label.path) {
-            try? fm.moveItem(at: label, to: labelDest)
+        guard TrainingPaths.ensureDirectories() else { return }
+        do {
+            // Preserve sidecars—including unknown future schemas—beside the
+            // discarded screenshot without replacing an earlier trash entry.
+            try LabelingFileMover.movePairToTrashNoReplace(
+                screenshot: url,
+                label: label,
+                trash: TrainingPaths.trash
+            )
+        } catch {
+            NSLog("LabelingController: discard failed: \(error.localizedDescription)")
+            return
         }
-        // Remove from list and adjust index.
+        // Remove from list and adjust index only after the paired move commits.
         if index < screenshots.count { screenshots.remove(at: index) }
         totalCount = screenshots.count
         recomputeLabeledCount()

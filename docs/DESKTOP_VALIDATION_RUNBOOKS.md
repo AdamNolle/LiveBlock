@@ -332,7 +332,12 @@ hashes:
    during staging/load/swap. Normal termination must hide/stop capture and wait
    for the admitted update task without publishing success/error UI. Separately
    force-kill during each transaction phase and verify startup recovery; the
-   normal-quit wait is not power-loss evidence.
+   normal-quit wait is not power-loss evidence;
+10. on macOS, pre-create same-named screenshot and label bytes in the labeling
+    trash, then request discard. Both existing destination bytes and both source
+    files must remain unchanged. Separately make the screenshot move fail after
+    sidecar admission and verify sidecar rollback. Confirm the training root and
+    all four child directories remain mode `0700` after upgrading an older tree.
 
 Expected result: no partial document is accepted; authenticated previous state is
 restored where defined; future/malformed state remains untouched; no fallback to

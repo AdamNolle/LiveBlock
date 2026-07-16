@@ -65,8 +65,11 @@ bundle inventories.
 - macOS uses `TrainingPaths` beneath Application Support and native controllers
   derive screenshot/label paths rather than accepting renderer-provided paths.
   Snapshot requests and delivery are bound to one capture generation; stop/panic
-  cancels pending continuations. PNGs are encoded before create-new
-  `O_EXCL|O_NOFOLLOW` `0600` writes, synchronized, and partial-cleaned.
+  cancels pending continuations. The training root plus screenshot/label/export/
+  trash directories are tightened to owner-only `0700` on every use. PNGs are
+  encoded before create-new `O_EXCL|O_NOFOLLOW` `0600` writes, synchronized, and
+  partial-cleaned. Discard moves the optional sidecar and screenshot without
+  replacing an existing trash entry; screenshot failure rolls the sidecar back.
 - Windows uses `%APPDATA%\LiveBlock`; Windows user-profile ACLs are the outer
   boundary. Screenshot creation is create-new, flushed, and synchronized.
 - Linux uses `$XDG_DATA_HOME/LiveBlock`; directories are forced to `0700`, and

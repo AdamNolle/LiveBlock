@@ -18,6 +18,7 @@ mod regions;
 mod session;
 mod state;
 
+use parking_lot::MutexGuard;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -256,6 +257,9 @@ fn get_capture_telemetry(state: State<'_, Arc<AppState>>) -> CaptureTelemetrySna
 
 #[tauri::command]
 fn set_detection_enabled(enabled: bool, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if state.shutdown_requested.load(Ordering::SeqCst) {
+        return Err("runtime changes are unavailable during shutdown".into());
+    }
     state.detection_enabled.store(enabled, Ordering::SeqCst);
     Ok(())
 }
@@ -480,6 +484,15 @@ async fn wait_for_stop(stop_requested: Arc<AtomicBool>) {
 
 // ---------- Region CRUD ----------
 
+fn persistent_mutation_guard(state: &AppState) -> Result<MutexGuard<'_, ()>, String> {
+    let guard = state.persistent_mutation.lock();
+    if state.shutdown_requested.load(Ordering::SeqCst) {
+        Err("persistent changes are unavailable during shutdown".into())
+    } else {
+        Ok(guard)
+    }
+}
+
 #[tauri::command]
 fn list_regions(state: State<'_, Arc<AppState>>) -> Vec<NormalizedRegion> {
     state.region_store.current()
@@ -490,6 +503,7 @@ fn add_region(
     region: NormalizedRegion,
     state: State<'_, Arc<AppState>>,
 ) -> Result<NormalizedRegion, String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     state
         .region_store
         .add(region.clone())
@@ -503,6 +517,7 @@ fn replace_region(
     region: NormalizedRegion,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     state
         .region_store
         .replace_id(id, region)
@@ -511,11 +526,13 @@ fn replace_region(
 
 #[tauri::command]
 fn delete_region(id: Uuid, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     state.region_store.remove(id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn clear_regions(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     state.region_store.clear().map_err(|e| e.to_string())
 }
 
@@ -530,6 +547,7 @@ async fn capture_screenshot_for_labeling(
 
 async fn capture_screenshot_serialized(state: &Arc<AppState>) -> Result<Option<PathBuf>, String> {
     let lifecycle = state.capture.lock().await;
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     let runtime_is_current = lifecycle.as_ref().is_some_and(|runtime| {
         !runtime.task.is_finished()
             && runtime.generation == state.capture_generation.load(Ordering::SeqCst)
@@ -638,7 +656,12 @@ fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
 }
 
 #[tauri::command]
-fn save_label(path: PathBuf, doc: LabelDocument) -> Result<(), String> {
+fn save_label(
+    path: PathBuf,
+    doc: LabelDocument,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     let path = paths::validate_label_path(&path, false).map_err(|e| e.to_string())?;
     if path.exists() {
         // Validate the existing discriminator before replacement. Unknown future
@@ -662,7 +685,8 @@ fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
 }
 
 #[tauri::command]
-fn discard_screenshot(path: PathBuf) -> Result<(), String> {
+fn discard_screenshot(path: PathBuf, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     let path = paths::validate_screenshot_path(&path).map_err(|e| e.to_string())?;
     let dst = paths::trash_dir().join(path.file_name().ok_or("no filename")?);
     let label = paths::label_path_for(&path);
@@ -858,6 +882,9 @@ async fn quit(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), Str
         }
     }
     let _ = stop_capture_inner(app.clone(), state.inner().clone(), None).await;
+    // Finish an already-admitted region/label/screenshot write before exit;
+    // commands queued after the terminal flag fail when they acquire this gate.
+    let _mutation_guard = state.persistent_mutation.lock();
     // Commands queued after the terminal flag fail admission. An authenticated
     // update that already owns this mutex completes before normal process exit.
     let _update_guard = state.model_update.lock();

@@ -2,6 +2,45 @@ import Foundation
 import AppKit
 import Combine
 
+/// Invalidates stale asynchronous source-training completions. Cancellation
+/// advances ownership before terminating subprocesses; shutdown is terminal.
+struct TrainingOperationPolicy {
+    private(set) var sequence: UInt64 = 0
+    private(set) var activeOperation: UInt64?
+    private(set) var shutdownRequested = false
+
+    private mutating func next() -> UInt64 {
+        sequence &+= 1
+        if sequence == 0 { sequence = 1 }
+        return sequence
+    }
+
+    mutating func begin() -> UInt64? {
+        guard !shutdownRequested, activeOperation == nil else { return nil }
+        let operation = next()
+        activeOperation = operation
+        return operation
+    }
+
+    mutating func finish(_ operation: UInt64) {
+        if activeOperation == operation { activeOperation = nil }
+    }
+
+    mutating func cancel() {
+        _ = next()
+        activeOperation = nil
+    }
+
+    mutating func shutdown() {
+        cancel()
+        shutdownRequested = true
+    }
+
+    func owns(_ operation: UInt64) -> Bool {
+        !shutdownRequested && operation != 0 && activeOperation == operation
+    }
+}
+
 /// Drives the developer-only export → train → candidate pipeline.
 ///
 /// Signed release builds are inference-only and never bootstrap Python or pip.
@@ -57,6 +96,15 @@ final class TrainingController: ObservableObject {
     private var process: Process?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
+    private enum BackgroundOperationKind {
+        case environmentSetup
+        case sourceTraining
+        case verifiedInstall
+    }
+
+    private var operationTask: Task<Void, Never>?
+    private var activeOperationKind: BackgroundOperationKind?
+    private var operationPolicy = TrainingOperationPolicy()
 
     init(bundle: Bundle = .main) {
         if let value = bundle.object(forInfoDictionaryKey: "LiveBlockTrainingRuntimeEnabled") as? String {
@@ -74,6 +122,7 @@ final class TrainingController: ObservableObject {
     }
 
     var isBusy: Bool {
+        if isInstallingEnvironment { return true }
         switch state {
         case .idle, .finished: return false
         default: return true
@@ -95,47 +144,59 @@ final class TrainingController: ObservableObject {
     // MARK: - Public actions
 
     func startTraining(epochs: Int = 50, imgsz: Int = 640, batch: Int = 8) {
+        guard !operationPolicy.shutdownRequested else { return }
         guard trainingRuntimeAvailable else {
             failWith("Training is unavailable in signed release builds; use the source companion workflow.")
             return
         }
-        guard !isBusy else { return }
-        Task { await runFullPipeline(epochs: epochs, imgsz: imgsz, batch: batch) }
+        guard !isBusy, process?.isRunning != true,
+              let operation = operationPolicy.begin() else { return }
+        activeOperationKind = .sourceTraining
+        operationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runFullPipeline(epochs: epochs, imgsz: imgsz, batch: batch,
+                                       operation: operation)
+            self.finishOperation(operation)
+        }
     }
 
     func cancel() {
-        guard isBusy else { return }
-        if let process = process, process.isRunning {
-            // The Process is bash (or python). Bash spawns a python child
-            // (ultralytics trainer). `pkill -P <bash-pid>` reaps the child;
-            // process.terminate() reaps bash itself. Without the pkill the
-            // python child keeps training even after the bash is gone.
-            let pid = process.processIdentifier
-            runOneShot(launchPath: "/usr/bin/pkill",
-                       args: ["-TERM", "-P", "\(pid)"],
-                       onLine: { _ in })
-            process.terminate()
-            // Escalate to SIGKILL on anything still alive after a beat.
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { [pid] in
-                Task { @MainActor in
-                    self.runOneShot(launchPath: "/usr/bin/pkill",
-                                    args: ["-KILL", "-P", "\(pid)"],
-                                    onLine: { _ in })
-                    if let p = self.process, p.isRunning {
-                        kill(p.processIdentifier, SIGKILL)
-                    }
-                }
-            }
+        guard isBusy || operationPolicy.activeOperation != nil || process?.isRunning == true else { return }
+        guard activeOperationKind != .verifiedInstall else {
+            lastError = "Verified installation cannot be cancelled safely; quit waits for its atomic transaction."
+            return
         }
-        // Belt-and-suspenders: also tell auto.sh's stop in case there's a
-        // detached runner from a prior invocation.
-        runOneShot(launchPath: "/bin/bash",
-                   args: [repoRoot.appendingPathComponent("tools/auto.sh").path, "stop"],
-                   onLine: { _ in })
-        state = .finished(success: false, message: "Cancelled by user.")
+        cancelActiveOperation(message: "Cancelled by user.", immediateKill: false)
+    }
+
+    /// Installs the terminal ownership barrier synchronously and returns the
+    /// invalidated task for quit to await. Source setup/training is killed;
+    /// an authenticated install is allowed to finish its atomic transaction.
+    func prepareForShutdown() -> Task<Void, Never>? {
+        guard !operationPolicy.shutdownRequested else { return operationTask }
+        let hadWork = isBusy || operationPolicy.activeOperation != nil || process?.isRunning == true
+        let task = operationTask
+        let operationKind = activeOperationKind
+        operationPolicy.shutdown()
+        activeOperationKind = nil
+        operationTask = nil
+        isInstallingEnvironment = false
+        if hadWork {
+            if operationKind != .verifiedInstall {
+                task?.cancel()
+                terminateActiveProcess(immediateKill: true)
+                stopDetachedRunner()
+            }
+            let message = operationKind == .verifiedInstall
+                ? "LiveBlock will quit after verified installation finishes."
+                : "Cancelled because LiveBlock is quitting."
+            state = .finished(success: false, message: message)
+        }
+        return task
     }
 
     func clearTerminalState() {
+        guard !operationPolicy.shutdownRequested else { return }
         if case .finished = state {
             state = .idle
             lastError = nil
@@ -145,11 +206,14 @@ final class TrainingController: ObservableObject {
     /// Run `tools/setup_env.sh`. Streams output through the same logTail
     /// publisher the dashboard already shows.
     func installEnvironment() {
+        guard !operationPolicy.shutdownRequested else { return }
         guard trainingRuntimeAvailable else {
             failWith("Release builds never download or install a Python training environment.")
             return
         }
-        guard !isInstallingEnvironment, !isBusy else { return }
+        guard !isInstallingEnvironment, !isBusy, process?.isRunning != true,
+              let operation = operationPolicy.begin() else { return }
+        activeOperationKind = .environmentSetup
         isInstallingEnvironment = true
         appendLog("=== Installing training environment \(Date()) ===")
         let setup = repoRoot.appendingPathComponent("tools/setup_env.sh")
@@ -157,13 +221,19 @@ final class TrainingController: ObservableObject {
             appendLog("FAILED: tools/setup_env.sh missing — repo path is wrong.")
             lastError = "tools/setup_env.sh missing at \(setup.path)."
             isInstallingEnvironment = false
+            operationPolicy.finish(operation)
+            activeOperationKind = nil
             return
         }
-        Task {
-            let result = await runProcessCapturingOutput(
+        operationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.finishOperation(operation) }
+            let result = await self.runProcessCapturingOutput(
                 url: URL(fileURLWithPath: "/bin/bash"),
-                args: [setup.path]
+                args: [setup.path],
+                operation: operation
             )
+            guard self.operationIsCurrent(operation) else { return }
             self.isInstallingEnvironment = false
             self.recheckVenv()
             if result.exitCode == 0 {
@@ -234,7 +304,9 @@ final class TrainingController: ObservableObject {
         repoRoot.appendingPathComponent("tools/.venv/bin/python")
     }
 
-    private func runFullPipeline(epochs: Int, imgsz: Int, batch: Int) async {
+    private func runFullPipeline(epochs: Int, imgsz: Int, batch: Int,
+                                 operation: UInt64) async {
+        guard operationIsCurrent(operation) else { return }
         let pipelineStartedAt = Date()
         appendLog("=== Training pipeline started \(pipelineStartedAt) ===")
 
@@ -250,8 +322,10 @@ final class TrainingController: ObservableObject {
 
         let exportResult = await runProcessCapturingOutput(
             url: venvPython,
-            args: [exportScript.path, "--include-empty", "--class-name", "Ad banner"]
+            args: [exportScript.path, "--include-empty", "--class-name", "Ad banner"],
+            operation: operation
         )
+        guard operationIsCurrent(operation) else { return }
         guard exportResult.exitCode == 0 else {
             failWith("Export failed (exit \(exportResult.exitCode)). See log.")
             return
@@ -284,8 +358,10 @@ final class TrainingController: ObservableObject {
                    dataYaml.path,
                    "--epochs", String(epochs),
                    "--imgsz", String(imgsz),
-                   "--batch", String(batch)]
+                   "--batch", String(batch)],
+            operation: operation
         )
+        guard operationIsCurrent(operation) else { return }
 
         if trainResult.exitCode == 0 {
             guard let candidate = newestCoreMLCandidate(modifiedAfter: pipelineStartedAt) else {
@@ -308,32 +384,38 @@ final class TrainingController: ObservableObject {
     /// Install only through the fingerprint-bound verifier. A report picker can
     /// call this after an external/human-reviewed schema-5 run succeeds.
     func installVerifiedModel(reportURL: URL) {
-        guard !isBusy else { return }
+        guard !isBusy, process?.isRunning != true,
+              let operation = operationPolicy.begin() else { return }
+        activeOperationKind = .verifiedInstall
         state = .installing
-        Task {
-            let installer = repoRoot.appendingPathComponent("tools/install_verified_model.py")
-            let destination = runtimeModelDestination()
+        operationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.finishOperation(operation) }
+            let installer = self.repoRoot.appendingPathComponent("tools/install_verified_model.py")
+            let destination = self.runtimeModelDestination()
             do {
                 try FileManager.default.createDirectory(
                     at: destination.deletingLastPathComponent(),
                     withIntermediateDirectories: true
                 )
             } catch {
-                failWith("Could not create the runtime model directory: \(error.localizedDescription)")
+                self.failWith("Could not create the runtime model directory: \(error.localizedDescription)")
                 return
             }
-            let result = await runProcessCapturingOutput(
-                url: venvPython,
+            let result = await self.runProcessCapturingOutput(
+                url: self.venvPython,
                 args: [installer.path, "--report", reportURL.path,
-                       "--destination", destination.path]
+                       "--destination", destination.path],
+                operation: operation
             )
+            guard self.operationIsCurrent(operation) else { return }
             if result.exitCode == 0 {
-                onModelInstalled?()
-                state = .finished(success: true,
-                                  message: "Verified model installed atomically.")
-                appendLog("Verified model installed: \(destination.path)")
+                self.onModelInstalled?()
+                self.state = .finished(success: true,
+                                       message: "Verified model installed atomically.")
+                self.appendLog("Verified model installed: \(destination.path)")
             } else {
-                failWith("Verified installation failed (exit \(result.exitCode)).")
+                self.failWith("Verified installation failed (exit \(result.exitCode)).")
             }
         }
     }
@@ -376,8 +458,64 @@ final class TrainingController: ObservableObject {
 
     private struct RunResult { let exitCode: Int32 }
 
-    private func runProcessCapturingOutput(url: URL, args: [String]) async -> RunResult {
-        await withCheckedContinuation { continuation in
+    private func operationIsCurrent(_ operation: UInt64) -> Bool {
+        !Task.isCancelled && operationPolicy.owns(operation)
+    }
+
+    private func finishOperation(_ operation: UInt64) {
+        guard operationPolicy.owns(operation) else { return }
+        operationPolicy.finish(operation)
+        activeOperationKind = nil
+        operationTask = nil
+    }
+
+    private func cancelActiveOperation(message: String, immediateKill: Bool) {
+        operationPolicy.cancel()
+        operationTask?.cancel()
+        operationTask = nil
+        activeOperationKind = nil
+        isInstallingEnvironment = false
+        terminateActiveProcess(immediateKill: immediateKill)
+        stopDetachedRunner()
+        state = .finished(success: false, message: message)
+    }
+
+    private func terminateActiveProcess(immediateKill: Bool) {
+        guard let process, process.isRunning else { return }
+        let pid = process.processIdentifier
+        // The Process is bash (or python). Terminate its direct trainer child
+        // before the parent so the child cannot continue after cancellation.
+        runOneShot(launchPath: "/usr/bin/pkill", args: ["-TERM", "-P", "\(pid)"], onLine: { _ in })
+        process.terminate()
+        if immediateKill {
+            runOneShot(launchPath: "/usr/bin/pkill", args: ["-KILL", "-P", "\(pid)"], onLine: { _ in })
+            if process.isRunning { kill(pid, SIGKILL) }
+            return
+        }
+        // Capture the exact Process. Never consult self.process here: a newer
+        // workflow may own that slot by the time escalation runs.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { [process, pid] in
+            Task { @MainActor [weak self] in
+                guard process.isRunning else { return }
+                self?.runOneShot(launchPath: "/usr/bin/pkill",
+                                 args: ["-KILL", "-P", "\(pid)"],
+                                 onLine: { _ in })
+                if process.isRunning { kill(pid, SIGKILL) }
+            }
+        }
+    }
+
+    private func stopDetachedRunner() {
+        // Belt-and-suspenders for a detached runner from a prior invocation.
+        runOneShot(launchPath: "/bin/bash",
+                   args: [repoRoot.appendingPathComponent("tools/auto.sh").path, "stop"],
+                   onLine: { _ in })
+    }
+
+    private func runProcessCapturingOutput(url: URL, args: [String],
+                                           operation: UInt64) async -> RunResult {
+        guard operationIsCurrent(operation) else { return RunResult(exitCode: -1) }
+        return await withCheckedContinuation { continuation in
             let proc = Process()
             proc.executableURL = url
             proc.arguments = args
@@ -400,22 +538,29 @@ final class TrainingController: ObservableObject {
                 let data = handle.availableData
                 guard !data.isEmpty,
                       let str = String(data: data, encoding: .utf8) else { return }
-                Task { @MainActor [weak self] in self?.ingestOutput(str) }
+                Task { @MainActor [weak self] in
+                    guard let self, self.operationPolicy.owns(operation) else { return }
+                    self.ingestOutput(str)
+                }
             }
             errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 guard !data.isEmpty,
                       let str = String(data: data, encoding: .utf8) else { return }
-                Task { @MainActor [weak self] in self?.ingestOutput(str) }
+                Task { @MainActor [weak self] in
+                    guard let self, self.operationPolicy.owns(operation) else { return }
+                    self.ingestOutput(str)
+                }
             }
 
             proc.terminationHandler = { p in
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
                 Task { @MainActor [weak self] in
-                    self?.process = nil
-                    self?.stdoutPipe = nil
-                    self?.stderrPipe = nil
+                    guard let self, self.process === proc else { return }
+                    self.process = nil
+                    self.stdoutPipe = nil
+                    self.stderrPipe = nil
                 }
                 continuation.resume(returning: RunResult(exitCode: p.terminationStatus))
             }
@@ -423,9 +568,16 @@ final class TrainingController: ObservableObject {
             do {
                 try proc.run()
             } catch {
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                if self.process === proc {
+                    self.process = nil
+                    self.stdoutPipe = nil
+                    self.stderrPipe = nil
+                }
                 continuation.resume(returning: RunResult(exitCode: -1))
-                Task { @MainActor [weak self] in
-                    self?.appendLog("Failed to launch \(url.path): \(error.localizedDescription)")
+                if operationPolicy.owns(operation) {
+                    appendLog("Failed to launch \(url.path): \(error.localizedDescription)")
                 }
             }
         }

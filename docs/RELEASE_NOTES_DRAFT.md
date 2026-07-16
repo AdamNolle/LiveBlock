@@ -48,6 +48,9 @@ No current platform profile reports `releaseReady: true`.
   consume a later capture generation. Monotonic macOS action barriers reject
   pre-stop/pre-panic capture and delayed onboarding work, panic disables queued
   auto-capture, and privacy-visible windows hide before stream teardown awaits.
+  Quit also invalidates and terminates exact source-training subprocess ownership
+  so stale cancellation output cannot mutate a later workflow; native Command-Q
+  waits behind the same terminal teardown handshake.
 - Offline authenticated precompiled CoreML update installation and startup
   recovery.
 - Credential-free release preflight plus credential-gated Developer ID,

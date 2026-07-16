@@ -5,11 +5,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE = (ROOT / "Sources/ScreenCaptureManager.swift").read_text()
 CONTROLLER = (ROOT / "Sources/AppController.swift").read_text()
+TRAINING = (ROOT / "Sources/TrainingController.swift").read_text()
 LIVEBLOCK_APP = (ROOT / "Sources/LiveBlockApp.swift").read_text()
 PERFORMANCE_TESTS = (
     ROOT / "Tests/LiveBlockTests/FramePipelinePerformanceTests.swift"
 ).read_text()
 ACTION_TESTS = (ROOT / "Tests/LiveBlockTests/UserActionSequenceTests.swift").read_text()
+TRAINING_TESTS = (
+    ROOT / "Tests/LiveBlockTests/TrainingOperationPolicyTests.swift"
+).read_text()
 RUNBOOK = (ROOT / "docs/DESKTOP_VALIDATION_RUNBOOKS.md").read_text()
 
 
@@ -91,15 +95,69 @@ class MacOSFailureModeContractTests(unittest.TestCase):
             panic_source.index("await self?.captureManager.stop()"),
         )
 
-        quit_action = re.search(r"func quit\(\) \{(.*?)\n    \}", CONTROLLER, re.S)
+        self.assertIn("func quit() {\n        beginQuit()", CONTROLLER)
+        quit_action = re.search(r"private func beginQuit\(\) \{(.*?)\n    \}", CONTROLLER, re.S)
         self.assertIsNotNone(quit_action)
         quit_source = quit_action.group(1)
+        self.assertIn("guard quitTask == nil else { return }", quit_source)
         self.assertLess(quit_source.index("userActionPolicy.claimShutdown()"), quit_source.index("Task {"))
         self.assertLess(
             quit_source.index("hidePrivacyWindowsForTerminalAction()"),
             quit_source.index("await self.captureManager.stop()"),
         )
+        self.assertLess(
+            quit_source.index("hidePrivacyWindowsForTerminalAction()"),
+            quit_source.index("trainingController.prepareForShutdown()"),
+        )
+        self.assertLess(
+            quit_source.index("trainingController.prepareForShutdown()"),
+            quit_source.index("Task {"),
+        )
+        self.assertLess(
+            quit_source.index("await trainingShutdownTask?.value"),
+            quit_source.index("NSApp.terminate(nil)"),
+        )
         self.assertIn("allowsRenderVisibility", LIVEBLOCK_APP)
+        self.assertIn("func applicationShouldTerminate(_ sender: NSApplication)", LIVEBLOCK_APP)
+        self.assertIn("return .terminateLater", LIVEBLOCK_APP)
+        self.assertIn("sender.reply(toApplicationShouldTerminate: true)", LIVEBLOCK_APP)
+
+    def test_model_update_completion_cannot_publish_after_shutdown(self):
+        update = re.search(
+            r"func chooseAndInstallSignedModelUpdate\(\) \{(.*?)\n    \}",
+            CONTROLLER,
+            re.S,
+        )
+        self.assertIsNotNone(update)
+        source = update.group(1)
+        self.assertIn("panel.runModal() == .OK", source)
+        self.assertGreaterEqual(source.count("shutdownRequested"), 4)
+        self.assertEqual(
+            source.count(
+                "guard let self, !self.userActionPolicy.shutdownRequested else { return }"
+            ),
+            2,
+        )
+
+    def test_source_training_cancellation_rejects_stale_process_callbacks(self):
+        for required in (
+            "struct TrainingOperationPolicy",
+            "operationPolicy.shutdown()",
+            "guard operationIsCurrent(operation) else { return }",
+            "guard let self, self.process === proc else { return }",
+            "[process, pid]",
+            "guard process.isRunning else { return }",
+            "operationKind != .verifiedInstall",
+            "quit waits for its atomic transaction",
+        ):
+            self.assertIn(required, TRAINING)
+        self.assertNotIn("if let p = self.process, p.isRunning", TRAINING)
+        for test_name in (
+            "testCancelInvalidatesStaleCompletionAndAllowsNewOperation",
+            "testFinishingStaleOperationCannotReleaseNewOwner",
+            "testShutdownIsTerminalAndInvalidatesCurrentOperation",
+        ):
+            self.assertIn(test_name, TRAINING_TESTS)
 
     def test_auto_capture_and_onboarding_delays_are_panic_guarded(self):
         self.assertIn("autoCaptureGeneration &+= 1", CONTROLLER)

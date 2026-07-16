@@ -58,7 +58,8 @@ No current platform profile reports `releaseReady: true`.
   for the atomic task before exiting; forced termination still uses startup recovery.
 - Labeling storage directories are owner-only; screenshot/sidecar discard is a
   paired no-replace move with rollback instead of deleting an existing trash
-  entry.
+  entry. Native termination also suppresses window-close reminder UI and does
+  not mark first-run onboarding complete unless Finish was explicitly selected.
 - Offline authenticated precompiled CoreML update installation and startup
   recovery.
 - Credential-free release preflight plus credential-gated Developer ID,

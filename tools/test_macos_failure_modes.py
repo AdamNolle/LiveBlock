@@ -11,6 +11,8 @@ TRAINING_PATHS = (ROOT / "Sources/TrainingPaths.swift").read_text()
 PER_APP_RULES = (ROOT / "Sources/PerAppRulesStore.swift").read_text()
 TRAINING = (ROOT / "Sources/TrainingController.swift").read_text()
 LIVEBLOCK_APP = (ROOT / "Sources/LiveBlockApp.swift").read_text()
+CONTROL_PANEL_WINDOW = (ROOT / "Sources/ControlPanelWindow.swift").read_text()
+ONBOARDING_WINDOW = (ROOT / "Sources/OnboardingWindow.swift").read_text()
 PERFORMANCE_TESTS = (
     ROOT / "Tests/LiveBlockTests/FramePipelinePerformanceTests.swift"
 ).read_text()
@@ -118,6 +120,9 @@ class MacOSFailureModeContractTests(unittest.TestCase):
             "regionStore.prepareForShutdown()",
             "labelingController.prepareForShutdown()",
             "perAppRules.prepareForShutdown()",
+            "controlPanel?.prepareForShutdown()",
+            "controlPanel?.orderOut(nil)",
+            "onboardingWindow?.orderOut(nil)",
         ):
             self.assertLess(quit_source.index(barrier), quit_source.index("hidePrivacyWindowsForTerminalAction()"))
         self.assertLess(
@@ -144,6 +149,24 @@ class MacOSFailureModeContractTests(unittest.TestCase):
         self.assertIn("func applicationShouldTerminate(_ sender: NSApplication)", LIVEBLOCK_APP)
         self.assertIn("return .terminateLater", LIVEBLOCK_APP)
         self.assertIn("sender.reply(toApplicationShouldTerminate: true)", LIVEBLOCK_APP)
+
+    def test_onboarding_and_control_panel_close_callbacks_are_terminal_safe(self):
+        self.assertIn("self?.controller.finishOnboarding()", LIVEBLOCK_APP)
+        self.assertNotIn('UserDefaults.standard.set(true, forKey: "didOnboard")', LIVEBLOCK_APP)
+        self.assertIn("func finishOnboarding()", CONTROLLER)
+        finish = re.search(r"func finishOnboarding\(\) \{(.*?)\n    \}", CONTROLLER, re.S)
+        self.assertIsNotNone(finish)
+        self.assertIn("guard !userActionPolicy.shutdownRequested else { return }", finish.group(1))
+        self.assertNotIn("UserDefaults.standard", ONBOARDING_WINDOW)
+        self.assertNotIn("windowWillClose", ONBOARDING_WINDOW)
+        self.assertIn("func prepareForShutdown()", CONTROL_PANEL_WINDOW)
+        self.assertIn("suppressCloseHint = true", CONTROL_PANEL_WINDOW)
+        self.assertIn("guard !suppressCloseHint else { return }", CONTROL_PANEL_WINDOW)
+        self.assertIn("DispatchQueue.main.async { [weak self] in", CONTROL_PANEL_WINDOW)
+        self.assertLess(
+            CONTROL_PANEL_WINDOW.index("!self.suppressCloseHint"),
+            CONTROL_PANEL_WINDOW.index('UserDefaults.standard.set(true, forKey: key)'),
+        )
 
     def test_persisted_macos_editors_reject_post_shutdown_callbacks(self):
         self.assertIn("func prepareForShutdown()", REGION_STORE)

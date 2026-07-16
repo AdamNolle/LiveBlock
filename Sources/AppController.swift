@@ -547,6 +547,9 @@ final class AppController: ObservableObject {
         regionStore.prepareForShutdown()
         labelingController.prepareForShutdown()
         perAppRules.prepareForShutdown()
+        controlPanel?.prepareForShutdown()
+        controlPanel?.orderOut(nil)
+        onboardingWindow?.orderOut(nil)
         screenRestartWasRunning = false
         screenRestartTask?.cancel()
         autoCaptureEnabled = false
@@ -724,6 +727,12 @@ final class AppController: ObservableObject {
         }
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func finishOnboarding() {
+        guard !userActionPolicy.shutdownRequested else { return }
+        UserDefaults.standard.set(true, forKey: "didOnboard")
+        onboardingWindow?.close()
     }
 
     /// Re-show onboarding even if the user finished it before. Surfaced

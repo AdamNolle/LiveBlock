@@ -337,7 +337,11 @@ hashes:
     trash, then request discard. Both existing destination bytes and both source
     files must remain unchanged. Separately make the screenshot move fail after
     sidecar admission and verify sidecar rollback. Confirm the training root and
-    all four child directories remain mode `0700` after upgrading an older tree.
+    all four child directories remain mode `0700` after upgrading an older tree;
+11. quit from native Command-Q while first-run onboarding and the control panel
+    are visible. Onboarding must remain incomplete on the next launch unless its
+    explicit Finish action ran before shutdown, and AppKit window closure must
+    not display the menu-bar reminder alert or persist its acknowledgement.
 
 Expected result: no partial document is accepted; authenticated previous state is
 restored where defined; future/malformed state remains untouched; no fallback to

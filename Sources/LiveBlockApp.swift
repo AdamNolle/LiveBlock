@@ -267,8 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let onboarding = OnboardingWindow(
             rootView: AnyView(OnboardingView(
                 onFinish: { [weak self] in
-                    UserDefaults.standard.set(true, forKey: "didOnboard")
-                    self?.controller.onboardingWindow?.close()
+                    self?.controller.finishOnboarding()
                 },
                 onTryFirstBlock: { [weak self] in
                     // Start blocking AND open the editor through one sequenced

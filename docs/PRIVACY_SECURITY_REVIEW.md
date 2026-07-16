@@ -88,7 +88,9 @@ bundle inventories.
   change exclusions afterward. Diagnostics rechecks the policy after its modal
   save panel, display selection rejects terminal actions, and delayed topology
   work rechecks after suspension so it cannot restart capture once native
-  termination begins.
+  termination begins. First-run completion is persisted only by the explicit
+  Finish action; AppKit window closure during quit neither completes onboarding
+  nor opens/persists the control-panel close reminder.
 - Windows and Linux serialize region, labeling-screenshot, label-save, and
   discard mutations through one native gate. Quit sets its terminal flag before
   waiting on that gate: an already-admitted mutation completes before exit, and

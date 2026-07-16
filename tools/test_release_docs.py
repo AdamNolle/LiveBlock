@@ -7,6 +7,7 @@ README = (ROOT / "README.md").read_text()
 RUNBOOKS = (ROOT / "docs/DESKTOP_VALIDATION_RUNBOOKS.md").read_text()
 PRIVACY = (ROOT / "docs/PRIVACY_SECURITY_REVIEW.md").read_text()
 RELEASE_NOTES = (ROOT / "docs/RELEASE_NOTES_DRAFT.md").read_text()
+RELEASE_ARTIFACTS = (ROOT / "docs/RELEASE_ARTIFACTS.md").read_text()
 WINDOWS_MAIN = (ROOT / "platform/windows/src-tauri/src/main.rs").read_text()
 LINUX_MAIN = (ROOT / "platform/linux/src-tauri/src/main.rs").read_text()
 
@@ -59,6 +60,18 @@ class ReleaseDocumentationContractTests(unittest.TestCase):
         self.assertIn("Zero-copy DirectML texture inference is not implemented", RELEASE_NOTES)
         self.assertIn("Bounded wgpu/WGSL patch generation is implemented", RELEASE_NOTES)
         self.assertIn("Real Vulkan/GL GPU and zero-copy compositor execution remain uncertified", RELEASE_NOTES)
+
+    def test_release_blocker_diagnostic_preserves_external_authority_boundary(self):
+        normalized = " ".join(RELEASE_ARTIFACTS.split())
+        for phrase in (
+            "tools/release_blockers.py",
+            "contracts/release-blocker-assessment.schema.json",
+            "accountable dependency approval",
+            "production signing/publication",
+            "real-device platform validation",
+            "cannot authorize model installation",
+        ):
+            self.assertIn(phrase, normalized)
 
     def test_privacy_review_preserves_evidence_boundaries(self):
         normalized = " ".join(PRIVACY.split()).lower()

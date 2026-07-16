@@ -43,7 +43,7 @@ jobs:
       - name: Label and desktop adapter contract tests
         env:
           PYTHONPATH: tools
-        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_dependency_obligations tools.test_macos_accessibility tools.test_macos_failure_modes tools.test_flatpak_sources tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_runtime_staging tools.test_windows_packaging tools.test_windows_application_update tools.test_windows_directml_readiness
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_release_blockers tools.test_dependency_obligations tools.test_macos_accessibility tools.test_macos_failure_modes tools.test_flatpak_sources tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_runtime_staging tools.test_windows_packaging tools.test_windows_application_update tools.test_windows_directml_readiness
       - name: Explicit migration, installer, and update recovery gates
         env:
           PYTHONPATH: tools
@@ -65,6 +65,7 @@ jobs:
           python -m json.tool contracts/model-keyring.schema.json >/dev/null
           python -m json.tool contracts/model-update-state.schema.json >/dev/null
           python -m json.tool contracts/release-artifact-inventory.schema.json >/dev/null
+          python -m json.tool contracts/release-blocker-assessment.schema.json >/dev/null
           python -m json.tool contracts/windows-application-update.schema.json >/dev/null
           python -m json.tool contracts/windows-directml-transport-readiness.schema.json >/dev/null
       - name: Shared frontend build
@@ -76,6 +77,9 @@ jobs:
           mkdir -p tools/runs/ci-release-evidence
           python tools/verify_windows_directml_readiness.py \
             --output tools/runs/ci-release-evidence/windows-directml-readiness.json
+          python tools/release_blockers.py \
+            --commit "$GITHUB_SHA" \
+            --output tools/runs/ci-release-evidence/release-blockers.json
           cargo metadata --manifest-path core/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/core-metadata.json
           cargo metadata --manifest-path platform/windows/src-tauri/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/windows-metadata.json
           cargo metadata --manifest-path platform/linux/src-tauri/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/linux-metadata.json
@@ -122,6 +126,7 @@ jobs:
             tools/runs/ci-release-evidence/dependency-licenses.json
             tools/runs/ci-release-evidence/dependency-obligations.json
             tools/runs/ci-release-evidence/windows-directml-readiness.json
+            tools/runs/ci-release-evidence/release-blockers.json
             licenses/dependency-license-decisions.json
             licenses/mpl-source-offer.json
             licenses/MPL-2.0.txt

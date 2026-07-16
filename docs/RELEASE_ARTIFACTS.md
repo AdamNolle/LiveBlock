@@ -137,6 +137,48 @@ python3 tools/verify_dependency_obligations.py \
   --output tools/runs/release-evidence/dependency-obligations.json
 ```
 
+## Automatable blocker assessment
+
+`tools/release_blockers.py` emits the closed schema-1 diagnostic defined by
+`contracts/release-blocker-assessment.schema.json`. It derives four current
+code/data blockers instead of copying prose status:
+
+- the human-review plan status is recomputed from the local pool and must
+  byte-semantically match the saved status, including its plan and review-state
+  fingerprints;
+- a schema-5 promotion report must use the current gate-code fingerprints and
+  immutable limits. A potentially passing report is not trusted directly: the
+  tool reruns the complete gate into create-new preserved evidence before it can
+  mark the gate satisfied;
+- each packaged macOS, Windows, and Linux model keyring is strictly parsed and
+  must contain at least one canonical Ed25519 public key; and
+- the existing DirectML readiness verifier must report all 8/8 hash-bound gates
+  ready rather than the current deferred CPU-uploaded transport.
+
+Ignored corpus/promotion inputs are intentionally absent in clean hosted CI, so
+that environment records `human-review-input-missing` and
+`promotion-report-missing` rather than borrowing local state. A local checkout
+with the current ignored inputs records 0/21 review, a failed or stale schema-5
+report, three empty production keyrings, and DirectML 0/8. Unknown fields,
+duplicate JSON keys, malformed keyrings, stale promotion code, mismatched review
+status, links/special files, or changed readiness inputs fail closed.
+
+From the repository root, create a new diagnostic without replacing prior bytes:
+
+```bash
+python3 tools/release_blockers.py \
+  --promotion-report tools/runs/promotion-gate-current.json \
+  --output tools/runs/release-blocker-assessment/current.json
+```
+
+Add `--require-clean-git` when recording operator evidence and `--require-clear`
+when a caller must receive nonzero status while any automatable gate is blocked.
+The report is diagnostic only. It deliberately lists accountable dependency
+approval, production signing/publication, and real-device platform validation as
+external prerequisites it does **not** assess. Even an
+`external-review-required` result cannot authorize model installation, signing,
+publication, or release.
+
 ## CI evidence boundaries
 
 The shared job also reruns focused legacy-schema migrations, atomic installer

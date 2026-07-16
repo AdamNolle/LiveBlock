@@ -50,7 +50,12 @@ No current platform profile reports `releaseReady: true`.
   auto-capture, and privacy-visible windows hide before stream teardown awaits.
   Quit also invalidates and terminates exact source-training subprocess ownership
   so stale cancellation output cannot mutate a later workflow; native Command-Q
-  waits behind the same terminal teardown handshake.
+  waits behind the same terminal teardown handshake. Before windows hide, the
+  terminal transition fences retained region-editor, label save/migration/discard,
+  per-app exclusion, diagnostics, and display-topology callbacks so they cannot
+  persist data or restart capture during termination. If an authenticated CoreML
+  update was already admitted, normal quit suppresses its completion UI and waits
+  for the atomic task before exiting; forced termination still uses startup recovery.
 - Offline authenticated precompiled CoreML update installation and startup
   recovery.
 - Credential-free release preflight plus credential-gated Developer ID,

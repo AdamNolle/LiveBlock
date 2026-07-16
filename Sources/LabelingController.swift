@@ -86,21 +86,32 @@ final class LabelingController: ObservableObject {
     @Published var currentSuggestions: [LabelBox] = []
 
     private let visionProcessor = VisionProcessor()
+    private var shutdownRequested = false
 
     init() {
         TrainingPaths.ensureDirectories()
         refresh()
     }
 
+    /// Install a terminal barrier before windows are hidden. AppKit may still
+    /// deliver a close callback during termination; it must not save, migrate,
+    /// or discard labeling files after quit begins.
+    func prepareForShutdown() {
+        shutdownRequested = true
+        currentSuggestions = []
+    }
+
     /// Drop the cached CoreML model so the next labeling-suggestion call
     /// reloads from disk. Called by TrainingController after install.
     func reloadDetectionModel() {
+        guard !shutdownRequested else { return }
         visionProcessor.reloadModel()
     }
 
     // MARK: - Disk discovery
 
     func refresh() {
+        guard !shutdownRequested else { return }
         TrainingPaths.ensureDirectories()
         let fm = FileManager.default
         let dir = TrainingPaths.screenshots
@@ -193,12 +204,13 @@ final class LabelingController: ObservableObject {
     /// Generate detector proposals for the current image, using the controller's
     /// own VisionProcessor. Runs off the main actor.
     func generateSuggestionsForCurrent() async {
-        guard let url = currentURL else { return }
+        guard !shutdownRequested, let url = currentURL else { return }
         let detector = visionProcessor
         let detected = await detector.detectBoxesInPNGFile(at: url)
 
-        // Only apply if the user hasn't moved on while we were detecting.
-        guard currentURL == url else { return }
+        // Only apply if the user hasn't moved on or shutdown while detection
+        // was suspended off the main actor.
+        guard !shutdownRequested, currentURL == url else { return }
         let confirmed = currentBoxes
         let proposals = detected.filter { proposal in
             !confirmed.contains { confirmedOverlaps(proposal, $0, threshold: 0.5) }
@@ -223,6 +235,7 @@ final class LabelingController: ObservableObject {
     /// Save the current state. Returns true on success or if there's nothing to save.
     @discardableResult
     func saveLabels() -> Bool {
+        guard !shutdownRequested else { return false }
         guard currentLabelCompatibilityError == nil else {
             NSLog("LabelingController: refusing to overwrite incompatible label sidecar")
             return false
@@ -251,14 +264,14 @@ final class LabelingController: ObservableObject {
     }
 
     func markCurrentAsNoAds() {
-        guard currentLabelCompatibilityError == nil else { return }
+        guard !shutdownRequested, currentLabelCompatibilityError == nil else { return }
         currentBoxes.removeAll()
         _ = saveLabels()
     }
 
     /// Move the current screenshot (and any partial label) to the trash folder.
     func discardCurrent() {
-        guard let url = currentURL else { return }
+        guard !shutdownRequested, let url = currentURL else { return }
         let label = TrainingPaths.labelURL(forScreenshot: url)
         let fm = FileManager.default
         TrainingPaths.ensureDirectories()
@@ -312,7 +325,7 @@ final class LabelingController: ObservableObject {
                 // Legacy sidecars had no schemaVersion. Rewrite only after a
                 // successful decode so malformed/future documents stay intact.
                 let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                if object?["schemaVersion"] == nil {
+                if !shutdownRequested, object?["schemaVersion"] == nil {
                     let encoder = JSONEncoder()
                     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                     encoder.dateEncodingStrategy = .iso8601

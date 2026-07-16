@@ -46,6 +46,7 @@ final class RegionStore: @unchecked Sendable {
     private let handle: RegionStoreHandle
     private let storageURL: URL
     private let unsupportedSchemaVersion: Int?
+    private var shutdownRequested = false
 
     init(storageURL: URL? = nil) {
         if let storageURL {
@@ -121,10 +122,20 @@ final class RegionStore: @unchecked Sendable {
         return regions.filter { !disabledIDs.contains($0.id) }
     }
 
+    /// Install the terminal persistence barrier synchronously. Region editor
+    /// callbacks can retain this store independently of AppController, so the
+    /// store itself must reject any mutation that reaches it after quit begins.
+    func prepareForShutdown() {
+        lock.lock()
+        shutdownRequested = true
+        lock.unlock()
+    }
+
     func add(_ region: NormalizedRegion) {
         guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
+        guard !shutdownRequested else { return }
         _ = handle.add_with_id(region.id.uuidString,
                                region.x, region.y, region.width, region.height)
         regions = Self.snapshot(handle: handle)
@@ -134,6 +145,7 @@ final class RegionStore: @unchecked Sendable {
         guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
+        guard !shutdownRequested else { return }
         _ = handle.remove(id.uuidString)
         regions = Self.snapshot(handle: handle)
     }
@@ -142,6 +154,7 @@ final class RegionStore: @unchecked Sendable {
         guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
+        guard !shutdownRequested else { return }
         _ = handle.clear()
         for r in newRegions {
             _ = handle.add_with_id(r.id.uuidString, r.x, r.y, r.width, r.height)
@@ -154,6 +167,7 @@ final class RegionStore: @unchecked Sendable {
         guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
+        guard !shutdownRequested else { return }
         _ = handle.replace_id(id.uuidString,
                               newRegion.x, newRegion.y, newRegion.width, newRegion.height)
         regions = Self.snapshot(handle: handle)
@@ -163,6 +177,7 @@ final class RegionStore: @unchecked Sendable {
         guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
+        guard !shutdownRequested else { return }
         _ = handle.clear()
         regions = []
     }

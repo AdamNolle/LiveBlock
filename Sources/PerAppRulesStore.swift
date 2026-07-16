@@ -14,8 +14,9 @@ private let perAppRulesStorageKey = "perAppExcludedBundleIDs"
 final class PerAppRulesStore: ObservableObject {
     private let defaults: UserDefaults
     private let storageKey: String
+    private var shutdownRequested = false
 
-    @Published var excludedBundleIDs: Set<String> {
+    @Published private(set) var excludedBundleIDs: Set<String> {
         didSet {
             defaults.set(Array(excludedBundleIDs).sorted(), forKey: storageKey)
         }
@@ -29,13 +30,17 @@ final class PerAppRulesStore: ObservableObject {
         self.excludedBundleIDs = Set(stored)
     }
 
+    func prepareForShutdown() {
+        shutdownRequested = true
+    }
+
     func isExcluded(_ bundleID: String) -> Bool {
         guard !bundleID.isEmpty else { return false }
         return excludedBundleIDs.contains(bundleID)
     }
 
     func setExcluded(_ bundleID: String, excluded: Bool) {
-        guard !bundleID.isEmpty else { return }
+        guard !shutdownRequested, !bundleID.isEmpty else { return }
         if excluded {
             excludedBundleIDs.insert(bundleID)
         } else {
@@ -45,5 +50,10 @@ final class PerAppRulesStore: ObservableObject {
 
     func toggle(_ bundleID: String) {
         setExcluded(bundleID, excluded: !isExcluded(bundleID))
+    }
+
+    func clear() {
+        guard !shutdownRequested else { return }
+        excludedBundleIDs = []
     }
 }

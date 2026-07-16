@@ -43,8 +43,22 @@ final class PerAppRulesStoreTests: XCTestCase {
         let store = PerAppRulesStore(defaults: defaults, storageKey: key)
         store.toggle("com.example.game")
         XCTAssertTrue(store.isExcluded("com.example.game"))
-        store.toggle("com.example.game")
+        store.clear()
         XCTAssertFalse(store.isExcluded("com.example.game"))
         XCTAssertEqual(defaults.stringArray(forKey: key), [])
+    }
+
+    func testShutdownBarrierRejectsLaterRuleMutations() {
+        let key = "excluded"
+        let store = PerAppRulesStore(defaults: defaults, storageKey: key)
+        store.setExcluded("com.example.video", excluded: true)
+        store.prepareForShutdown()
+
+        store.setExcluded("com.example.video", excluded: false)
+        store.toggle("com.example.game")
+        store.clear()
+
+        XCTAssertEqual(store.excludedBundleIDs, ["com.example.video"])
+        XCTAssertEqual(defaults.stringArray(forKey: key), ["com.example.video"])
     }
 }

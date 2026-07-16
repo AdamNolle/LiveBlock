@@ -44,6 +44,44 @@ and session/model creation succeeded. `cpu_after_directml_load_failure` means th
 separate CPU session loaded after the DirectML attempt failed. Neither status is
 physical-GPU execution evidence.
 
+## Current-source feasibility findings
+
+The remaining work is not a safe incremental patch on the existing texture. The
+capture session creates a plain D3D11 device with `D3D11CreateDevice(None,
+D3D_DRIVER_TYPE_HARDWARE, ...)`; it does not select or persist an adapter LUID.
+The application-owned BGRA texture has `MiscFlags: 0`, so it is unshared, and the
+Windows crate does not enable the Direct3D12 or Direct3D11On12 API surfaces. The
+DirectML provider also uses its default device ID rather than a device mapped to
+the capture adapter. On a mixed-adapter system those defaults are not evidence
+that capture and inference even selected the same physical device.
+
+D3D11On12 cannot retroactively unwrap an arbitrary resource created by this plain
+D3D11 device. A viable D3D11On12 design must start from the monitor's DXGI adapter,
+create the D3D12 device and queue there, create the D3D11On12 device over that
+queue, and give that D3D11 device to the WGC frame pool. That is a capture-device
+and lifecycle migration, not a pointer cast. A shared-handle alternative still
+requires shareable resource creation, same-adapter validation, explicit fence/
+keyed synchronization, access-state transitions, and device-loss ownership.
+
+The pinned `ort` rc.4 `IoBinding::bind_input` documentation describes a copy at
+bind time for ordinary values and is optimized for inputs reused across runs;
+LiveBlock's frame input changes every run. `ort` rc.4 and `ort-sys` rc.4 do not
+expose `OrtDmlApi` or `CreateGPUAllocationFromD3DResource`, although a later
+wrapper revision is irrelevant to the pinned runtime ABI. A correct implementation
+therefore needs a reviewed version-matched unsafe shim, a D3D12 **buffer** holding
+the GPU-preprocessed tensor, a wrapper whose lifetime outlives the bound
+`OrtValue`, and a per-frame I/O binding path. Binding the BGRA texture or its COM
+pointer directly would remain invalid.
+
+`platform/windows/directml-transport-readiness.json` is the machine-readable
+no-go/go record. `tools/verify_windows_directml_readiness.py` binds the pinned
+runtime/crate versions, current source facts, confirmed cancellation/backpressure
+seams, and eight required gates. It refuses `ready` unless every gate has
+hash-bound repository evidence and the hardware matrix contains AMD, Intel,
+NVIDIA, and CPU runs. The current record is intentionally `blocked` / `defer`
+with 0/8 gates passed; this does not erase the already implemented CPU fallback
+and per-run cancellation seams.
+
 ## Required architecture before this row can close
 
 A correct device-input implementation needs one reviewed transaction spanning:
@@ -67,6 +105,10 @@ A correct device-input implementation needs one reviewed transaction spanning:
 That architecture is not safely provided by `ort` rc.4 and is not implemented in
 this branch. A bespoke `ort-sys`/D3D12 bridge would add a second unsafe runtime
 ABI and substantial device-loss/lifetime surface before a promoted ONNX model
-exists. The release decision is therefore to keep the current explicit CPU-input
-path, enforce DirectML's required session options, make registration failure and
-CPU fallback truthful, and leave the texture-transport checklist item open.
+exists. It would also lack the exact ONNX/CoreML parity artifact needed to prove
+that GPU preprocessing preserved the promoted model contract. The release
+decision is therefore to keep the current explicit CPU-input path, enforce
+DirectML's required session options, make registration failure and CPU fallback
+truthful, and leave the texture-transport checklist item open. Revisit only after
+a promoted ONNX artifact exists and the readiness record can accumulate real
+parity and device evidence gate by gate.

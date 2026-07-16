@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveblock.local/contracts/windows-directml-transport-readiness.schema.json",
+  "title": "LiveBlock Windows DirectML texture transport readiness",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "decision",
+    "runtime",
+    "currentInputTransport",
+    "confirmedSafetySeams",
+    "requiredGates"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "status": { "enum": ["blocked", "ready"] },
+    "decision": { "enum": ["defer", "enable"] },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["onnxRuntime", "ort", "ortSys"],
+      "properties": {
+        "onnxRuntime": { "const": "1.18.1" },
+        "ort": { "const": "2.0.0-rc.4" },
+        "ortSys": { "const": "2.0.0-rc.4" }
+      }
+    },
+    "currentInputTransport": {
+      "enum": ["cpu-uploaded-f32-rgb-nchw", "d3d12-dml-allocation-f32-rgb-nchw"]
+    },
+    "confirmedSafetySeams": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "capacity-one-newest-frame",
+          "worker-side-staging-map",
+          "per-run-ort-termination",
+          "generation-invalidation-before-cancel",
+          "explicit-cpu-session-after-directml-load-failure",
+          "truthful-runtime-capability"
+        ]
+      }
+    },
+    "requiredGates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captureAdapterIdentity",
+        "d3d11On12CaptureDevice",
+        "gpuPreprocessingParity",
+        "ortDmlAllocationLifetime",
+        "ioBindingOutputReadback",
+        "fenceCancellationGeneration",
+        "deviceLossCpuFallback",
+        "vendorHardwareMatrix"
+      ],
+      "properties": {
+        "captureAdapterIdentity": { "$ref": "#/$defs/gate" },
+        "d3d11On12CaptureDevice": { "$ref": "#/$defs/gate" },
+        "gpuPreprocessingParity": { "$ref": "#/$defs/gate" },
+        "ortDmlAllocationLifetime": { "$ref": "#/$defs/gate" },
+        "ioBindingOutputReadback": { "$ref": "#/$defs/gate" },
+        "fenceCancellationGeneration": { "$ref": "#/$defs/gate" },
+        "deviceLossCpuFallback": { "$ref": "#/$defs/gate" },
+        "vendorHardwareMatrix": { "$ref": "#/$defs/gate" }
+      }
+    }
+  },
+  "$defs": {
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "evidence"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence" }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "sha256", "vendor"],
+      "properties": {
+        "kind": {
+          "enum": ["source-test", "windows-test", "parity-report", "hardware-run"]
+        },
+        "reference": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "vendor": { "enum": ["not-applicable", "amd", "intel", "nvidia", "cpu"] }
+      }
+    }
+  }
+}

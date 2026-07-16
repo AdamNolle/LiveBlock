@@ -21,8 +21,14 @@ Runtime classes, in model-index order:
 | Panic disable | Command+Shift+Option+Period | Control+Shift+Alt+Period |
 
 Panic disable must clear capture intent, cancel recovery, clear overlays, and
-close the editor. Runtime inference and frame processing stay local; frame
-telemetry is not networked. Production packages are inference-only.
+close the editor. Renderer capture/window actions carry a native monotonic action
+sequence: a delayed start or window-open allocated before a newer stop/panic is
+a no-op. Renderer window authority is limited to editor, labeling, and training;
+render/control visibility remains native-owned. Linux quit installs a terminal
+shutdown barrier, hides privacy-visible windows, invalidates capture, awaits
+source teardown, and only then exits. Runtime inference and frame processing
+stay local; frame telemetry is not networked. Production packages are
+inference-only.
 
 Windows and Linux expose their validated runtime profile through the
 `get_capabilities` Tauri command and the immutable vocabulary/hotkey/panic/local-data

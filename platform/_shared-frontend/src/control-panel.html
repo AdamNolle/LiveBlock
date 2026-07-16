@@ -13,7 +13,7 @@
       .head .meta { display:flex; align-items:center; gap:5px; font: 500 11px var(--lb-font-ui); color: var(--lb-ink-muted); margin-top: 1px; }
       .actions { display:flex; gap:8px; }
       .actions .lb-pill { flex:1; justify-content:center; }
-      .stats { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; }
+      .stats { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
       .stat {
         padding: 10px 8px;
         border-radius: 14px;
@@ -25,7 +25,6 @@
       }
       .stat .v { font: 600 18px var(--lb-font-mono); line-height:1; }
       .stat .l { font: 600 9px var(--lb-font-ui); margin-top:4px; letter-spacing:0.04em; text-transform:uppercase; color: var(--lb-ink-muted); }
-      .stat.block .v { color: var(--lb-block); }
       .stat.train .v { color: var(--lb-train); }
       .stat.detect .v { color: var(--lb-detect); }
       .row {
@@ -58,7 +57,6 @@
       </div>
 
       <div class="stats">
-        <div class="stat block"><div class="v" id="statBlocked">0</div><div class="l">blocked today</div></div>
         <div class="stat train"><div class="v" id="statRegions">0</div><div class="l">active regions</div></div>
         <div class="stat detect"><div class="v" id="statDropped">0</div><div class="l">stale dropped</div></div>
       </div>
@@ -73,7 +71,6 @@
       </div>
 
       <div class="footer">
-        <button class="lb-pill lb-sm" id="prefsBtn">⚙ Preferences</button>
         <div class="lb-spacer"></div>
         <span id="hotkeyHint" class="lb-mono" style="font-size:10px;color:var(--lb-ink-faint)">Ctrl+Shift+B</span>
       </div>
@@ -133,9 +130,17 @@
         }
       });
 
-      document.getElementById("blockBtn").addEventListener("click", () => lb.showWindow("editor"));
-      document.getElementById("trainBtn").addEventListener("click", () => lb.showWindow("training"));
-      document.getElementById("prefsBtn").addEventListener("click", () => lb.showWindow("settings"));
+      async function openWindow(label) {
+        try {
+          await lb.showWindow(label);
+        } catch (error) {
+          const notice = document.getElementById("capabilityNotice");
+          notice.textContent = `Window action failed: ${String(error)}`;
+          notice.hidden = false;
+        }
+      }
+      document.getElementById("blockBtn").addEventListener("click", () => openWindow("editor"));
+      document.getElementById("trainBtn").addEventListener("click", () => openWindow("training"));
 
       function renderStatus() {
         const dot = document.getElementById("statusDot");

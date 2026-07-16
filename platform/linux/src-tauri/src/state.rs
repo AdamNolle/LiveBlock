@@ -45,6 +45,42 @@ pub fn advance_capture_generation(generation: &AtomicU64) -> u64 {
     }
 }
 
+pub fn claim_user_action(
+    latest_action_sequence: &AtomicU64,
+    shutdown_requested: bool,
+    action_sequence: u64,
+) -> bool {
+    if shutdown_requested || action_sequence == 0 {
+        return false;
+    }
+    latest_action_sequence
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            (action_sequence > current).then_some(action_sequence)
+        })
+        .is_ok()
+}
+
+pub fn user_action_is_current(
+    latest_action_sequence: &AtomicU64,
+    shutdown_requested: bool,
+    action_sequence: u64,
+) -> bool {
+    !shutdown_requested
+        && action_sequence != 0
+        && latest_action_sequence.load(Ordering::SeqCst) == action_sequence
+}
+
+pub fn window_action_is_newer_than_barriers(
+    action_sequence: u64,
+    latest_capture_action: u64,
+    last_panic_action: u64,
+    shutdown_requested: bool,
+) -> bool {
+    action_sequence != 0
+        && !shutdown_requested
+        && action_sequence > latest_capture_action.max(last_panic_action)
+}
+
 pub fn frame_belongs_to_active_generation(
     current_generation: u64,
     capture_running: bool,
@@ -113,6 +149,9 @@ pub struct AppState {
     pub region_store: SharedRegionStore,
     pub capture_running: AtomicBool,
     pub capture_generation: AtomicU64,
+    pub latest_action_sequence: AtomicU64,
+    pub last_panic_action: AtomicU64,
+    pub shutdown_requested: AtomicBool,
     pub capture: tokio::sync::Mutex<Option<CaptureRuntime>>,
     pub capture_telemetry: CaptureTelemetry,
     pub latest_frame: ArcSwapOption<LatestFrame>,
@@ -132,6 +171,9 @@ impl AppState {
             region_store,
             capture_running: AtomicBool::new(false),
             capture_generation: AtomicU64::new(0),
+            latest_action_sequence: AtomicU64::new(0),
+            last_panic_action: AtomicU64::new(0),
+            shutdown_requested: AtomicBool::new(false),
             capture: tokio::sync::Mutex::new(None),
             capture_telemetry: CaptureTelemetry::default(),
             latest_frame: ArcSwapOption::from(None),
@@ -183,6 +225,22 @@ mod tests {
         let live = live.take().unwrap();
         live.task.abort();
         let _ = live.task.await;
+    }
+
+    #[test]
+    fn user_actions_are_monotonic_and_shutdown_is_terminal() {
+        let latest = AtomicU64::new(0);
+        assert!(!claim_user_action(&latest, false, 0));
+        assert!(claim_user_action(&latest, false, 3));
+        assert!(!claim_user_action(&latest, false, 2));
+        assert!(!claim_user_action(&latest, false, 3));
+        assert!(user_action_is_current(&latest, false, 3));
+        assert!(!user_action_is_current(&latest, false, 2));
+        assert!(!claim_user_action(&latest, true, 4));
+        assert!(!user_action_is_current(&latest, true, 3));
+        assert!(window_action_is_newer_than_barriers(6, 4, 5, false));
+        assert!(!window_action_is_newer_than_barriers(5, 4, 5, false));
+        assert!(!window_action_is_newer_than_barriers(6, 4, 5, true));
     }
 
     #[test]

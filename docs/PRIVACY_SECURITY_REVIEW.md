@@ -103,7 +103,10 @@ img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'
 Inline styles are currently required by the local UI; inline scripts and remote
 content are not allowed. Unused Tauri shell/filesystem/dialog/OS plugins were
 removed. Custom commands remain the exposed native surface and therefore require
-path and state validation even though the UI is local.
+path and state validation even though the UI is local. Renderer window commands
+are allowlisted to editor, labeling, and training; render/control surfaces stay
+native-owned. Window opens and capture transitions carry monotonic native action
+sequences so requests allocated before a later stop/panic cannot arrive late.
 
 The CSP and removed plugins reduce impact; they do not prove the absence of
 WebView2/WebKit vulnerabilities. Final packages need dependency/advisory scans
@@ -164,16 +167,16 @@ transactions. See `docs/CI.md` for what green CI does not prove.
 
 ## Residual risks and required release evidence
 
-1. No production signing keys, promoted detector, signed installers, or package
-   inventories exist yet.
+1. No production signing keys, promoted detector, signed installers, or
+   production package inventories exist yet; existing inventories are BuildOnly.
 2. Network-denied real-device functional tests and outbound traffic observation
    have not been run.
 3. Windows application-data privacy relies on inherited user-profile ACLs; a
    clean-install ACL inspection is required.
-4. Final Windows/Linux label UI behavior is incomplete and needs end-to-end path
-   tests once drawing/save navigation is implemented.
-5. Dependency vulnerability/license scans, SBOMs, and reproducible package
-   comparison are not yet release gates in CI.
+4. Windows/Linux drawing/save/navigation is implemented, but real-device
+   keyboard, accessibility, display-change, and panic-race evidence is open.
+5. Dependency/SBOM/package gates run in CI, but five prepared MPL obligations
+   still require accountable production-channel approval.
 6. Portal/compositor, GPU provider, anti-cheat, DRM, multi-display, lifecycle,
    panic-latency, and power-loss claims remain hardware-blocked.
 7. CSP still allows local inline styles; remove them when UI refactoring makes

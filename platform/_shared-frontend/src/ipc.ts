@@ -172,7 +172,10 @@ export const lb = {
     invoke<ModelUpdateReceipt>("install_model_update", { manifestPath, artifactPath }),
 
   // Window lifecycle.
-  showWindow: (label: string) => invoke<void>("show_window", { label }),
+  showWindow: async (label: string) => {
+    const actionSequence = await invoke<number>("begin_user_action");
+    return invoke<void>("show_window", { label, actionSequence });
+  },
   hideWindow: (label: string) => invoke<void>("hide_window", { label }),
   quit: () => invoke<void>("quit"),
 };

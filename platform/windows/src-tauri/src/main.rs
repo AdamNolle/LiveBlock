@@ -1332,19 +1332,29 @@ fn cancel_training() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn show_window(label: String, app: AppHandle) -> Result<(), String> {
-    app.get_webview_window(&label)
-        .ok_or_else(|| format!("no window {label}"))?
-        .show()
-        .map_err(|e| e.to_string())
+fn show_window(label: String, action_sequence: u64, app: AppHandle) -> Result<(), String> {
+    if !matches!(label.as_str(), "editor" | "labeling" | "training") {
+        return Err(format!("window is not renderer-openable: {label}"));
+    }
+    if !action_sequence_is_allowed(&app, action_sequence) {
+        return Ok(());
+    }
+    let window = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("window is unavailable: {label}"))?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn hide_window(label: String, app: AppHandle) -> Result<(), String> {
+    if !matches!(label.as_str(), "editor" | "labeling" | "training") {
+        return Err(format!("window is not renderer-hideable: {label}"));
+    }
     app.get_webview_window(&label)
-        .ok_or_else(|| format!("no window {label}"))?
+        .ok_or_else(|| format!("window is unavailable: {label}"))?
         .hide()
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

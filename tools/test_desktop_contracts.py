@@ -205,6 +205,31 @@ class DesktopAdapterContractTests(unittest.TestCase):
             LINUX_X11_CAPTURE.index("return Ok(CaptureEvent::Reset)"),
         )
 
+    def test_user_action_window_and_quit_barriers_fail_closed(self):
+        self.assertNotIn("_action_sequence: u64", LINUX)
+        self.assertIn("claim_user_action", LINUX_STATE)
+        self.assertIn("action_sequence_was_allocated", LINUX)
+        self.assertIn("user_action_is_current", LINUX_STATE)
+        self.assertIn("last_panic_action", LINUX_STATE)
+        self.assertIn("window_action_is_newer_than_barriers", LINUX_STATE)
+        self.assertIn("if !claim_action(state.inner(), action_sequence)", LINUX)
+        self.assertIn("if !action_is_current(&state, action_sequence)", LINUX)
+        self.assertIn("fetch_max(action_sequence, Ordering::SeqCst)", LINUX)
+
+        self.assertIn('invoke<void>("show_window", { label, actionSequence })', IPC)
+        for source in (WINDOWS, LINUX):
+            self.assertIn('"editor" | "labeling" | "training"', source)
+            self.assertIn("window is not renderer-openable", source)
+            self.assertIn("window is not renderer-hideable", source)
+        self.assertNotIn('showWindow("settings")', WINDOWS_CONTROL_PANEL)
+        self.assertNotIn("blocked today", WINDOWS_CONTROL_PANEL)
+        self.assertNotIn("statBlocked", WINDOWS_CONTROL_PANEL)
+
+        quit_body = LINUX.split("async fn quit", 1)[1].split("fn main()", 1)[0]
+        self.assertLess(quit_body.index("shutdown_requested.swap"), quit_body.index("window.hide()"))
+        self.assertLess(quit_body.index("window.hide()"), quit_body.index("stop_capture_inner"))
+        self.assertLess(quit_body.index("stop_capture_inner"), quit_body.index("app.exit(0)"))
+
     def test_release_training_uses_shared_fail_closed_gate(self):
         for platform, source in (("Windows", WINDOWS), ("Linux", LINUX)):
             self.assertIn("developer_training_runtime_available()", source)

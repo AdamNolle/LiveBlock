@@ -20,7 +20,9 @@ Both paths feed local ONNX detection, bounded wgpu/WGSL mirror-blend
 inpainting when Vulkan/GL initialization succeeds, explicit CPU fallback,
 webview patch compositing, telemetry, and labeling screenshots. Capture tasks
 and screenshots are generation-bound so stop, panic, and restart invalidate
-stale publication. GPU output is
+stale publication. Monotonic user-action barriers reject delayed pre-stop or
+pre-panic starts/window opens; quit hides privacy-visible windows and awaits
+capture teardown before exit. GPU output is
 read back for PNG patch transport; this is not DMA-BUF or zero-copy rendering.
 Native CI proves compilation, WGSL parsing, CPU policy tests, and opportunistic
 software-adapter parity where available; real compositor/server, multi-output,

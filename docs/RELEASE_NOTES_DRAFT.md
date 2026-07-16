@@ -31,6 +31,10 @@ No current platform profile reports `releaseReady: true`.
 - Promotion-bound Ed25519 model manifests, embedded trust roots, monotonic
   sequence floors, atomic replacement/recovery, and production-load validation.
 - Local-only capture processing and privacy-minimized diagnostic policy.
+- Monotonic renderer action sequencing prevents pre-stop/pre-panic capture or
+  window requests from arriving late. Renderer window authority excludes the
+  native-owned render/control surfaces; Linux quit hides and tears down capture
+  behind a terminal shutdown barrier before exit.
 
 ### macOS
 

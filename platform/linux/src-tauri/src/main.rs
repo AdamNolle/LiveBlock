@@ -858,6 +858,9 @@ async fn quit(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), Str
         }
     }
     let _ = stop_capture_inner(app.clone(), state.inner().clone(), None).await;
+    // Commands queued after the terminal flag fail admission. An authenticated
+    // update that already owns this mutex completes before normal process exit.
+    let _update_guard = state.model_update.lock();
     app.exit(0);
     Ok(())
 }

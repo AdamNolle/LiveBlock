@@ -67,7 +67,9 @@ No current platform profile reports `releaseReady: true`.
   negative origins, active topology refresh, and fail-closed monitor removal.
 - Runtime-attested global hotkeys, sequenced panic behavior, tray controls, and a
   click-through/top-most render HWND with `WDA_EXCLUDEFROMCAPTURE`.
-- Authenticated monotonic ONNX replacement/recovery.
+- Authenticated monotonic ONNX replacement/recovery. Terminal quit hides and
+  stops capture before waiting for any already-admitted update transaction;
+  update commands queued after shutdown fail admission.
 
 ### Linux
 
@@ -78,6 +80,8 @@ No current platform profile reports `releaseReady: true`.
   replace the prior layout. X11 virtual-root geometry is polled at a bounded
   cadence; resize prepares a replacement MIT-SHM mapping and clears old output
   before a new frame. Capture output and labeling writes are generation-bound.
+  Terminal quit hides and stops capture before waiting for any already-admitted
+  authenticated update transaction; commands queued after shutdown are rejected.
 - Local ONNX processing with CPU default/fallback, bounded wgpu/WGSL
   mirror-blend patch generation when Vulkan/GL initializes, private screenshot
   paths, and fail-closed capture state. GPU patches are read back for webview

@@ -462,13 +462,23 @@ fn cancel_detector_run(state: &AppState) {
 
 fn quit_action(app: &AppHandle) {
     let state = app.state::<AppState>();
-    cancel_detector_run(state.inner());
-    state.shutting_down.store(true, Ordering::SeqCst);
+    if state.shutting_down.swap(true, Ordering::SeqCst) {
+        return;
+    }
     state.capture_desired.store(false, Ordering::SeqCst);
     state.recovery_generation.fetch_add(1, Ordering::SeqCst);
     state.recovery_cycles.store(0, Ordering::SeqCst);
-    let _ = app.emit("capture-state-changed", false);
-    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    // Privacy-visible windows hide before native capture or an authenticated
+    // model transaction can delay terminal teardown.
+    for label in ["editor", "render", "labeling", "training"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.hide();
+        }
+    }
+    let _ = stop_capture_inner(state.inner());
+    // A verified update already holding this lock is crash-recoverable, but a
+    // normal quit waits for its disk transaction instead of exiting mid-swap.
+    let _update_guard = state.model_update.lock();
     app.exit(0);
 }
 

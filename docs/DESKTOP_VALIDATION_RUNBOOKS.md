@@ -313,7 +313,11 @@ hashes:
 3. restart with an interrupted first model install and with a valid accepted
    backup;
 4. restart with a tampered artifact, manifest, state, symlink, and future schema;
-5. run two concurrent updater attempts and verify one advisory lock winner.
+5. run two concurrent updater attempts and verify one advisory lock winner;
+6. on Windows and Linux, queue an update behind the application mutex and then
+   quit: the queued update must be rejected after acquiring the mutex; separately
+   quit while an authenticated update already owns the mutex and verify windows
+   and capture hide/stop before quit waits for that transaction and exits.
 
 Expected result: no partial document is accepted; authenticated previous state is
 restored where defined; future/malformed state remains untouched; no fallback to

@@ -8,7 +8,10 @@ use liveblock_config::{
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -23,6 +26,14 @@ fn trusted_keys(app: &AppHandle) -> Result<TrustedKeyring, String> {
     let json = fs::read_to_string(&path)
         .map_err(|error| format!("read trusted model keyring {}: {error}", path.display()))?;
     TrustedKeyringDocument::from_json(&json, true).map_err(|error| error.to_string())
+}
+
+fn ensure_update_admitted(shutting_down: &AtomicBool) -> Result<(), String> {
+    if shutting_down.load(Ordering::SeqCst) {
+        Err("model updates are unavailable during shutdown".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn read_manifest(path: &Path) -> Result<ModelManifest, String> {
@@ -121,7 +132,12 @@ pub fn install_model_update(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<ModelUpdateReceipt, String> {
+    ensure_update_admitted(&state.shutdown_requested)?;
     let _update_guard = state.model_update.lock();
+    // Shutdown sets its terminal flag before waiting on this same mutex. This
+    // second check linearizes a queued command against quit; an update that
+    // already owned the mutex is allowed to finish its crash-safe transaction.
+    ensure_update_admitted(&state.shutdown_requested)?;
     let keys = trusted_keys(&app)?;
     let manifest = read_manifest(&manifest_path)?;
     let packaged = verified_packaged_manifest(&app, &keys)?;
@@ -141,4 +157,21 @@ pub fn install_model_update(
         |detector| *state.detector.lock() = Some(detector),
     )
     .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_update_admitted;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn shutdown_rejects_model_update_admission() {
+        let shutdown = AtomicBool::new(false);
+        assert!(ensure_update_admitted(&shutdown).is_ok());
+        shutdown.store(true, Ordering::SeqCst);
+        assert_eq!(
+            ensure_update_admitted(&shutdown).unwrap_err(),
+            "model updates are unavailable during shutdown"
+        );
+    }
 }

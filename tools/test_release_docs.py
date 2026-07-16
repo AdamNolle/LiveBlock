@@ -57,7 +57,8 @@ class ReleaseDocumentationContractTests(unittest.TestCase):
         self.assertIn("No current platform profile reports `releaseReady: true`", RELEASE_NOTES)
         self.assertIn("Human review is **0 approved / 21 pending**", RELEASE_NOTES)
         self.assertIn("Zero-copy DirectML texture inference is not implemented", RELEASE_NOTES)
-        self.assertIn("wgpu/WGSL inpainting/compositing is not implemented", RELEASE_NOTES)
+        self.assertIn("Bounded wgpu/WGSL patch generation is implemented", RELEASE_NOTES)
+        self.assertIn("Real Vulkan/GL GPU and zero-copy compositor execution remain uncertified", RELEASE_NOTES)
 
     def test_privacy_review_preserves_evidence_boundaries(self):
         normalized = " ".join(PRIVACY.split()).lower()

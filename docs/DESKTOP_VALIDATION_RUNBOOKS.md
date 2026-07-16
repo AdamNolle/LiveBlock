@@ -153,15 +153,20 @@ Remove-Item Env:LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING
 ```
 
 The override makes this non-distributable. A production build must use the exact
-promoted ONNX artifact, nonempty ring, Authenticode identity, and signed
-MSI/MSIX/NSIS output.
+promoted ONNX artifact, nonempty ring, Authenticode identity, signed MSI plus
+the selected staged NSIS update bundle. MSIX/App Installer is not a supported
+channel.
 
 ### Clean install, upgrade, and uninstall
 
-On a Windows Sandbox or clean VM, run the signed installer normally (never bypass
-SmartScreen), then verify its Authenticode chain:
+On a Windows Sandbox or clean VM, verify the complete staged bundle offline,
+then run the signed NSIS installer normally (never bypass SmartScreen):
 
 ```powershell
+pwsh -File tools/verify_windows_application_update.ps1 `
+  -BundleDir $env:LB_WINDOWS_UPDATE_BUNDLE `
+  -ExpectedSignerCertificateSha256 $env:LB_WINDOWS_EXPECTED_SIGNER_SHA256 `
+  -CurrentVersion $env:LB_WINDOWS_CURRENT_VERSION
 Get-AuthenticodeSignature $env:LB_WINDOWS_INSTALLER | Format-List *
 Get-FileHash -Algorithm SHA256 $env:LB_WINDOWS_INSTALLER
 ```

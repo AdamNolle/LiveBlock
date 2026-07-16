@@ -68,6 +68,21 @@ also persist the highest accepted `releaseSequence` per `modelId` and reject
 equal/lower sequences unless a separately authorized application release
 changes rollback policy.
 
+## Application-update descriptor
+
+`windows-application-update.schema.json` defines schema 1 for the selected
+credential-gated `stable-staged-nsis` channel. It is an offline byte/evidence
+descriptor, not a network instruction or trust root. The closed descriptor binds
+the exact repository/tag/version/commit, NSIS bytes, Authenticode signer and
+timestamp-certificate fingerprints, SBOM, license report, obligation report,
+component-bound decisions, MPL source offer, and MPL license. A detached
+CMS/SHA-256 signature by the same Authenticode certificate binds the descriptor
+and every recorded hash. Verification also requires the expected publisher-
+certificate SHA-256 from independent policy;
+trusting the descriptor's own fingerprint would be circular. Unknown/future
+fields, links, extra/missing bundle members, mutation, and non-newer candidates
+fail closed. BuildOnly packages cannot create this production channel artifact.
+
 ## Platform adoption
 
 Windows and Linux expose matching `install_model_update` commands backed by the

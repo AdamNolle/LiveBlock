@@ -43,10 +43,11 @@ package bytes and application payloads, and final unsigned Windows MSI/NSIS
 package bytes. Their trusted-key rings are intentionally empty because production
 model keys/artifacts and signing credentials do not exist yet. Linux hosted CI
 installs, bounded-smoke-launches, and removes the deb and launches the extracted
-AppImage; RPM is extraction-only on Ubuntu. Windows evidence inventories both
-final installer bytes and a non-installing MSI administrative extraction requiring
-the executable, ONNX Runtime DLL, and keyring. It does not claim the Windows
-payload was installed, launched, or executed. CI preserves the
+AppImage; checksum-pinned Fedora separately exercises the RPM. Windows evidence
+inventories both final installer bytes and a non-installing MSI administrative
+extraction, then separately exercises prior/current MSI and NSIS transitions,
+bounded launch, payload validation, downgrade rejection, data preservation, and
+uninstall. None of these BuildOnly runs is signed execution. CI preserves the
 exact webview payload as a normalized tar plus SHA-256 beside its inventory, so an operator can
 extract it and rerun `verify` without rebuilding.
 
@@ -150,8 +151,12 @@ Windows CI builds and inventories unsigned MSI/NSIS bytes under
 `windows-installers-build-only` and the administratively extracted MSI payload
 under a separate build-only inventory. Hosted Windows exercises prior install,
 current upgrade, same-version repair/reinstall, downgrade rejection, inventory,
-bounded launch, user-data preservation, and uninstall for both formats. CI does
-not test production package signing, genuinely shipped historical payloads,
-MSIX/application-update distribution, power loss, model parity, capture, or
-hardware execution. Those remain open until exact production artifacts and
-suitable hosts/credentials exist.
+bounded launch, user-data preservation, and uninstall for both formats. CI does not test production package signing, genuinely shipped historical
+payloads, staged-update publication/execution, power loss, model parity, capture,
+or hardware execution. The selected production application-update contract is
+the offline-verified `stable-staged-nsis` bundle with a detached CMS-signed
+closed descriptor described in `WINDOWS_RELEASE.md`; MSIX/App Installer remains
+unimplemented rather than an
+alternate channel. Production channel evidence remains open until exact promoted
+artifacts, accountable dependency review, suitable credentials, publication, and
+real Windows hosts exist.

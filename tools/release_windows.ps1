@@ -38,6 +38,15 @@ function Wait-RegularFileStable([string]$Path) {
     throw "Package output did not become stable within 30 seconds: $Path"
 }
 
+function Get-CertificateSha256([Security.Cryptography.X509Certificates.X509Certificate2]$Certificate) {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([Convert]::ToHexString($sha256.ComputeHash($Certificate.RawData))).ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Find-SignTool {
     if ($env:LB_WINDOWS_SIGNTOOL) {
         $candidate = Get-Item -LiteralPath $env:LB_WINDOWS_SIGNTOOL -ErrorAction Stop
@@ -94,6 +103,9 @@ $MsiExtracted = Join-Path $OutputDir "msi-extracted"
 $MsiPayloadInventory = Join-Path $OutputDir "msi-payload-inventory.json"
 $MsiExtractLog = Join-Path $OutputDir "msi-administrative-extract.log"
 $Checksum = Join-Path $OutputDir "package.sha256"
+$DependencyEvidenceDir = Join-Path $OutputDir "dependency-evidence"
+$UpdateBundleDir = Join-Path $OutputDir "windows-application-update"
+$UpdateBundleInventory = Join-Path $OutputDir "windows-application-update-inventory.json"
 
 if ($Mode -eq "Execute") {
     if ($env:LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING -eq "1") {
@@ -123,6 +135,7 @@ if ($Mode -eq "DryRun") {
     Write-Host "Planned build: $buildCommand"
     Write-Host "Planned signing: $signToolDisplay sign /fd SHA256 /sha1 <certificate thumbprint> /tr <HTTPS timestamp URL> /td SHA256 <MSI and NSIS packages>"
     Write-Host "Planned verification: $signToolDisplay verify /pa /all /v <each package>"
+    Write-Host "Planned stable channel: staged NSIS GitHub Release bundle with offline Authenticode, byte, version, SBOM, and dependency-obligation verification"
     exit 0
 }
 
@@ -284,10 +297,126 @@ try {
         signed = ($Mode -eq "Execute")
         timestamped = ($Mode -eq "Execute")
         promotedModelEmbedded = ($Mode -eq "Execute")
+        applicationUpdateChannel = "stable-staged-nsis"
+        applicationUpdateBundleProduced = ($Mode -eq "Execute")
         packageFixtureVersion = if ($fixtureVersion) { $fixtureVersion.ToString() } else { $null }
         packages = @($copied | Sort-Object Name | ForEach-Object { $_.Name })
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutputDir "release-manifest.json") -Encoding utf8NoBOM
+
+    if ($Mode -eq "Execute") {
+        New-Item -ItemType Directory -Path $DependencyEvidenceDir | Out-Null
+        $coreMetadata = Join-Path $DependencyEvidenceDir "core-metadata.json"
+        $windowsMetadata = Join-Path $DependencyEvidenceDir "windows-metadata.json"
+        $linuxMetadata = Join-Path $DependencyEvidenceDir "linux-metadata.json"
+        cargo metadata --manifest-path core/Cargo.toml --locked --format-version 1 |
+            Set-Content -LiteralPath $coreMetadata -Encoding utf8NoBOM
+        if ($LASTEXITCODE -ne 0) { throw "Core dependency metadata generation failed" }
+        cargo metadata --manifest-path platform/windows/src-tauri/Cargo.toml --locked --format-version 1 |
+            Set-Content -LiteralPath $windowsMetadata -Encoding utf8NoBOM
+        if ($LASTEXITCODE -ne 0) { throw "Windows dependency metadata generation failed" }
+        cargo metadata --manifest-path platform/linux/src-tauri/Cargo.toml --locked --format-version 1 |
+            Set-Content -LiteralPath $linuxMetadata -Encoding utf8NoBOM
+        if ($LASTEXITCODE -ne 0) { throw "Linux dependency metadata generation failed" }
+
+        $sbom = Join-Path $DependencyEvidenceDir "liveblock.cdx.json"
+        $licenseReport = Join-Path $DependencyEvidenceDir "dependency-licenses.json"
+        $obligationReport = Join-Path $DependencyEvidenceDir "dependency-obligations.json"
+        python tools/release_evidence.py sbom `
+            --cargo-metadata $coreMetadata `
+            --cargo-metadata $windowsMetadata `
+            --cargo-metadata $linuxMetadata `
+            --npm-lock platform/_shared-frontend/package-lock.json `
+            --license-decisions licenses/dependency-license-decisions.json `
+            --output $sbom `
+            --license-report $licenseReport `
+            --commit $commit
+        if ($LASTEXITCODE -ne 0) { throw "Production dependency SBOM/license generation failed" }
+        python tools/verify_dependency_obligations.py `
+            --license-report $licenseReport `
+            --license-decisions licenses/dependency-license-decisions.json `
+            --source-offer licenses/mpl-source-offer.json `
+            --cargo-lock core/Cargo.lock `
+            --cargo-lock platform/windows/Cargo.lock `
+            --cargo-lock platform/linux/Cargo.lock `
+            --output $obligationReport
+        if ($LASTEXITCODE -ne 0) { throw "Production dependency-obligation verification failed" }
+
+        New-Item -ItemType Directory -Path $UpdateBundleDir | Out-Null
+        $nsis = $copied | Where-Object Extension -eq ".exe" | Select-Object -First 1
+        $updateInstaller = Copy-Item -LiteralPath $nsis.FullName -Destination (Join-Path $UpdateBundleDir $nsis.Name) -PassThru
+        $updateSbom = Copy-Item -LiteralPath $sbom -Destination (Join-Path $UpdateBundleDir "liveblock.cdx.json") -PassThru
+        $updateLicenseReport = Copy-Item -LiteralPath $licenseReport -Destination (Join-Path $UpdateBundleDir "dependency-licenses.json") -PassThru
+        $updateObligationReport = Copy-Item -LiteralPath $obligationReport -Destination (Join-Path $UpdateBundleDir "dependency-obligations.json") -PassThru
+        $updateLicenseDecisions = Copy-Item -LiteralPath "licenses/dependency-license-decisions.json" -Destination (Join-Path $UpdateBundleDir "dependency-license-decisions.json") -PassThru
+        $updateMplSourceOffer = Copy-Item -LiteralPath "licenses/mpl-source-offer.json" -Destination (Join-Path $UpdateBundleDir "mpl-source-offer.json") -PassThru
+        $updateMplLicense = Copy-Item -LiteralPath "licenses/MPL-2.0.txt" -Destination (Join-Path $UpdateBundleDir "MPL-2.0.txt") -PassThru
+
+        $updateSignature = Get-AuthenticodeSignature -LiteralPath $updateInstaller.FullName
+        if ($updateSignature.Status -ne "Valid" -or -not $updateSignature.SignerCertificate -or -not $updateSignature.TimeStamperCertificate) {
+            throw "Staged NSIS update requires a valid Authenticode signer and RFC-3161 timestamp"
+        }
+        $signerCertificateSha256 = Get-CertificateSha256 $updateSignature.SignerCertificate
+        $timestampCertificateSha256 = Get-CertificateSha256 $updateSignature.TimeStamperCertificate
+        python tools/windows_application_update.py create `
+            --bundle $UpdateBundleDir `
+            --version ($currentPackageVersion.ToString()) `
+            --commit $commit `
+            --publisher-subject ($updateSignature.SignerCertificate.Subject) `
+            --certificate-sha256 $signerCertificateSha256 `
+            --timestamp-certificate-sha256 $timestampCertificateSha256 `
+            --installer $updateInstaller.FullName `
+            --sbom $updateSbom.FullName `
+            --license-report $updateLicenseReport.FullName `
+            --obligation-report $updateObligationReport.FullName `
+            --license-decisions $updateLicenseDecisions.FullName `
+            --mpl-source-offer $updateMplSourceOffer.FullName `
+            --mpl-license $updateMplLicense.FullName
+        if ($LASTEXITCODE -ne 0) { throw "Staged Windows application-update descriptor creation failed" }
+
+        $certificateThumbprint = $env:LB_WINDOWS_CERTIFICATE_SHA1.Replace(" ", "")
+        $descriptorSigningCertificate = Get-Item -LiteralPath "Cert:\CurrentUser\My\$certificateThumbprint" -ErrorAction Stop
+        if ((Get-CertificateSha256 $descriptorSigningCertificate) -ne $signerCertificateSha256) {
+            throw "Descriptor-signing certificate does not match the Authenticode signer"
+        }
+        $updateDescriptorPath = Join-Path $UpdateBundleDir "windows-application-update.json"
+        $updateDescriptorSignaturePath = Join-Path $UpdateBundleDir "windows-application-update.p7s"
+        $contentInfo = [Security.Cryptography.Pkcs.ContentInfo]::new([IO.File]::ReadAllBytes($updateDescriptorPath))
+        $detachedCms = [Security.Cryptography.Pkcs.SignedCms]::new($contentInfo, $true)
+        $cmsSigner = [Security.Cryptography.Pkcs.CmsSigner]::new($descriptorSigningCertificate)
+        $cmsSigner.DigestAlgorithm = [Security.Cryptography.Oid]::new("2.16.840.1.101.3.4.2.1")
+        $cmsSigner.IncludeOption = [Security.Cryptography.X509Certificates.X509IncludeOption]::EndCertOnly
+        $detachedCms.ComputeSignature($cmsSigner)
+        $encodedCms = $detachedCms.Encode()
+        $cmsStream = [IO.File]::Open($updateDescriptorSignaturePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $cmsStream.Write($encodedCms, 0, $encodedCms.Length)
+            $cmsStream.Flush($true)
+        } finally { $cmsStream.Dispose() }
+
+        & (Join-Path $Root "tools\verify_windows_application_update.ps1") `
+            -BundleDir $UpdateBundleDir `
+            -ExpectedSignerCertificateSha256 $signerCertificateSha256
+        python tools/release_evidence.py inventory `
+            --root $UpdateBundleDir `
+            --output $UpdateBundleInventory `
+            --platform windows-x86_64 `
+            --artifact-type windows-stable-staged-nsis-update `
+            --commit $commit `
+            --require windows-application-update.json `
+            --require windows-application-update.p7s `
+            --require ($updateInstaller.Name) `
+            --require liveblock.cdx.json `
+            --require dependency-licenses.json `
+            --require dependency-obligations.json `
+            --require dependency-license-decisions.json `
+            --require mpl-source-offer.json `
+            --require MPL-2.0.txt
+        if ($LASTEXITCODE -ne 0) { throw "Staged Windows application-update inventory creation failed" }
+        python tools/release_evidence.py verify --root $UpdateBundleDir --manifest $UpdateBundleInventory
+        if ($LASTEXITCODE -ne 0) { throw "Staged Windows application-update inventory verification failed" }
+    }
+
     Write-Host "Verified Windows package evidence: $OutputDir"
 } finally {
     if ($fixtureConfigOverride) {

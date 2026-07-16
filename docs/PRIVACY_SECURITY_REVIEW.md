@@ -79,6 +79,12 @@ bundle inventories.
 - Trash moves use atomic create-new semantics: Unix reserves a same-volume hard
   link before removing the source, while Windows rename fails when the
   destination exists. An existing destination is never replaced.
+- Windows and Linux serialize region, labeling-screenshot, label-save, and
+  discard mutations through one native gate. Quit sets its terminal flag before
+  waiting on that gate: an already-admitted mutation completes before exit, and
+  a queued renderer command fails after acquiring the gate rather than changing
+  persisted data during terminal teardown. Runtime detector toggles also reject
+  after the terminal flag.
 - Model update source paths are explicit user-selected package inputs, but the
   destination is fixed by native code. Content is accepted only after embedded
   keyring signature, exact artifact hash, sequence, schema, and production-load

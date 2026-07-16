@@ -12,6 +12,7 @@ LABELING = (ROOT / "platform/_shared-frontend/src/labeling.html").read_text()
 TRAINING_UI = (ROOT / "platform/_shared-frontend/src/training.html").read_text()
 MAC_CONTROLLER = (ROOT / "Sources/AppController.swift").read_text()
 WINDOWS_UPDATES = (ROOT / "platform/windows/src-tauri/src/model_updates.rs").read_text()
+WINDOWS_STATE = (ROOT / "platform/windows/src-tauri/src/state.rs").read_text()
 WINDOWS_LIFECYCLE = (ROOT / "platform/windows/src-tauri/src/lifecycle.rs").read_text()
 WINDOWS_CAPTURE_POLICY = (ROOT / "platform/windows/src-tauri/src/capture_policy.rs").read_text()
 WINDOWS_CONTROL_PANEL = (ROOT / "platform/_shared-frontend/src/control-panel.html").read_text()
@@ -236,6 +237,10 @@ class DesktopAdapterContractTests(unittest.TestCase):
         )
         self.assertLess(
             linux_quit.index("stop_capture_inner"),
+            linux_quit.index("state.persistent_mutation.lock()"),
+        )
+        self.assertLess(
+            linux_quit.index("state.persistent_mutation.lock()"),
             linux_quit.index("state.model_update.lock()"),
         )
         self.assertLess(
@@ -256,12 +261,29 @@ class DesktopAdapterContractTests(unittest.TestCase):
         )
         self.assertLess(
             windows_quit.index("stop_capture_inner"),
+            windows_quit.index("state.persistent_mutation.lock()"),
+        )
+        self.assertLess(
+            windows_quit.index("state.persistent_mutation.lock()"),
             windows_quit.index("state.model_update.lock()"),
         )
         self.assertLess(
             windows_quit.index("state.model_update.lock()"),
             windows_quit.index("app.exit(0)"),
         )
+
+    def test_persistent_renderer_mutations_are_terminally_gated(self):
+        for source, state_source in (
+            (WINDOWS, WINDOWS_STATE),
+            (LINUX, LINUX_STATE),
+        ):
+            self.assertIn("pub persistent_mutation: Mutex<()>", state_source)
+            self.assertIn("fn persistent_mutation_guard", source)
+            self.assertIn("persistent changes are unavailable during shutdown", source)
+            self.assertEqual(source.count("persistent_mutation_guard("), 8)
+            self.assertIn("runtime changes are unavailable during shutdown", source)
+        self.assertIn("state.shutting_down.load(Ordering::SeqCst)", WINDOWS)
+        self.assertIn("state.shutdown_requested.load(Ordering::SeqCst)", LINUX)
 
     def test_release_training_uses_shared_fail_closed_gate(self):
         for platform, source in (("Windows", WINDOWS), ("Linux", LINUX)):

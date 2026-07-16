@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use uuid::Uuid;
@@ -450,6 +450,15 @@ fn toggle_capture_action(app: &AppHandle, action_sequence: u64) {
     }
 }
 
+fn persistent_mutation_guard(state: &AppState) -> Result<MutexGuard<'_, ()>, String> {
+    let guard = state.persistent_mutation.lock();
+    if state.shutting_down.load(Ordering::SeqCst) {
+        Err("persistent changes are unavailable during shutdown".into())
+    } else {
+        Ok(guard)
+    }
+}
+
 fn cancel_detector_run(state: &AppState) {
     // Never wait for the detector mutex during panic/stop. RunOptions is held
     // separately so ORT can be asked to terminate an in-flight DirectML/CPU run.
@@ -476,6 +485,9 @@ fn quit_action(app: &AppHandle) {
         }
     }
     let _ = stop_capture_inner(state.inner());
+    // Finish an already-admitted region/label/screenshot write before exit;
+    // commands queued after the terminal flag fail when they acquire this gate.
+    let _mutation_guard = state.persistent_mutation.lock();
     // A verified update already holding this lock is crash-recoverable, but a
     // normal quit waits for its disk transaction instead of exiting mid-swap.
     let _update_guard = state.model_update.lock();
@@ -1142,6 +1154,9 @@ fn get_capture_telemetry(state: State<'_, AppState>) -> CaptureTelemetrySnapshot
 
 #[tauri::command]
 fn set_detection_enabled(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
+    if state.shutting_down.load(Ordering::SeqCst) {
+        return Err("runtime changes are unavailable during shutdown".into());
+    }
     state.detection_enabled.store(enabled, Ordering::Relaxed);
     Ok(())
 }
@@ -1153,6 +1168,7 @@ fn list_regions(state: State<'_, AppState>) -> Vec<NormalizedRegion> {
 
 #[tauri::command]
 fn add_region(region: NormalizedRegion, state: State<'_, AppState>) -> Result<NormalizedRegion, String> {
+    let _mutation_guard = persistent_mutation_guard(state.inner())?;
     state.regions.add(region.clone()).map_err(|e| e.to_string())?;
     let _ = state.app.emit("regions-updated", state.regions.current());
     Ok(region)
@@ -1160,6 +1176,7 @@ fn add_region(region: NormalizedRegion, state: State<'_, AppState>) -> Result<No
 
 #[tauri::command]
 fn replace_region(id: Uuid, region: NormalizedRegion, state: State<'_, AppState>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.inner())?;
     state.regions.replace_id(id, region).map_err(|e| e.to_string())?;
     let _ = state.app.emit("regions-updated", state.regions.current());
     Ok(())
@@ -1167,6 +1184,7 @@ fn replace_region(id: Uuid, region: NormalizedRegion, state: State<'_, AppState>
 
 #[tauri::command]
 fn delete_region(id: Uuid, state: State<'_, AppState>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.inner())?;
     state.regions.remove(id).map_err(|e| e.to_string())?;
     let _ = state.app.emit("regions-updated", state.regions.current());
     Ok(())
@@ -1174,6 +1192,7 @@ fn delete_region(id: Uuid, state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn clear_regions(state: State<'_, AppState>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.inner())?;
     state.regions.clear().map_err(|e| e.to_string())?;
     let _ = state.app.emit("regions-updated", state.regions.current());
     Ok(())
@@ -1185,6 +1204,7 @@ fn capture_screenshot_for_labeling(state: State<'_, AppState>) -> Result<Option<
 }
 
 fn capture_screenshot_for_labeling_inner(state: &AppState) -> Result<Option<PathBuf>, String> {
+    let _mutation_guard = persistent_mutation_guard(state)?;
     let frame = match state.capture.lock().as_ref() {
         Some(s) => s.latest_frame(),
         None => return Ok(None),
@@ -1269,7 +1289,12 @@ fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
 }
 
 #[tauri::command]
-fn save_label(path: PathBuf, doc: LabelDocument) -> Result<(), String> {
+fn save_label(
+    path: PathBuf,
+    doc: LabelDocument,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.inner())?;
     let path = paths::validate_label_path(&path, false).map_err(|e| e.to_string())?;
     if path.exists() {
         // Validate the existing discriminator before replacement. Unknown future
@@ -1292,7 +1317,8 @@ fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
 }
 
 #[tauri::command]
-fn discard_screenshot(path: PathBuf) -> Result<(), String> {
+fn discard_screenshot(path: PathBuf, state: State<'_, AppState>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.inner())?;
     let path = paths::validate_screenshot_path(&path).map_err(|e| e.to_string())?;
     let dst = paths::trash_dir().join(path.file_name().ok_or("no name")?);
     let label = paths::label_path_for(&path);

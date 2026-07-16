@@ -317,7 +317,11 @@ hashes:
 6. on Windows and Linux, queue an update behind the application mutex and then
    quit: the queued update must be rejected after acquiring the mutex; separately
    quit while an authenticated update already owns the mutex and verify windows
-   and capture hide/stop before quit waits for that transaction and exits.
+   and capture hide/stop before quit waits for that transaction and exits;
+7. queue region add/replace/delete/clear, labeling screenshot, label save, and
+   screenshot discard IPC immediately before and after Windows/Linux quit.
+   Already-admitted writes must finish before exit; commands acquiring the gate
+   after the terminal flag must fail without changing files or region state.
 
 Expected result: no partial document is accepted; authenticated previous state is
 restored where defined; future/malformed state remains untouched; no fallback to

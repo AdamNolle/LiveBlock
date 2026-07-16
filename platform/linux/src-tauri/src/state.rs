@@ -12,8 +12,45 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct CaptureRuntime {
+    pub generation: u64,
     pub stop_requested: Arc<AtomicBool>,
     pub task: tokio::task::JoinHandle<()>,
+}
+
+pub fn take_finished_capture_runtime(
+    runtime: &mut Option<CaptureRuntime>,
+) -> Option<CaptureRuntime> {
+    if runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.task.is_finished())
+    {
+        runtime.take()
+    } else {
+        None
+    }
+}
+
+pub struct LatestFrame {
+    pub generation: u64,
+    pub frame: FrameView,
+}
+
+pub fn advance_capture_generation(generation: &AtomicU64) -> u64 {
+    let next = generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    if next == 0 {
+        generation.store(1, Ordering::SeqCst);
+        1
+    } else {
+        next
+    }
+}
+
+pub fn frame_belongs_to_active_generation(
+    current_generation: u64,
+    capture_running: bool,
+    frame_generation: u64,
+) -> bool {
+    current_generation != 0 && capture_running && current_generation == frame_generation
 }
 
 #[derive(Default)]
@@ -75,9 +112,10 @@ impl CaptureTelemetry {
 pub struct AppState {
     pub region_store: SharedRegionStore,
     pub capture_running: AtomicBool,
+    pub capture_generation: AtomicU64,
     pub capture: tokio::sync::Mutex<Option<CaptureRuntime>>,
     pub capture_telemetry: CaptureTelemetry,
-    pub latest_frame: ArcSwapOption<FrameView>,
+    pub latest_frame: ArcSwapOption<LatestFrame>,
     pub hotkeys_initialized: AtomicBool,
     pub hotkeys_available: AtomicBool,
     pub detection_enabled: AtomicBool,
@@ -93,6 +131,7 @@ impl AppState {
         Arc::new(Self {
             region_store,
             capture_running: AtomicBool::new(false),
+            capture_generation: AtomicU64::new(0),
             capture: tokio::sync::Mutex::new(None),
             capture_telemetry: CaptureTelemetry::default(),
             latest_frame: ArcSwapOption::from(None),
@@ -113,4 +152,47 @@ fn unix_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_capture_runtime_is_reaped_but_live_runtime_is_retained() {
+        let finished_task = tokio::spawn(async {});
+        tokio::task::yield_now().await;
+        assert!(finished_task.is_finished());
+        let mut finished = Some(CaptureRuntime {
+            generation: 7,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            task: finished_task,
+        });
+        let reaped = take_finished_capture_runtime(&mut finished).unwrap();
+        assert_eq!(reaped.generation, 7);
+        reaped.task.await.unwrap();
+        assert!(finished.is_none());
+
+        let live_task = tokio::spawn(std::future::pending());
+        let mut live = Some(CaptureRuntime {
+            generation: 8,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            task: live_task,
+        });
+        assert!(take_finished_capture_runtime(&mut live).is_none());
+        let live = live.take().unwrap();
+        live.task.abort();
+        let _ = live.task.await;
+    }
+
+    #[test]
+    fn latest_frame_requires_running_matching_nonzero_generation() {
+        let generation = AtomicU64::new(u64::MAX);
+        assert_eq!(advance_capture_generation(&generation), 1);
+        assert_eq!(generation.load(Ordering::SeqCst), 1);
+        assert!(frame_belongs_to_active_generation(4, true, 4));
+        assert!(!frame_belongs_to_active_generation(0, true, 0));
+        assert!(!frame_belongs_to_active_generation(4, false, 4));
+        assert!(!frame_belongs_to_active_generation(5, true, 4));
+    }
 }

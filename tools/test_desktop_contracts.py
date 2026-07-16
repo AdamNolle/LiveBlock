@@ -21,7 +21,9 @@ LINUX_UPDATES = (ROOT / "platform/linux/src-tauri/src/model_updates.rs").read_te
 LINUX_DETECTION = (ROOT / "platform/linux/src-tauri/src/detection.rs").read_text()
 LINUX_INPAINTING = (ROOT / "platform/linux/src-tauri/src/inpainting.rs").read_text()
 LINUX_WAYLAND_CAPTURE = (ROOT / "platform/linux/src-tauri/src/capture/wayland.rs").read_text()
+LINUX_X11_CAPTURE = (ROOT / "platform/linux/src-tauri/src/capture/x11.rs").read_text()
 LINUX_CAPTURE = (ROOT / "platform/linux/src-tauri/src/capture/mod.rs").read_text()
+LINUX_STATE = (ROOT / "platform/linux/src-tauri/src/state.rs").read_text()
 LINUX_WGSL = (ROOT / "platform/linux/src-tauri/src/inpainting.wgsl").read_text()
 LINUX_BUILD = (ROOT / "platform/linux/src-tauri/build.rs").read_text()
 CI = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -173,6 +175,35 @@ class DesktopAdapterContractTests(unittest.TestCase):
         reset_case = LINUX.split("Ok(CaptureEvent::Reset) =>", 1)[1].split("Err(error) =>", 1)[0]
         self.assertLess(reset_case.index("state.latest_frame.store(None)"), reset_case.index('window.hide()'))
         self.assertIn("if !frame.is_valid_packed_bgra()", LINUX)
+
+    def test_linux_runtime_resize_and_labeling_work_are_generation_owned(self):
+        self.assertIn("task.is_finished()", LINUX_STATE)
+        self.assertIn("take_finished_capture_runtime", LINUX)
+        self.assertIn("advance_capture_generation(&state.capture_generation)", LINUX)
+        self.assertIn("owns_capture_generation", LINUX)
+        self.assertIn("frame_belongs_to_active_generation", LINUX)
+        self.assertIn("capture_screenshot_serialized", LINUX)
+        serialized = LINUX.split("async fn capture_screenshot_serialized", 1)[1].split(
+            "fn capture_screenshot_inner", 1
+        )[0]
+        self.assertIn("state.capture.lock().await", serialized)
+        self.assertIn("runtime.generation == state.capture_generation", serialized)
+        self.assertGreaterEqual(LINUX.count("screenshot_generation_is_current"), 4)
+        stale_cleanup = LINUX.split(
+            "if !screenshot_generation_is_current(state, generation)", 3
+        )[3]
+        self.assertIn("remove_file(&destination)", stale_cleanup)
+
+        self.assertIn("ROOT_GEOMETRY_CHECK_INTERVAL", LINUX_X11_CAPTURE)
+        self.assertIn("get_geometry(self.root)", LINUX_X11_CAPTURE)
+        self.assertIn("create_shm_mapping", LINUX_X11_CAPTURE)
+        self.assertIn("self.mapping = new_mapping", LINUX_X11_CAPTURE)
+        self.assertIn("Err(frame_error) => match self.refresh_root_geometry()", LINUX_X11_CAPTURE)
+        self.assertIn("return Ok(CaptureEvent::Reset)", LINUX_X11_CAPTURE)
+        self.assertLess(
+            LINUX_X11_CAPTURE.index("self.mapping = new_mapping"),
+            LINUX_X11_CAPTURE.index("return Ok(CaptureEvent::Reset)"),
+        )
 
     def test_release_training_uses_shared_fail_closed_gate(self):
         for platform, source in (("Windows", WINDOWS), ("Linux", LINUX)):

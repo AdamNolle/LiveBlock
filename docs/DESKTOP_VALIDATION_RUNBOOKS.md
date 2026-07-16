@@ -126,7 +126,14 @@ labeling capture, arrange for a queued auto-capture callback and the delayed onb
 **Try your first block** action immediately before panic, and verify neither can
 restart capture nor reopen a privacy-visible window afterward. Panic must turn
 auto-capture off. Repeat while stream teardown is deliberately slow and verify
-render/editor/labeling/training/HUD windows hide before teardown completes.
+render/editor/labeling/training/HUD windows hide before teardown completes. In a
+source/developer build, quit once during environment setup and once during an
+active training/export subprocess. Verify the exact owned process tree is
+terminated, no cancellation completion overwrites the terminal state, and no
+stale callback launches or terminates a later workflow. Repeat both through the
+in-app Quit action and the native Command-Q/application-termination path; both
+must return `terminateLater` until capture and owned background teardown are
+ready. Signed release packages must expose no source-training runtime.
 
 ### Assistive technology
 

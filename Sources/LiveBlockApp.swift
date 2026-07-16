@@ -321,6 +321,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeys.start()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !controller.quitIsReady else { return .terminateNow }
+        controller.quitWhenApplicationRequestsTermination {
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Closing the control panel must not quit the app — the menu bar /
         // Dock icon should keep it discoverable.

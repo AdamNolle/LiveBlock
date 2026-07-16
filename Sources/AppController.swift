@@ -145,6 +145,9 @@ final class AppController: ObservableObject {
     private var autoCaptureTimer: Timer?
     private var fullscreenMonitorTimer: Timer?
     private var screenRestartTask: Task<Void, Never>?
+    private var quitTask: Task<Void, Never>?
+    private var quitCompletionHandlers: [() -> Void] = []
+    private(set) var quitIsReady = false
     private var screenRestartWasRunning = false
     private var userActionPolicy = MacUserActionSequencePolicy()
     private var autoCaptureGeneration: UInt64 = 0
@@ -506,17 +509,40 @@ final class AppController: ObservableObject {
     }
 
     func quit() {
+        beginQuit()
+    }
+
+    func quitWhenApplicationRequestsTermination(_ completion: @escaping () -> Void) {
+        guard !quitIsReady else {
+            completion()
+            return
+        }
+        quitCompletionHandlers.append(completion)
+        beginQuit()
+    }
+
+    private func beginQuit() {
+        guard quitTask == nil else { return }
         userActionPolicy.claimShutdown()
         screenRestartWasRunning = false
         screenRestartTask?.cancel()
         autoCaptureEnabled = false
         hidePrivacyWindowsForTerminalAction()
-        Task { @MainActor [weak self] in
+        let trainingShutdownTask = trainingController.prepareForShutdown()
+        quitTask = Task { @MainActor [weak self] in
             guard let self else { return }
             if self.isRunning || self.captureManager.captureDesired {
                 await self.captureManager.stop()
             }
-            NSApp.terminate(nil)
+            await trainingShutdownTask?.value
+            self.quitIsReady = true
+            let completions = self.quitCompletionHandlers
+            self.quitCompletionHandlers.removeAll()
+            if completions.isEmpty {
+                NSApp.terminate(nil)
+            } else {
+                completions.forEach { $0() }
+            }
         }
     }
 
@@ -605,14 +631,15 @@ final class AppController: ObservableObject {
     /// Select and install a signed offline update package. The package supplies
     /// no trust root; only the keyring embedded in the signed app is accepted.
     func chooseAndInstallSignedModelUpdate() {
-        guard !modelUpdateInProgress else { return }
+        guard !userActionPolicy.shutdownRequested, !modelUpdateInProgress else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose signed LiveBlock model update"
         panel.prompt = "Verify and install"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let package = panel.url else { return }
+        guard panel.runModal() == .OK, let package = panel.url,
+              !userActionPolicy.shutdownRequested else { return }
 
         modelUpdateInProgress = true
         modelUpdateStatus = "Verifying signed model update…"
@@ -623,15 +650,16 @@ final class AppController: ObservableObject {
                     captureManager.reloadDetectionModel()
                 }
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
+                    guard let self, !self.userActionPolicy.shutdownRequested else { return }
                     self.labelingController.reloadDetectionModel()
                     self.modelUpdateStatus = "Installed model \(receipt.modelVersion) (sequence \(receipt.releaseSequence))."
                     self.modelUpdateInProgress = false
                 }
             } catch {
                 Task { @MainActor [weak self] in
-                    self?.modelUpdateStatus = "Model update rejected: \(error.localizedDescription)"
-                    self?.modelUpdateInProgress = false
+                    guard let self, !self.userActionPolicy.shutdownRequested else { return }
+                    self.modelUpdateStatus = "Model update rejected: \(error.localizedDescription)"
+                    self.modelUpdateInProgress = false
                 }
             }
         }
@@ -656,6 +684,7 @@ final class AppController: ObservableObject {
         miniHUDWindow?.orderOut(nil)
     }
     func showOnboarding() {
+        guard !userActionPolicy.shutdownRequested else { return }
         guard let win = onboardingWindow else {
             NSLog("AppController.showOnboarding: onboardingWindow is nil.")
             return
@@ -667,6 +696,7 @@ final class AppController: ObservableObject {
     /// Re-show onboarding even if the user finished it before. Surfaced
     /// from the menu bar so users can re-watch the tour.
     func restartOnboarding() {
+        guard !userActionPolicy.shutdownRequested else { return }
         UserDefaults.standard.set(false, forKey: "didOnboard")
         showOnboarding()
     }

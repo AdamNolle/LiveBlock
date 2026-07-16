@@ -74,8 +74,15 @@ against `trusted-model-keys.json` embedded in the signed app, checks the complet
 tree hash and monotonic release sequence, copies without trusting symlinks,
 loads through production CoreML, fsyncs, atomically exchanges directories, and
 commits signed schema-1 state. Startup reauthenticates and recovers an interrupted
-swap before inference. A rejected accepted update never falls back to an older
-bundle; a newer authenticated packaged release is the only baseline override.
+swap before inference. Quit installs a terminal action barrier and cancels any
+source/developer environment or training subprocess before capture teardown. An
+in-flight verified developer installation is not killed between replacement
+steps; quit waits for that owned transaction while suppressing stale callbacks.
+The native updater does not attempt an unsafe synthetic rollback on process
+termination: interruption at any transaction boundary is recovered and
+reauthenticated on the next launch. A
+rejected accepted update never falls back to an older bundle; a newer
+authenticated packaged release is the only baseline override.
 
 The committed keyring is deliberately empty. `tools/release_macos.sh --execute`
 and the Xcode Release build phase require `LB_MACOS_MODEL_BUNDLE_DIR` containing

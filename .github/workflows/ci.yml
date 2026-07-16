@@ -43,7 +43,7 @@ jobs:
       - name: Label and desktop adapter contract tests
         env:
           PYTHONPATH: tools
-        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_dependency_obligations tools.test_macos_accessibility tools.test_flatpak_sources tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_runtime_staging tools.test_windows_packaging
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_dependency_obligations tools.test_macos_accessibility tools.test_flatpak_sources tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_runtime_staging tools.test_windows_packaging tools.test_windows_application_update
       - name: Explicit migration, installer, and update recovery gates
         env:
           PYTHONPATH: tools
@@ -65,6 +65,7 @@ jobs:
           python -m json.tool contracts/model-keyring.schema.json >/dev/null
           python -m json.tool contracts/model-update-state.schema.json >/dev/null
           python -m json.tool contracts/release-artifact-inventory.schema.json >/dev/null
+          python -m json.tool contracts/windows-application-update.schema.json >/dev/null
       - name: Shared frontend build
         working-directory: platform/_shared-frontend
         run: npm ci && npm run build
@@ -195,6 +196,18 @@ jobs:
       - name: Build shared frontend
         working-directory: platform/_shared-frontend
         run: npm ci && npm run build
+      - name: Validate Windows release PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($path in @("tools/release_windows.ps1", "tools/verify_windows_application_update.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -ne 0) {
+              $messages = ($errors | ForEach-Object { $_.Message }) -join "`n"
+              throw "PowerShell syntax validation failed for $path`n$messages"
+            }
+          }
       - name: Compile Windows adapter (debug and release, all targets)
         run: |
           cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets

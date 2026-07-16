@@ -66,10 +66,38 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertIn("onnxruntime-LICENSE.txt", SCRIPT)
         self.assertIn("Remove-Item -LiteralPath $RuntimeStaging", SCRIPT)
         self.assertIn("Do not distribute these installers", DOC)
-        self.assertIn("MSIX creation", DOC)
-        self.assertIn("not implemented", DOC)
-        self.assertIn("remains open", DOC)
+        self.assertIn("MSIX/App Installer", DOC)
+        self.assertIn("unimplemented", DOC)
+        self.assertIn("remain required", DOC)
         self.assertIn("empty development trust", DOC)
+
+    def test_execute_emits_selected_staged_nsis_update_with_obligations(self):
+        self.assertIn('applicationUpdateChannel = "stable-staged-nsis"', SCRIPT)
+        self.assertIn("applicationUpdateBundleProduced = ($Mode -eq \"Execute\")", SCRIPT)
+        self.assertIn('if ($Mode -eq "Execute")', SCRIPT)
+        self.assertIn("windows_application_update.py create", SCRIPT)
+        self.assertIn("verify_windows_application_update.ps1", SCRIPT)
+        self.assertIn("Get-CertificateSha256", SCRIPT)
+        self.assertIn("TimeStamperCertificate", SCRIPT)
+        self.assertIn("Pkcs.SignedCms", SCRIPT)
+        self.assertIn("windows-application-update.p7s", SCRIPT)
+        self.assertIn("FileMode]::CreateNew", SCRIPT)
+        self.assertIn("windows-stable-staged-nsis-update", SCRIPT)
+        for required in (
+            "liveblock.cdx.json",
+            "dependency-licenses.json",
+            "dependency-obligations.json",
+            "dependency-license-decisions.json",
+            "mpl-source-offer.json",
+            "MPL-2.0.txt",
+        ):
+            self.assertIn(required, SCRIPT)
+        self.assertIn("Validate Windows release PowerShell syntax", CI)
+        self.assertIn("verify_windows_application_update.ps1", CI)
+        self.assertIn("stable staged NSIS", DOC)
+        self.assertIn("does not auto-download", DOC)
+        self.assertIn("independently supplied trusted SHA-256", DOC)
+        self.assertIn("BuildOnly packages cannot", DOC)
 
     def test_production_build_cryptographically_requires_complete_model_resources(self):
         self.assertIn("resources/liveblock-detector.onnx", BUILD_RS)

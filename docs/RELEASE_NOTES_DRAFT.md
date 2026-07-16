@@ -108,18 +108,28 @@ No current platform profile reports `releaseReady: true`.
 - DirectML/CPU provider execution, NVIDIA/AMD/Intel performance, mixed-DPI
   overlays, capture exclusion, games, DRM, and anti-cheat behavior lack
   real-device evidence.
-- CI builds and inventories unsigned MSI/NSIS bytes only. Credential-gated
-  Authenticode/timestamp automation exists but has not run; MSIX, application
-  updates, and real install/upgrade/uninstall execution remain open.
+- CI builds/inventories unsigned MSI/NSIS BuildOnly bytes and exercises prior
+  install, current upgrade, same-version repair/reinstall, downgrade rejection,
+  bounded launch, data preservation, and uninstall. The selected production
+  application-update contract is an externally staged, offline-verified,
+  Authenticode-signed/timestamped NSIS GitHub Release bundle carrying exact SBOM
+  and dependency-obligation evidence. Credentials, publication, signed lifecycle,
+  and historical-release compatibility remain open; MSIX/App Installer is not an
+  alternate channel and remains unimplemented.
 
 ### Linux
 
 - PipeWire DMA-BUF-only buffers and compositor-specific resize/revocation need
   implementation/evidence; current conversion covers mapped buffers.
-- wgpu/WGSL inpainting/compositing is not implemented; current path is CPU.
-- CPU ORT is the only packaging baseline. CUDA/ROCm/OpenVINO/TensorRT provider
-  packaging and selection are open.
-- Flatpak and native packages are not production-complete or signed.
+- Bounded wgpu/WGSL patch generation is implemented with hosted software-adapter
+  parity and permanent CPU fallback; patches are read back for webview composition.
+  Real Vulkan/GL GPU and zero-copy compositor execution remain uncertified.
+- Official ONNX Runtime 1.18.1 CPU is the packaged baseline. CUDA/ROCm/OpenVINO/
+  TensorRT provider binaries, transitive dependencies, notices, and execution are
+  open.
+- Deb, RPM, AppImage, and offline GNOME 50 Flatpak BuildOnly packages have
+  inventory and lifecycle evidence, but are unsigned, empty-keyring, no-model,
+  local-repository artifacts and are not production distribution.
 - Real portal approval/revocation, layer placement, pointer click-through,
   multi-output, suspend, and compositor matrices are unverified.
 - GNOME Wayland cannot provide feature-equivalent global click-through and is
@@ -127,8 +137,9 @@ No current platform profile reports `releaseReady: true`.
 
 ### General
 
-- CI proves contracts, tests, and native compilation—not real capture, GPU,
-  installer, signing, accessibility, power-loss, or hardware behavior.
+- CI proves contracts, native compilation, and explicitly scoped BuildOnly
+  installer mechanics—not production signed-package execution, real capture,
+  physical-GPU, accessibility, power-loss, or hardware behavior.
 - Opaque-black handling means **possible protected or unavailable content**; it
   is not definitive DRM detection.
 - LiveBlock does not inject into applications, hook games, or bypass anti-cheat.

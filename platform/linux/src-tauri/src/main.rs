@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
-use crate::capture::{open_capture, CaptureSource, FrameView};
+use crate::capture::{open_capture, CaptureEvent, CaptureSource, FrameView};
 use crate::detection::DetBox;
 use crate::inpainting::PatchPayload;
 use crate::labels::{LabelDocument, ScreenshotEntry};
@@ -238,23 +238,35 @@ async fn run_capture_loop(
     let mut announced_running = false;
     while !stop_requested.load(Ordering::Acquire) {
         let frame_result = tokio::select! {
-            frame = source.next_frame() => Some(frame),
+            frame = source.next_event() => Some(frame),
             _ = wait_for_stop(stop_requested.clone()) => None,
         };
         let Some(frame_result) = frame_result else { break; };
         let frame = match frame_result {
-            Ok(frame) => frame,
+            Ok(CaptureEvent::Frame(frame)) => frame,
+            Ok(CaptureEvent::Reset) => {
+                announced_running = false;
+                recent_detections = (
+                    Instant::now() - Duration::from_secs(1),
+                    Vec::new(),
+                );
+                state.capture_running.store(false, Ordering::SeqCst);
+                state.latest_frame.store(None);
+                *state.current_patches.lock() = Vec::new();
+                let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+                if let Some(window) = app.get_webview_window("render") {
+                    let _ = window.hide();
+                }
+                let _ = app.emit("capture-state-changed", false);
+                continue;
+            }
             Err(error) => {
                 state.capture_telemetry.copy_error();
                 failure = Some(error.to_string());
                 break;
             }
         };
-        if frame.width == 0
-            || frame.height == 0
-            || frame.stride != frame.width * 4
-            || frame.pixels.len() != frame.width as usize * frame.height as usize * 4
-        {
+        if !frame.is_valid_packed_bgra() {
             state.capture_telemetry.copy_error();
             failure = Some("capture backend returned an invalid BGRA frame".into());
             break;

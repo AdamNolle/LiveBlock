@@ -265,7 +265,14 @@ evidence.
 
 For KDE Wayland and each wlroots target, test portal denial, approval, remembered
 selection, revocation, PipeWire stream end, format negotiation, resize, and
-DMA-BUF-only offers. For X11, test MIT-SHM/XComposite availability and a real
+DMA-BUF-only offers. Revocation or an unexpected post-connect `Unconnected`
+state must clear frames/patches, hide rendering, publish stopped, and surface a
+specific local error; an explicit stop must not publish that error. A valid
+renegotiated format/size must replace the old dimensions. Format removal must
+clear the active layout immediately, allow at most two seconds for a replacement,
+and then fail closed; malformed, unsupported, zero, or over-16384 format data
+must fail immediately rather than process a stale layout. For X11, test
+MIT-SHM/XComposite availability and a real
 `XGrabKey` conflict. Test multi-output layouts, negative origins where exposed,
 scaling, hot-plug, 10 suspend/resume and lock/unlock cycles, and compositor
 restart. Verify layer-shell/XFixes click-through using an independent pointer

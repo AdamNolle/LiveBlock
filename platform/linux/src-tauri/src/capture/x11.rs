@@ -2,7 +2,7 @@
 //! We do not claim root redirection ownership because the desktop compositor
 //! may already own it; root GetImage reads the final composited desktop.
 
-use super::{CaptureSource, FrameView};
+use super::{CaptureEvent, CaptureSource, FrameView};
 use anyhow::{anyhow, Context, Result};
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::File;
@@ -163,8 +163,8 @@ impl Drop for X11Capture {
 
 #[async_trait::async_trait]
 impl CaptureSource for X11Capture {
-    async fn next_frame(&mut self) -> Result<FrameView> {
-        self.capture_frame()
+    async fn next_event(&mut self) -> Result<CaptureEvent> {
+        self.capture_frame().map(CaptureEvent::Frame)
     }
     async fn stop(&mut self) {
         self.cleanup();

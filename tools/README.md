@@ -21,6 +21,22 @@ the LiveBlock app. Everything runs on Apple Silicon via PyTorch's `mps` backend
 
 Pick the path that matches the time you have.
 
+## Finish the sports-ad human review
+
+Before release training, an attributable person must verify the 21 independent
+sports-ad representatives. Launch the local-only browser reviewer from the
+repository root:
+
+```bash
+./tools/review_sports_ads.sh
+```
+
+The page opens automatically, asks once for your name or email, shows source and
+license context, and records only decisions you personally attest. Correct
+sponsor boxes, protected team/name/number regions, and contextual hard negatives.
+No AI approval counts as human review. Detailed instructions are in
+[`docs/SPORTS_ADS_HUMAN_REVIEW.md`](../docs/SPORTS_ADS_HUMAN_REVIEW.md).
+
 ---
 
 ## Hands-off training (set it and forget it)

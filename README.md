@@ -231,6 +231,11 @@ LiveBlock/
 | Detector             | Runtime taxonomy is Logo / Ad banner / Sponsored, but human review is 0/21 and no candidate passes schema-5; nothing is promotable or distributable. |
 | Code signing         | Stable self-signed development identity plus a fail-closed Developer ID/notarization runbook in [`docs/MACOS_RELEASE.md`](docs/MACOS_RELEASE.md); production execution still requires genuine credentials. |
 
+To unblock detector work, an attributable person can run the local-only guided
+reviewer with `./tools/review_sports_ads.sh`; see
+[`SPORTS_ADS_HUMAN_REVIEW.md`](docs/SPORTS_ADS_HUMAN_REVIEW.md). AI actions do
+not count as human review.
+
 ## Roadmap
 
 - Build and gate a representative detector evaluation corpus with per-class precision/recall targets.

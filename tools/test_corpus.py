@@ -1,11 +1,14 @@
 import hashlib
+import http.client
 import json
+import threading
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from PIL import Image
 import pytest
 
-from corpus.build_sports_corpus import build, split_for
+from corpus.build_sports_corpus import HUMAN_REVIEW_ATTESTATION, build, split_for
 from corpus.export_eval_fixtures import export as export_eval_fixtures
 from corpus.fetch_wikimedia import fetch_category, fetch_query
 from corpus.propose_labels import predict_yolo
@@ -13,8 +16,10 @@ from corpus.review_labels import (REQUIRED_PROMOTION_NEGATIVE_PLACEMENTS,
                                   REQUIRED_PROMOTION_PLACEMENTS,
                                   REQUIRED_PROMOTION_PRESERVATION_KINDS, filter_queue,
                                   load_plan_details, load_plan_paths, review_plan,
-                                  review_plan_status, review_queue, review_state_sha256,
-                                  review_summary, save_rejection, save_review)
+                                  ReviewSession, handler_for, review_plan_status,
+                                  review_queue, review_state_sha256, review_summary,
+                                  save_rejection, save_review,
+                                  validate_reviewer_identity)
 from install_verified_model import install
 from validate_coreml_detector import percentile
 import verify_promotion
@@ -45,6 +50,7 @@ def make_item(root: Path, name: str, *, boxes: list[dict], group: str,
     if review_method is not None:
         labels["review_method"] = review_method
     if review_method == "human":
+        labels["review_attestation"] = HUMAN_REVIEW_ATTESTATION
         labels["reviewed_by"] = "test-reviewer"
         labels["reviewed_at"] = "2026-01-01T00:00:00+00:00"
     if preserve_regions is not None:
@@ -67,6 +73,7 @@ def test_human_review_queue_and_atomic_approval(tmp_path):
     saved = json.loads(destination.read_text())
     assert saved["review_method"] == "human"
     assert saved["reviewed"] is True
+    assert saved["review_attestation"] == HUMAN_REVIEW_ATTESTATION
     assert saved["reviewed_by"] == "reviewer@example.test"
     assert saved["reviewed_at"].endswith("+00:00")
     assert "confidence" not in saved["boxes"][0]
@@ -76,6 +83,113 @@ def test_human_review_queue_and_atomic_approval(tmp_path):
     assert summary["human_images"] == 1
     assert summary["placement_source_groups"]["jersey"]["human"] == 1
     assert summary["preservation_source_groups"]["jersey_number"]["human"] == 1
+
+
+def test_reviewer_identity_is_required_printable_and_immutable():
+    session = ReviewSession()
+    with pytest.raises(ValueError, match="required"):
+        session.require_reviewer()
+    with pytest.raises(ValueError, match="printable"):
+        validate_reviewer_identity("human\nreviewer")
+    assert session.set_reviewer(" reviewer@example.test ") == "reviewer@example.test"
+    assert session.require_reviewer() == "reviewer@example.test"
+    assert session.set_reviewer("reviewer@example.test") == "reviewer@example.test"
+    with pytest.raises(ValueError, match="fixed"):
+        session.set_reviewer("someone-else")
+
+
+def test_review_server_prompts_for_one_reviewer_and_reports_plan_progress(tmp_path):
+    source = tmp_path / "source"
+    make_item(source, "candidate", boxes=[], group="event",
+              review_method="independent_visual_ai_review")
+    session = ReviewSession()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        handler_for(source, session, {"candidate.png"}, {"candidate.png": ["placement:jersey"]}),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    credentials = {"token": ""}
+
+    def request(method, path, payload=None, *, include_token=True, origin=None):
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        body = json.dumps(payload).encode() if payload is not None else None
+        headers = {}
+        if body is not None:
+            headers = {
+                "Content-Type": "application/json",
+                "Origin": origin or f"http://127.0.0.1:{server.server_port}",
+            }
+            if include_token and credentials["token"]:
+                headers["X-LiveBlock-Review-Token"] = credentials["token"]
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        data = response.read()
+        connection.close()
+        return response.status, json.loads(data) if data.startswith((b"{", b"[")) else data.decode()
+
+    try:
+        status, payload = request("GET", "/api/session")
+        assert status == 200 and payload["reviewer"] == ""
+        assert payload["reviewToken"]
+        credentials["token"] = payload["reviewToken"]
+        status, queue = request("GET", "/api/items")
+        assert status == 200 and len(queue) == 1
+        revision = queue[0]["review_revision"]
+        decision = {
+            "path": "candidate.png", "review_revision": revision, "attested": True,
+            "boxes": [], "preserve_regions": [], "negative_placements": ["jersey"],
+        }
+        status, message = request("POST", "/api/label", decision)
+        assert status == 400 and "reviewer" in message
+        status, message = request(
+            "POST", "/api/session", {"reviewer": "human@example.test"},
+            origin="https://attacker.example",
+        )
+        assert status == 400 and "Origin" in message
+        status, message = request(
+            "POST", "/api/session", {"reviewer": "human@example.test"}, include_token=False
+        )
+        assert status == 400 and "token" in message
+        status, payload = request("POST", "/api/session", {"reviewer": "human@example.test"})
+        assert status == 200 and payload == {"reviewer": "human@example.test"}
+        status, message = request("POST", "/api/session", {"reviewer": "other@example.test"})
+        assert status == 400 and "fixed" in message
+        unattested = dict(decision, attested=False)
+        status, message = request("POST", "/api/label", unattested)
+        assert status == 400 and "attestation" in message
+        status, payload = request("GET", "/api/status")
+        assert status == 200 and payload["counts"] == {
+            "approved": 0, "excluded": 0, "missing": 0, "pending": 1,
+        }
+        status, _payload = request("POST", "/api/label", decision)
+        assert status == 200
+        status, message = request("POST", "/api/label", decision)
+        assert status == 400 and "no longer pending" in message
+        status, payload = request("GET", "/api/status")
+        assert status == 200 and payload["counts"]["approved"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_failed_review_replace_preserves_previous_sidecar_and_cleans_temp(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    make_item(source, "candidate", boxes=[], group="event",
+              review_method="independent_visual_ai_review")
+    sidecar = source / "candidate.png.labels.json"
+    original = sidecar.read_bytes()
+
+    def fail_replace(_source, _destination):
+        raise OSError("injected replacement failure")
+
+    monkeypatch.setattr("corpus.review_labels.os.replace", fail_replace)
+    with pytest.raises(OSError, match="injected"):
+        save_review(source, "candidate.png", [], reviewer="human")
+    assert sidecar.read_bytes() == original
+    assert list(source.glob(".candidate.png.labels.json.*.tmp")) == []
 
 
 def test_review_queue_prioritizes_and_summarizes_contextual_hard_negatives(tmp_path):
@@ -476,6 +590,19 @@ def test_build_rejects_human_review_without_reviewer_provenance(tmp_path):
     with pytest.raises(ValueError, match="no reviewed"):
         build(source, tmp_path / "output", val_fraction=0, test_fraction=0,
               review_methods={"human"})
+
+
+def test_build_rejects_human_review_without_personal_attestation(tmp_path):
+    source = tmp_path / "source"
+    make_item(source, "unattested", boxes=[], group="event", review_method="human")
+    labels_path = source / "unattested.png.labels.json"
+    labels = json.loads(labels_path.read_text())
+    labels.pop("review_attestation")
+    labels_path.write_text(json.dumps(labels))
+    with pytest.raises(ValueError, match="no reviewed"):
+        build(source, tmp_path / "output", val_fraction=0, test_fraction=0,
+              review_methods={"human"})
+    assert review_queue(source)[0]["path"] == "unattested.png"
 
 
 def test_build_can_require_explicit_human_review(tmp_path):

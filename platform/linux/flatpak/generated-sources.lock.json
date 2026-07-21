@@ -6,7 +6,7 @@
   },
   "cargo": {
     "input": "../Cargo.lock",
-    "inputSha256": "de665f2ccf1039cbdf76643a1aa0b94889376983b3e8965d1a3c1cb37991d01c",
+    "inputSha256": "6d4b6a711008343e6e1dc6781492f2af380bf218f4c3baf5c52a770dabf91a2a",
     "output": "cargo-sources.json",
     "outputSha256": "6e0c8188fa041601b643d1599a143759c4dfa82d8ca734bee760ffa52af32e9a",
     "command": "python3 cargo/flatpak-cargo-generator.py platform/linux/Cargo.lock -o platform/linux/flatpak/cargo-sources.json"

@@ -43,6 +43,7 @@ PLACEMENT_KINDS = {
 ALLOWED_LICENSES = {
     "cc0", "public domain", "pd", "cc by 2.0", "cc by 3.0", "cc by 4.0", "mit",
 }
+HUMAN_REVIEW_ATTESTATION = "personally-inspected-full-image-v1"
 
 
 def normalized_license(value: str) -> str:
@@ -182,7 +183,12 @@ def build(root: Path, output: Path, val_fraction: float, test_fraction: float,
                 parsed_reviewed_at = datetime.fromisoformat(reviewed_at.replace("Z", "+00:00"))
             except ValueError:
                 parsed_reviewed_at = None
-            if not reviewer or parsed_reviewed_at is None or parsed_reviewed_at.tzinfo is None:
+            if (
+                not reviewer
+                or parsed_reviewed_at is None
+                or parsed_reviewed_at.tzinfo is None
+                or labels_doc.get("review_attestation") != HUMAN_REVIEW_ATTESTATION
+            ):
                 skipped["human_review_provenance"] += 1
                 continue
             if labels_doc.get("excluded") is True:

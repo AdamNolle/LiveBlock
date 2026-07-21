@@ -11,40 +11,66 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
+import tempfile
+import threading
 import urllib.parse
+import webbrowser
 from collections import defaultdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from corpus.build_sports_corpus import (PLACEMENT_KINDS,
+from corpus.build_sports_corpus import (HUMAN_REVIEW_ATTESTATION, PLACEMENT_KINDS,
                                         REQUIRED_PROMOTION_NEGATIVE_PLACEMENTS,
                                         REQUIRED_PROMOTION_PLACEMENTS,
                                         REQUIRED_PROMOTION_PRESERVATION_KINDS,
                                         validate_box, validate_preserve_region)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-HTML = r"""<!doctype html><meta charset="utf-8"><title>LiveBlock corpus review</title>
-<style>
-body{font:14px system-ui;background:#111;color:#eee;margin:0}header{position:sticky;top:0;background:#1b1b1b;padding:10px;display:flex;gap:8px;align-items:center;z-index:2}button,select{font:inherit;padding:6px}#stage{position:relative;margin:16px auto;width:min(94vw,1200px)}img{display:block;width:100%;user-select:none}canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}.meta{margin-left:auto;color:#aaa}#help{padding:0 16px 16px;color:#aaa}
-</style>
-<header><button id="prev">←</button><button id="next">→</button><select id="mode"><option value="block">Block sponsor</option><option value="keep">Keep team identity</option></select><select id="cls"><option>Logo</option><option>Ad banner</option><option>Sponsored</option></select><select id="place"><option>car_livery</option><option>jersey</option><option>venue_board</option><option>broadcast_overlay</option><option>ordinary_screen</option><option>helmet</option></select><select id="keep"><option value="team_name">team name</option><option value="jersey_number">jersey number</option><option value="vehicle_number">vehicle number</option><option value="team_crest">team crest</option><option value="manufacturer_badge">manufacturer badge</option></select><span id="negative">Hard negative: <label><input type="checkbox" value="ordinary_screen">screen</label><label><input type="checkbox" value="broadcast_overlay">broadcast</label><label><input type="checkbox" value="jersey">jersey</label><label><input type="checkbox" value="car_livery">car</label><label><input type="checkbox" value="venue_board">venue</label><label><input type="checkbox" value="helmet">helmet</label></span><button id="undo">Delete last</button><button id="approve">Approve human review</button><button id="reject">Reject unusable</button><span class="meta" id="meta"></span></header>
-<div id="stage"><img id="image"><canvas id="canvas"></canvas></div><div id="help">Choose “Block sponsor” only for paid brand marks, ads, and sponsorship labels. Choose “Keep team identity” for team names, jersey numbers, and team crests. Drag to add a box; click an existing box to delete it. Approval writes the sidecar atomically. Keyboard: ←/→ navigate, Ctrl/Cmd+Enter approve.</div>
-<script>
-let items=[], index=0, boxes=[], preserveRegions=[], negativePlacements=[], drag=null,lastAdded=null;const img=document.querySelector('#image'),canvas=document.querySelector('#canvas'),ctx=canvas.getContext('2d'),meta=document.querySelector('#meta');
-async function boot(){items=await (await fetch('/api/items')).json();show(0)}
-function show(i){if(!items.length){meta.textContent='No pending items';return}index=(i+items.length)%items.length;let it=items[index];boxes=structuredClone(it.labels.boxes||[]);preserveRegions=structuredClone(it.labels.preserve_regions||[]);negativePlacements=structuredClone(it.labels.negative_placements||[]);document.querySelectorAll('#negative input').forEach(input=>input.checked=negativePlacements.includes(input.value));lastAdded=null;img.src='/image?path='+encodeURIComponent(it.path);let covers=(it.plan_covers||[]).length?` · PLAN: ${it.plan_covers.join(', ')}`:'';meta.textContent=`${index+1}/${items.length} · priority ${it.priority} · ${it.path} · ${it.labels.review_method||'unreviewed'}${covers} · ${it.priority_reasons.join('; ')}`;img.onload=resize}
-function resize(){canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;draw()}
-function draw(){ctx.clearRect(0,0,canvas.width,canvas.height);ctx.lineWidth=Math.max(2,canvas.width/600);boxes.forEach((b,i)=>{ctx.strokeStyle=['#00ff88','#ffcc00','#ff55cc'][['Logo','Ad banner','Sponsored'].indexOf(b.class)]||'#fff';ctx.strokeRect(b.x*canvas.width,b.y*canvas.height,b.width*canvas.width,b.height*canvas.height);ctx.fillStyle=ctx.strokeStyle;ctx.fillText(`${i+1} ${b.class} · ${b.placement}`,b.x*canvas.width+3,b.y*canvas.height+14)});preserveRegions.forEach((b,i)=>{ctx.strokeStyle='#55ddff';ctx.strokeRect(b.x*canvas.width,b.y*canvas.height,b.width*canvas.width,b.height*canvas.height);ctx.fillStyle=ctx.strokeStyle;ctx.fillText(`KEEP ${i+1} · ${b.kind}`,b.x*canvas.width+3,b.y*canvas.height+14)});if(drag){ctx.strokeStyle='#fff';ctx.strokeRect(drag.x,drag.y,drag.w,drag.h)}}
-function point(e){let r=canvas.getBoundingClientRect();return{x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height}}
-canvas.onmousedown=e=>{let p=point(e);let hit=boxes.findIndex(b=>p.x>=b.x*canvas.width&&p.x<=(b.x+b.width)*canvas.width&&p.y>=b.y*canvas.height&&p.y<=(b.y+b.height)*canvas.height);if(hit>=0){boxes.splice(hit,1);draw();return}let keepHit=preserveRegions.findIndex(b=>p.x>=b.x*canvas.width&&p.x<=(b.x+b.width)*canvas.width&&p.y>=b.y*canvas.height&&p.y<=(b.y+b.height)*canvas.height);if(keepHit>=0){preserveRegions.splice(keepHit,1);draw();return}drag={x:p.x,y:p.y,w:0,h:0}}
-canvas.onmousemove=e=>{if(!drag)return;let p=point(e);drag.w=p.x-drag.x;drag.h=p.y-drag.y;draw()}
-canvas.onmouseup=()=>{if(!drag)return;let x=Math.min(drag.x,drag.x+drag.w),y=Math.min(drag.y,drag.y+drag.h),w=Math.abs(drag.w),h=Math.abs(drag.h);if(w>3&&h>3){let region={x:x/canvas.width,y:y/canvas.height,width:w/canvas.width,height:h/canvas.height};if(document.querySelector('#mode').value==='keep'){preserveRegions.push({kind:document.querySelector('#keep').value,...region});lastAdded='keep'}else{boxes.push({class:document.querySelector('#cls').value,placement:document.querySelector('#place').value,...region});lastAdded='block'}}drag=null;draw()}
-document.querySelector('#prev').onclick=()=>show(index-1);document.querySelector('#next').onclick=()=>show(index+1);document.querySelector('#undo').onclick=()=>{if(lastAdded==='keep')preserveRegions.pop();else boxes.pop();lastAdded=null;draw()};
-async function approve(){negativePlacements=[...document.querySelectorAll('#negative input:checked')].map(input=>input.value);let response=await fetch('/api/label',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:items[index].path,boxes,preserve_regions:preserveRegions,negative_placements:negativePlacements})});if(!response.ok){alert(await response.text());return}await boot()}
-async function reject(){let reason=prompt('Why is this image unusable for the corpus?');if(!reason)return;let response=await fetch('/api/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:items[index].path,reason})});if(!response.ok){alert(await response.text());return}await boot()}
-document.querySelector('#approve').onclick=approve;document.querySelector('#reject').onclick=reject;onkeydown=e=>{if(e.key==='ArrowLeft')show(index-1);if(e.key==='ArrowRight')show(index+1);if(e.key==='Enter'&&(e.ctrlKey||e.metaKey))approve()};boot();
-</script>"""
+HTML = Path(__file__).with_name("review_ui.html").read_text()
+MAX_REQUEST_BYTES = 1_048_576
+
+
+def validate_reviewer_identity(value: str) -> str:
+    reviewer = str(value).strip()
+    if not reviewer:
+        raise ValueError("reviewer identity is required")
+    if len(reviewer) > 200 or any(ord(character) < 32 for character in reviewer):
+        raise ValueError("reviewer identity must be at most 200 printable characters")
+    return reviewer
+
+
+class ReviewSession:
+    """One immutable attributable reviewer identity per server process."""
+
+    def __init__(self, reviewer: str | None = None):
+        self._lock = threading.Lock()
+        self._reviewer = validate_reviewer_identity(reviewer) if reviewer else ""
+        self._request_token = secrets.token_urlsafe(32)
+
+    @property
+    def reviewer(self) -> str:
+        with self._lock:
+            return self._reviewer
+
+    @property
+    def request_token(self) -> str:
+        return self._request_token
+
+    def set_reviewer(self, reviewer: str) -> str:
+        candidate = validate_reviewer_identity(reviewer)
+        with self._lock:
+            if self._reviewer and self._reviewer != candidate:
+                raise ValueError("reviewer identity is fixed for this server session")
+            self._reviewer = candidate
+            return self._reviewer
+
+    def require_reviewer(self) -> str:
+        reviewer = self.reviewer
+        if not reviewer:
+            raise ValueError("reviewer identity is required before recording decisions")
+        return reviewer
 
 
 def has_review_provenance(labels: dict) -> bool:
@@ -56,6 +82,7 @@ def has_review_provenance(labels: dict) -> bool:
     return (
         labels.get("review_method") == "human"
         and labels.get("reviewed") is True
+        and labels.get("review_attestation") == HUMAN_REVIEW_ATTESTATION
         and bool(str(labels.get("reviewed_by", "")).strip())
         and timestamp.tzinfo is not None
     )
@@ -364,6 +391,31 @@ def filter_queue(items: list[dict], allowed_paths: set[str] | None,
     return filtered
 
 
+def review_item_revision(root: Path, item: dict) -> str:
+    """Bind the exact image, proposal sidecar, and displayed source context."""
+    image = resolve_image(root, item["path"])
+    labels = image.with_suffix(image.suffix + ".labels.json")
+    digest = hashlib.sha256()
+    digest.update(b"liveblock-human-review-item-v1\0")
+    for value in (
+        item["path"], item.get("source_group", ""), item.get("source_page", ""),
+        item.get("title", ""), item.get("license", ""),
+    ):
+        digest.update(str(value).encode())
+        digest.update(b"\0")
+    digest.update(image.read_bytes())
+    digest.update(b"\0")
+    if labels.exists():
+        digest.update(labels.read_bytes())
+    return digest.hexdigest()
+
+
+def attach_review_revisions(root: Path, items: list[dict]) -> list[dict]:
+    for item in items:
+        item["review_revision"] = review_item_revision(root, item)
+    return items
+
+
 def review_state_sha256(root: Path) -> str:
     digest = hashlib.sha256()
     paths = sorted([*root.rglob("manifest.jsonl"), *root.rglob("*.labels.json")])
@@ -418,12 +470,41 @@ def resolve_image(root: Path, relative_path: str) -> Path:
     return candidate
 
 
+def write_review_document(destination: Path, payload: dict) -> None:
+    """Durably replace one regular sidecar from a unique same-directory file."""
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise ValueError("review sidecar must be a regular non-symlink file")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory = os.open(destination.parent, flags)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError:
+            # Windows does not expose directory fsync through Python. The file
+            # itself was synchronized before the same-directory replacement.
+            pass
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def save_review(root: Path, relative_path: str, boxes: list[dict],
                 preserve_regions: list[dict] | None = None,
                 reviewer: str = "", negative_placements: list[str] | None = None) -> Path:
-    reviewer = reviewer.strip()
-    if not reviewer:
-        raise ValueError("reviewer identity is required")
+    reviewer = validate_reviewer_identity(reviewer)
     image = resolve_image(root, relative_path)
     for box in boxes:
         box.pop("confidence", None)
@@ -435,62 +516,111 @@ def save_review(root: Path, relative_path: str, boxes: list[dict],
     for region in preserve_regions:
         validate_preserve_region(region, image)
     destination = image.with_suffix(image.suffix + ".labels.json")
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
-    temporary.write_text(json.dumps({
+    write_review_document(destination, {
         "boxes": boxes,
         "negative_placements": negative_placements,
         "preserve_regions": preserve_regions,
+        "review_attestation": HUMAN_REVIEW_ATTESTATION,
         "review_method": "human",
         "reviewed": True,
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "reviewed_by": reviewer,
-    }, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, destination)
+    })
     return destination
 
 
 def save_rejection(root: Path, relative_path: str, reason: str, reviewer: str) -> Path:
-    reviewer = reviewer.strip()
+    reviewer = validate_reviewer_identity(reviewer)
     reason = reason.strip()
-    if not reviewer:
-        raise ValueError("reviewer identity is required")
     if not reason:
         raise ValueError("exclusion reason is required")
     image = resolve_image(root, relative_path)
     destination = image.with_suffix(image.suffix + ".labels.json")
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
-    temporary.write_text(json.dumps({
+    write_review_document(destination, {
         "boxes": [],
         "excluded": True,
         "exclusion_reason": reason,
         "preserve_regions": [],
+        "review_attestation": HUMAN_REVIEW_ATTESTATION,
         "review_method": "human",
         "reviewed": True,
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "reviewed_by": reviewer,
-    }, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, destination)
+    })
     return destination
 
 
-def handler_for(root: Path, reviewer: str, allowed_paths: set[str] | None = None,
-                plan_details: dict[str, list[str]] | None = None):
+def ui_status(root: Path, allowed_paths: set[str] | None,
+              plan_path: Path | None = None) -> dict:
+    if allowed_paths is not None:
+        return review_plan_status(root, allowed_paths, plan_path)
+    summary = review_summary(root)
+    return {
+        "counts": {
+            "approved": summary["human_images"],
+            "excluded": summary["excluded_images"],
+            "missing": 0,
+            "pending": summary["pending_images"],
+        },
+        "planned_group_count": summary["human_images"] + summary["excluded_images"]
+        + summary["pending_images"],
+    }
+
+
+def handler_for(root: Path, session: ReviewSession,
+                allowed_paths: set[str] | None = None,
+                plan_details: dict[str, list[str]] | None = None,
+                plan_path: Path | None = None):
+    decision_lock = threading.Lock()
+
     class Handler(BaseHTTPRequestHandler):
+        def require_local_browser(self, require_token: bool = False) -> None:
+            port = self.server.server_address[1]
+            allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            host = self.headers.get("Host", "").casefold()
+            if host not in allowed_hosts:
+                raise ValueError("request Host is not the configured loopback reviewer")
+            if require_token:
+                allowed_origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+                if self.headers.get("Origin", "").casefold() not in allowed_origins:
+                    raise ValueError("request Origin is not the local review page")
+                token = self.headers.get("X-LiveBlock-Review-Token", "")
+                if not secrets.compare_digest(token, session.request_token):
+                    raise ValueError("review request token is missing or invalid")
+
         def send_bytes(self, status: int, data: bytes, content_type: str) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; img-src 'self'; style-src 'unsafe-inline'; "
+                "script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; "
+                "frame-ancestors 'none'",
+            )
             self.end_headers()
             self.wfile.write(data)
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
             try:
+                self.require_local_browser()
                 if parsed.path == "/":
                     self.send_bytes(200, HTML.encode(), "text/html; charset=utf-8")
                 elif parsed.path == "/api/items":
                     items = filter_queue(review_queue(root), allowed_paths, plan_details)
+                    attach_review_revisions(root, items)
                     self.send_bytes(200, json.dumps(items).encode(), "application/json")
+                elif parsed.path == "/api/session":
+                    self.send_bytes(200, json.dumps({
+                        "reviewer": session.reviewer,
+                        "reviewToken": session.request_token,
+                    }).encode(), "application/json")
+                elif parsed.path == "/api/status":
+                    status = ui_status(root, allowed_paths, plan_path)
+                    self.send_bytes(200, json.dumps(status).encode(), "application/json")
                 elif parsed.path == "/image":
                     relative = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
                     image = resolve_image(root, relative)
@@ -501,19 +631,55 @@ def handler_for(root: Path, reviewer: str, allowed_paths: set[str] | None = None
                 self.send_bytes(400, str(error).encode(), "text/plain")
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path not in {"/api/label", "/api/reject"}:
+            if self.path not in {"/api/session", "/api/label", "/api/reject"}:
                 self.send_bytes(404, b"not found", "text/plain"); return
             try:
+                self.require_local_browser(require_token=True)
+                if self.headers.get_content_type() != "application/json":
+                    raise ValueError("requests must use application/json")
                 length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_REQUEST_BYTES:
+                    raise ValueError("request body size is invalid")
                 payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError("request body must be a JSON object")
+                if self.path == "/api/session":
+                    reviewer = session.set_reviewer(payload.get("reviewer", ""))
+                    self.send_bytes(200, json.dumps({"reviewer": reviewer}).encode(),
+                                    "application/json")
+                    return
                 if allowed_paths is not None and payload.get("path") not in allowed_paths:
                     raise ValueError("image is not part of the configured review plan")
-                if self.path == "/api/reject":
-                    destination = save_rejection(root, payload["path"], payload.get("reason", ""), reviewer)
-                else:
-                    destination = save_review(root, payload["path"], payload.get("boxes", []),
-                                              payload.get("preserve_regions", []), reviewer,
-                                              payload.get("negative_placements", []))
+                if payload.get("attested") is not True:
+                    raise ValueError("personal full-image review attestation is required")
+                reviewer = session.require_reviewer()
+                with decision_lock:
+                    current_items = filter_queue(review_queue(root), allowed_paths, plan_details)
+                    current_item = next(
+                        (item for item in current_items if item["path"] == payload.get("path")),
+                        None,
+                    )
+                    if current_item is None:
+                        raise ValueError("image is no longer pending human review")
+                    expected_revision = review_item_revision(root, current_item)
+                    if not secrets.compare_digest(
+                        str(payload.get("review_revision", "")), expected_revision
+                    ):
+                        raise ValueError("review item changed after it was displayed; reload it")
+                    image = resolve_image(root, payload["path"])
+                    sidecar = image.with_suffix(image.suffix + ".labels.json")
+                    current = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+                    if has_review_provenance(current):
+                        raise ValueError("image already has an attributable human decision")
+                    if self.path == "/api/reject":
+                        destination = save_rejection(root, payload["path"],
+                                                     payload.get("reason", ""), reviewer)
+                    else:
+                        destination = save_review(
+                            root, payload["path"], payload.get("boxes", []),
+                            payload.get("preserve_regions", []), reviewer,
+                            payload.get("negative_placements", []),
+                        )
                 self.send_bytes(200, json.dumps({"saved": str(destination)}).encode(), "application/json")
             except (ValueError, KeyError, json.JSONDecodeError) as error:
                 self.send_bytes(400, str(error).encode(), "text/plain")
@@ -528,7 +694,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pool", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--reviewer", help="reviewer name or identifier recorded in every approval")
+    parser.add_argument(
+        "--reviewer",
+        help="optional reviewer name/identifier; otherwise the local UI asks once",
+    )
+    parser.add_argument(
+        "--no-open-browser", action="store_true",
+        help="do not open the loopback review page automatically",
+    )
     parser.add_argument("--list", action="store_true", help="print pending queue JSON and exit")
     parser.add_argument("--summary", action="store_true", help="print human/candidate group coverage and exit")
     parser.add_argument("--plan", action="store_true", help="print a minimal-priority human review plan and exit")
@@ -558,14 +731,26 @@ def main() -> int:
         print(json.dumps(filter_queue(review_queue(args.pool), allowed_paths, plan_details),
                          indent=2, sort_keys=True))
         return 0
-    if not args.reviewer or not args.reviewer.strip():
-        parser.error("--reviewer is required when starting the review server")
+    try:
+        session = ReviewSession(args.reviewer)
+    except ValueError as error:
+        parser.error(str(error))
     pending = filter_queue(review_queue(args.pool), allowed_paths)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port),
-                                 handler_for(args.pool, args.reviewer, allowed_paths, plan_details))
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", args.port),
+        handler_for(args.pool, session, allowed_paths, plan_details, args.plan_file),
+    )
     scope = "planned" if allowed_paths is not None else "pending"
-    print(f"Review UI: http://127.0.0.1:{args.port} ({len(pending)} {scope})")
-    server.serve_forever()
+    url = f"http://127.0.0.1:{args.port}"
+    print(f"Review UI: {url} ({len(pending)} {scope})")
+    if not args.no_open_browser:
+        threading.Timer(0.2, lambda: webbrowser.open(url)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nReview server stopped")
+    finally:
+        server.server_close()
     return 0
 
 

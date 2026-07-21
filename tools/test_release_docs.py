@@ -10,6 +10,10 @@ RELEASE_NOTES = (ROOT / "docs/RELEASE_NOTES_DRAFT.md").read_text()
 RELEASE_ARTIFACTS = (ROOT / "docs/RELEASE_ARTIFACTS.md").read_text()
 WINDOWS_MAIN = (ROOT / "platform/windows/src-tauri/src/main.rs").read_text()
 LINUX_MAIN = (ROOT / "platform/linux/src-tauri/src/main.rs").read_text()
+REVIEW_SCRIPT = (ROOT / "tools/corpus/review_labels.py").read_text()
+REVIEW_UI = (ROOT / "tools/corpus/review_ui.html").read_text()
+REVIEW_LAUNCHER = ROOT / "tools/review_sports_ads.sh"
+HUMAN_REVIEW_DOC = (ROOT / "docs/SPORTS_ADS_HUMAN_REVIEW.md").read_text()
 
 
 class ReleaseDocumentationContractTests(unittest.TestCase):
@@ -20,6 +24,7 @@ class ReleaseDocumentationContractTests(unittest.TestCase):
             "docs/PRIVACY_SECURITY_REVIEW.md",
             "docs/RELEASE_NOTES_DRAFT.md",
             "docs/MODEL_DISTRIBUTION_SECURITY.md",
+            "docs/SPORTS_ADS_HUMAN_REVIEW.md",
         ):
             self.assertIn(f"]({path})", README)
         for stale_claim in (
@@ -84,6 +89,32 @@ class ReleaseDocumentationContractTests(unittest.TestCase):
             "Authentication does not substitute for detector quality",
         ):
             self.assertIn(phrase.lower(), normalized)
+
+    def test_human_review_has_one_command_attributable_local_ui(self):
+        launcher = REVIEW_LAUNCHER.read_text()
+        self.assertTrue(REVIEW_LAUNCHER.stat().st_mode & 0o111)
+        self.assertIn("review_labels.py", launcher)
+        self.assertIn("human-review-plan.json", launcher)
+        self.assertIn("ReviewSession", REVIEW_SCRIPT)
+        self.assertIn('(\"127.0.0.1\", args.port)', REVIEW_SCRIPT)
+        self.assertIn("MAX_REQUEST_BYTES", REVIEW_SCRIPT)
+        self.assertIn("write_review_document", REVIEW_SCRIPT)
+        self.assertIn("reviewer identity is fixed", REVIEW_SCRIPT)
+        self.assertIn("X-LiveBlock-Review-Token", REVIEW_SCRIPT)
+        self.assertIn("request Origin is not the local review page", REVIEW_SCRIPT)
+        self.assertIn("review_item_revision", REVIEW_SCRIPT)
+        self.assertIn("personal full-image review attestation is required", REVIEW_SCRIPT)
+        self.assertIn("I personally inspected the full image", REVIEW_UI)
+        self.assertIn("Approve human review", REVIEW_UI)
+        self.assertIn("/api/status", REVIEW_UI)
+        self.assertIn("imageReady", REVIEW_UI)
+        self.assertIn("navigationReady=false", REVIEW_UI)
+        self.assertIn("function navigate(delta){if(!navigationReady)return", REVIEW_UI)
+        self.assertIn("Discard unsaved annotation changes", REVIEW_UI)
+        self.assertIn("function markDirty(){dirty=true;clearAttestation()}", REVIEW_UI)
+        self.assertIn("./tools/review_sports_ads.sh", HUMAN_REVIEW_DOC)
+        self.assertIn("personally-inspected-full-image-v1", HUMAN_REVIEW_DOC)
+        self.assertIn("fully compromised same-user process", HUMAN_REVIEW_DOC)
 
     def test_tauri_runtime_has_csp_and_no_unused_privileged_plugins(self):
         for platform in ("windows", "linux"):

@@ -23,6 +23,8 @@ No current platform profile reports `releaseReady: true`.
 
 - Versioned settings, regions, label, signed model-manifest, public-key-ring, and
   accepted-update-state contracts with fail-closed future-schema handling.
+  Region mutations persist a complete candidate before changing memory, use
+  portable atomic replacement, and keep bulk replacement to one transaction.
 - Local three-class detector contract: `Logo`, `Ad banner`, `Sponsored`.
 - Shared BGRA letterboxing, YOLOv8 decoding, clipping, finite filtering, and
   class-aware NMS.
@@ -79,6 +81,8 @@ No current platform profile reports `releaseReady: true`.
 - Authenticated monotonic ONNX replacement/recovery. Terminal quit hides and
   stops capture before waiting for already-admitted persistent writes and model
   updates; queued region/label/screenshot/update mutations fail after shutdown.
+  Paired screenshot/sidecar discard restores the sidecar on primary-move failure
+  and reports rollback failure rather than silently leaving a split pair.
 
 ### Linux
 
@@ -91,7 +95,8 @@ No current platform profile reports `releaseReady: true`.
   before a new frame. Capture output and labeling writes are generation-bound.
   Terminal quit hides and stops capture before waiting for already-admitted
   persistent writes and authenticated updates; queued region/label/screenshot/
-  update mutations are rejected after shutdown.
+  update mutations are rejected after shutdown. Paired discard uses the same
+  explicit no-replace rollback contract as Windows.
 - Local ONNX processing with CPU default/fallback, bounded wgpu/WGSL
   mirror-blend patch generation when Vulkan/GL initializes, private screenshot
   paths, and fail-closed capture state. GPU patches are read back for webview

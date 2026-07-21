@@ -154,11 +154,13 @@ final class RegionStore: @unchecked Sendable {
         guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
-        guard !shutdownRequested else { return }
-        _ = handle.clear()
-        for r in newRegions {
-            _ = handle.add_with_id(r.id.uuidString, r.x, r.y, r.width, r.height)
-        }
+        guard !shutdownRequested,
+              let data = try? JSONEncoder().encode(newRegions),
+              let json = String(data: data, encoding: .utf8),
+              handle.replace_all_json(json) else { return }
+        // The Rust store persists one complete candidate document before it
+        // publishes the replacement in memory; clear/add partial states are
+        // never visible after a failed write or process interruption.
         regions = Self.snapshot(handle: handle)
     }
 
@@ -177,9 +179,8 @@ final class RegionStore: @unchecked Sendable {
         guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
-        guard !shutdownRequested else { return }
-        _ = handle.clear()
-        regions = []
+        guard !shutdownRequested, handle.clear() else { return }
+        regions = Self.snapshot(handle: handle)
     }
 
     // MARK: - Persistence helpers

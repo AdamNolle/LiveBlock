@@ -93,6 +93,8 @@ struct RegionDocument {
 pub struct RegionStore {
     inner: Mutex<Vec<NormalizedRegion>>,
     path: Option<PathBuf>,
+    #[cfg(test)]
+    fail_next_persist: std::sync::atomic::AtomicBool,
 }
 
 impl RegionStore {
@@ -101,6 +103,8 @@ impl RegionStore {
         Self {
             inner: Mutex::new(Vec::new()),
             path: None,
+            #[cfg(test)]
+            fail_next_persist: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -137,6 +141,8 @@ impl RegionStore {
         let store = Self {
             inner: Mutex::new(regions.clone()),
             path: Some(path),
+            #[cfg(test)]
+            fail_next_persist: std::sync::atomic::AtomicBool::new(false),
         };
         if migrate_legacy {
             store.persist(&regions)?;
@@ -150,38 +156,22 @@ impl RegionStore {
     }
 
     pub fn add(&self, region: NormalizedRegion) -> Result<(), RegionError> {
-        let snapshot = {
-            let mut g = self.inner.lock();
-            g.push(region);
-            g.clone()
-        };
-        self.persist(&snapshot)
+        self.commit(|regions| regions.push(region))
     }
 
     pub fn remove(&self, id: Uuid) -> Result<(), RegionError> {
-        let snapshot = {
-            let mut g = self.inner.lock();
-            g.retain(|r| r.id != id);
-            g.clone()
-        };
-        self.persist(&snapshot)
+        self.commit(|regions| regions.retain(|region| region.id != id))
     }
 
     pub fn replace(&self, new_regions: Vec<NormalizedRegion>) -> Result<(), RegionError> {
-        let snapshot = {
-            let mut g = self.inner.lock();
-            *g = new_regions;
-            g.clone()
-        };
-        self.persist(&snapshot)
+        self.commit(|regions| *regions = new_regions)
     }
 
     /// Replace a single region by id, preserving its id.
     pub fn replace_id(&self, id: Uuid, new_region: NormalizedRegion) -> Result<(), RegionError> {
-        let snapshot = {
-            let mut g = self.inner.lock();
-            if let Some(idx) = g.iter().position(|r| r.id == id) {
-                g[idx] = NormalizedRegion::with_id(
+        self.commit(|regions| {
+            if let Some(index) = regions.iter().position(|region| region.id == id) {
+                regions[index] = NormalizedRegion::with_id(
                     id,
                     new_region.x,
                     new_region.y,
@@ -189,16 +179,39 @@ impl RegionStore {
                     new_region.height,
                 );
             }
-            g.clone()
-        };
-        self.persist(&snapshot)
+        })
     }
 
     pub fn clear(&self) -> Result<(), RegionError> {
         self.replace(Vec::new())
     }
 
+    /// Persist a complete candidate snapshot before publishing it in memory.
+    /// Holding the mutex through persistence also prevents two callers from
+    /// committing snapshots out of order. A failed write leaves both the
+    /// previous in-memory value and the previous on-disk document intact.
+    fn commit<F>(&self, mutate: F) -> Result<(), RegionError>
+    where
+        F: FnOnce(&mut Vec<NormalizedRegion>),
+    {
+        let mut current = self.inner.lock();
+        let mut candidate = current.clone();
+        mutate(&mut candidate);
+        self.persist(&candidate)?;
+        *current = candidate;
+        Ok(())
+    }
+
     fn persist(&self, regions: &[NormalizedRegion]) -> Result<(), RegionError> {
+        #[cfg(test)]
+        if self
+            .fail_next_persist
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(RegionError::Io(std::io::Error::other(
+                "injected persistence failure",
+            )));
+        }
         let Some(path) = &self.path else {
             return Ok(());
         };
@@ -250,14 +263,68 @@ impl RegionStore {
             .unwrap_or(0);
         let pid = std::process::id();
         let tmp = path.with_file_name(format!("{stem}.{pid}.{nanos}.tmp"));
-        {
-            let mut f = fs::File::create(&tmp)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
+        let result = (|| -> Result<(), RegionError> {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            replace_file_atomically(&tmp, path)?;
+            sync_parent_directory(path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
         }
-        fs::rename(&tmp, path)?;
+        result
+    }
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(staging: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>()
+    };
+    if unsafe {
+        MoveFileExW(
+            wide(staging).as_ptr(),
+            wide(destination).as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(std::io::Error::last_os_error())
+    } else {
         Ok(())
     }
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(staging: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(staging, destination)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    match path.parent() {
+        Some(parent) => fs::File::open(parent)?.sync_all(),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Serialize a JSON value with 2-space indentation, matching Swift's default
@@ -325,6 +392,62 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, r.id);
         assert!((loaded[0].x - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn repeated_persisted_mutations_replace_the_complete_document() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("regions.json");
+        let store = RegionStore::open(&path).unwrap();
+        let first = NormalizedRegion::new(0.1, 0.1, 0.2, 0.2);
+        let second = NormalizedRegion::new(0.5, 0.5, 0.3, 0.3);
+
+        store.add(first.clone()).unwrap();
+        store.add(second.clone()).unwrap();
+        store
+            .replace_id(
+                first.id,
+                NormalizedRegion::with_id(first.id, 0.2, 0.2, 0.25, 0.25),
+            )
+            .unwrap();
+
+        let reopened = RegionStore::open(&path).unwrap().current();
+        assert_eq!(reopened.len(), 2);
+        assert!(reopened.iter().any(|region| region.id == second.id));
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|region| region.id == first.id)
+                .unwrap()
+                .x,
+            0.2
+        );
+    }
+
+    #[test]
+    fn failed_persist_keeps_memory_and_disk_at_previous_snapshot() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("regions.json");
+        let store = RegionStore::open(&path).unwrap();
+        let original = NormalizedRegion::new(0.1, 0.1, 0.2, 0.2);
+        store.add(original.clone()).unwrap();
+        let original_bytes = fs::read(&path).unwrap();
+        store
+            .fail_next_persist
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        assert!(store
+            .add(NormalizedRegion::new(0.5, 0.5, 0.2, 0.2))
+            .is_err());
+        assert_eq!(store.current(), vec![original.clone()]);
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
+
+        store
+            .fail_next_persist
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(store.clear().is_err());
+        assert_eq!(store.current(), vec![original]);
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
     }
 
     #[test]

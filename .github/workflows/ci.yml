@@ -219,6 +219,8 @@ jobs:
           }
       - name: Compile Windows adapter (debug and release, all targets)
         run: |
+          cargo test --manifest-path core/Cargo.toml --locked -p liveblock-regions --lib
+          cargo test --manifest-path core/Cargo.toml --locked -p liveblock-config --lib managed_path::tests::
           cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets
           cargo test --manifest-path platform/windows/src-tauri/Cargo.toml --locked --lib
           $output = cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets --release 2>&1 | Out-String

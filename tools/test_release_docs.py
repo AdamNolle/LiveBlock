@@ -107,7 +107,8 @@ class ReleaseDocumentationContractTests(unittest.TestCase):
             self.assertIn("paths::validate_label_path(&path, false)", source)
             self.assertIn("paths::validate_label_path(&path, true)", source)
             self.assertIn("validate_label_binding(&path, &doc)", source)
-            self.assertIn("move_regular_file_no_replace(&path, &dst)", source)
+            self.assertIn("move_regular_file_pair_no_replace(", source)
+            self.assertIn("(source.as_path(), destination.as_path())", source)
 
 
 if __name__ == "__main__":

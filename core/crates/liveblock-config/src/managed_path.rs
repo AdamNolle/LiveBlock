@@ -102,6 +102,36 @@ pub fn move_regular_file_no_replace(source: &Path, destination: &Path) -> Result
     }
 }
 
+/// Move a primary file and optional companion as one recoverable no-replace
+/// operation. The companion moves first; if the primary move fails, the
+/// companion is moved back. A rollback failure is surfaced explicitly instead
+/// of being discarded, so callers never report a clean failure while leaving
+/// the pair split across source and destination directories.
+pub fn move_regular_file_pair_no_replace(
+    primary_source: &Path,
+    primary_destination: &Path,
+    companion: Option<(&Path, &Path)>,
+) -> Result<()> {
+    let moved_companion = if let Some((source, destination)) = companion {
+        move_regular_file_no_replace(source, destination)?;
+        Some((source, destination))
+    } else {
+        None
+    };
+
+    if let Err(primary_error) = move_regular_file_no_replace(primary_source, primary_destination) {
+        if let Some((source, destination)) = moved_companion {
+            if let Err(rollback_error) = move_regular_file_no_replace(destination, source) {
+                return Err(Error::other(format!(
+                    "primary move failed: {primary_error}; companion rollback failed: {rollback_error}"
+                )));
+            }
+        }
+        return Err(primary_error);
+    }
+    Ok(())
+}
+
 fn invalid(message: &str) -> Error {
     Error::new(ErrorKind::InvalidInput, message)
 }
@@ -166,6 +196,53 @@ mod tests {
         assert!(move_regular_file_no_replace(&source, &destination).is_err());
         assert_eq!(fs::read(&source).unwrap(), b"source");
         assert_eq!(fs::read(&destination).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn paired_move_preserves_both_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary_source = temp.path().join("frame.png");
+        let primary_destination = temp.path().join("trash-frame.png");
+        let companion_source = temp.path().join("frame.json");
+        let companion_destination = temp.path().join("trash-frame.json");
+        fs::write(&primary_source, b"png").unwrap();
+        fs::write(&companion_source, b"json").unwrap();
+
+        move_regular_file_pair_no_replace(
+            &primary_source,
+            &primary_destination,
+            Some((&companion_source, &companion_destination)),
+        )
+        .unwrap();
+
+        assert!(!primary_source.exists());
+        assert!(!companion_source.exists());
+        assert_eq!(fs::read(primary_destination).unwrap(), b"png");
+        assert_eq!(fs::read(companion_destination).unwrap(), b"json");
+    }
+
+    #[test]
+    fn paired_move_rolls_companion_back_when_primary_destination_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary_source = temp.path().join("frame.png");
+        let primary_destination = temp.path().join("trash-frame.png");
+        let companion_source = temp.path().join("frame.json");
+        let companion_destination = temp.path().join("trash-frame.json");
+        fs::write(&primary_source, b"png").unwrap();
+        fs::write(&primary_destination, b"existing").unwrap();
+        fs::write(&companion_source, b"json").unwrap();
+
+        assert!(move_regular_file_pair_no_replace(
+            &primary_source,
+            &primary_destination,
+            Some((&companion_source, &companion_destination)),
+        )
+        .is_err());
+
+        assert_eq!(fs::read(primary_source).unwrap(), b"png");
+        assert_eq!(fs::read(primary_destination).unwrap(), b"existing");
+        assert_eq!(fs::read(companion_source).unwrap(), b"json");
+        assert!(!companion_destination.exists());
     }
 
     #[cfg(unix)]

@@ -170,7 +170,10 @@ class MacOSFailureModeContractTests(unittest.TestCase):
 
     def test_persisted_macos_editors_reject_post_shutdown_callbacks(self):
         self.assertIn("func prepareForShutdown()", REGION_STORE)
-        self.assertEqual(REGION_STORE.count("guard !shutdownRequested else { return }"), 5)
+        self.assertEqual(REGION_STORE.count("guard !shutdownRequested else { return }"), 3)
+        self.assertIn("handle.replace_all_json(json)", REGION_STORE)
+        self.assertIn("guard !shutdownRequested, handle.clear() else { return }", REGION_STORE)
+        self.assertNotIn("_ = handle.clear()\n        for", REGION_STORE)
         self.assertIn("func prepareForShutdown()", LABELING)
         for required in (
             "guard !shutdownRequested else { return false }",

@@ -49,6 +49,24 @@ final class RegionStoreTests: XCTestCase {
         XCTAssertEqual(firstWidth, 0.2, accuracy: 0.001)
     }
 
+    func testBulkReplacePersistsOneCompleteSnapshot() {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveBlockRegionReplaceTests-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let store = RegionStore(storageURL: tmp)
+        store.add(NormalizedRegion(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        let replacements = [
+            NormalizedRegion(x: 0.3, y: 0.3, width: 0.2, height: 0.2),
+            NormalizedRegion(x: 0.6, y: 0.6, width: 0.1, height: 0.1),
+        ]
+
+        store.replace(replacements)
+
+        XCTAssertEqual(store.current, replacements)
+        XCTAssertEqual(RegionStore(storageURL: tmp).current, replacements)
+    }
+
     func testShutdownBarrierRejectsAllLaterRegionMutations() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveBlockRegionShutdownTests-\(UUID().uuidString).json")

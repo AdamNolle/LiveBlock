@@ -310,7 +310,8 @@ class DesktopAdapterContractTests(unittest.TestCase):
             self.assertIn("label_path: label.clone()", source)
             self.assertIn("if path.exists()", source)
             self.assertIn("LabelDocument::load(&path)", source)
-            self.assertIn("move_regular_file_no_replace(&destination, &label)", source)
+            self.assertIn("move_regular_file_pair_no_replace(", source)
+            self.assertIn("label_move\n            .as_ref()", source)
 
     def test_ui_name_panic_and_local_data_policy_are_consistent(self):
         frontend_sources = [IPC] + [

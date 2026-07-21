@@ -1325,19 +1325,18 @@ fn discard_screenshot(path: PathBuf, state: State<'_, AppState>) -> Result<(), S
     let label_move = if label.exists() {
         let label = paths::validate_label_path(&label, true).map_err(|e| e.to_string())?;
         let destination = paths::trash_dir().join(label.file_name().ok_or("no label name")?);
-        liveblock_config::move_regular_file_no_replace(&label, &destination)
-            .map_err(|error| error.to_string())?;
         Some((label, destination))
     } else {
         None
     };
-    if let Err(error) = liveblock_config::move_regular_file_no_replace(&path, &dst) {
-        if let Some((label, destination)) = label_move {
-            let _ = liveblock_config::move_regular_file_no_replace(&destination, &label);
-        }
-        return Err(error.to_string());
-    }
-    Ok(())
+    liveblock_config::move_regular_file_pair_no_replace(
+        &path,
+        &dst,
+        label_move
+            .as_ref()
+            .map(|(source, destination)| (source.as_path(), destination.as_path())),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn validate_label_binding(path: &std::path::Path, doc: &LabelDocument) -> Result<(), String> {

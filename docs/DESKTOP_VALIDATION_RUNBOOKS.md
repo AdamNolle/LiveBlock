@@ -321,7 +321,11 @@ hashes:
 7. queue region add/replace/delete/clear, labeling screenshot, label save, and
    screenshot discard IPC immediately before and after Windows/Linux quit.
    Already-admitted writes must finish before exit; commands acquiring the gate
-   after the terminal flag must fail without changing files or region state;
+   after the terminal flag must fail without changing files or region state.
+   Force a second persisted region mutation on Windows and verify the complete
+   document replaces the first snapshot. For paired discard, force the primary
+   move to fail and verify the sidecar is restored or a rollback failure is
+   reported explicitly;
 8. on macOS, begin region editing, label save/discard, per-app exclusion changes,
    a diagnostics save panel, and display-topology notifications immediately before
    native Command-Q. Hash region/label/defaults files before and after. Retained

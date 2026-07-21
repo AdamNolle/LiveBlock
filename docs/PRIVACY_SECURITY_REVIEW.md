@@ -81,7 +81,9 @@ bundle inventories.
   sidecars must name an existing matching managed screenshot.
 - Trash moves use atomic create-new semantics: Unix reserves a same-volume hard
   link before removing the source, while Windows rename fails when the
-  destination exists. An existing destination is never replaced.
+  destination exists. Screenshot/sidecar pairs share one helper; if the primary
+  move fails, the sidecar is restored and any rollback failure is surfaced
+  explicitly. An existing destination is never replaced.
 - macOS installs terminal barriers in the region store, labeling controller,
   and per-app exclusion store before hiding windows. Retained AppKit/editor
   callbacks cannot add/replace/delete regions, save/migrate/discard labels, or
@@ -91,6 +93,10 @@ bundle inventories.
   termination begins. First-run completion is persisted only by the explicit
   Finish action; AppKit window closure during quit neither completes onboarding
   nor opens/persists the control-panel close reminder.
+- The shared region store persists a complete candidate document before
+  publishing it in memory, serializes persistence order, and uses native
+  replace-existing semantics on Windows. A failed write leaves the prior memory
+  and disk snapshot active; macOS bulk replacement is one bridge transaction.
 - Windows and Linux serialize region, labeling-screenshot, label-save, and
   discard mutations through one native gate. Quit sets its terminal flag before
   waiting on that gate: an already-admitted mutation completes before exit, and

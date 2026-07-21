@@ -51,6 +51,8 @@ mod ffi {
             height: f64,
         ) -> bool;
 
+        fn replace_all_json(self: &RegionStoreHandle, json: String) -> bool;
+
         fn remove(self: &RegionStoreHandle, id: String) -> bool;
 
         fn clear(self: &RegionStoreHandle) -> bool;
@@ -137,6 +139,13 @@ impl RegionStoreHandle {
         };
         let region = NormalizedRegion::with_id(uuid, x, y, width, height);
         self.inner.replace_id(uuid, region).is_ok()
+    }
+
+    fn replace_all_json(&self, json: String) -> bool {
+        let Ok(regions) = serde_json::from_str::<Vec<NormalizedRegion>>(&json) else {
+            return false;
+        };
+        self.inner.replace(regions).is_ok()
     }
 
     fn remove(&self, id: String) -> bool {
@@ -362,6 +371,20 @@ mod tests {
         assert_eq!(store.count(), 1);
         let s = store.to_json();
         assert!(s.contains("0.5"));
+    }
+
+    #[test]
+    fn replace_all_json_commits_one_complete_snapshot() {
+        let store = RegionStoreHandle::new();
+        let _ = store.add(0.1, 0.1, 0.2, 0.2);
+        let replacement = r#"[{"id":"11111111-2222-3333-4444-555555555555","x":0.4,"y":0.4,"width":0.3,"height":0.3}]"#;
+        assert!(store.replace_all_json(replacement.to_string()));
+        assert_eq!(store.count(), 1);
+        assert!(store
+            .to_json()
+            .contains("11111111-2222-3333-4444-555555555555"));
+        assert!(!store.replace_all_json("{}".to_string()));
+        assert_eq!(store.count(), 1);
     }
 
     #[test]

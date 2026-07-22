@@ -110,6 +110,8 @@ class ReleaseDocumentationContractTests(unittest.TestCase):
         self.assertIn("imageReady", REVIEW_UI)
         self.assertIn("navigationReady=false", REVIEW_UI)
         self.assertIn("function navigate(delta){if(!navigationReady)return", REVIEW_UI)
+        self.assertIn("Math.max(0,Math.min(canvas.width,x))", REVIEW_UI)
+        self.assertIn("Math.max(0,Math.min(canvas.height,y))", REVIEW_UI)
         self.assertIn("Discard unsaved annotation changes", REVIEW_UI)
         self.assertIn("function markDirty(){dirty=true;clearAttestation()}", REVIEW_UI)
         self.assertIn("./tools/review_sports_ads.sh", HUMAN_REVIEW_DOC)

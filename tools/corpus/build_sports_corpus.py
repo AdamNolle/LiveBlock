@@ -80,6 +80,187 @@ def split_for(group: str, val_fraction: float, test_fraction: float) -> str:
     return "train"
 
 
+def _fixed_capacity_assignment(
+    groups: list[str],
+    requirements: list[tuple[str, tuple[str, str], tuple[str, ...]]],
+    capacities: dict[str, int],
+    state_budget: list[int],
+) -> dict[str, str] | None:
+    """Find one deterministic exact-capacity assignment satisfying all coverage constraints."""
+    split_order = ("train", "val", "test")
+    group_index = {group: index for index, group in enumerate(groups)}
+    indexed_requirements = [
+        (split, facet, tuple(group_index[group] for group in candidates))
+        for split, facet, candidates in requirements
+    ]
+    assignments: list[str | None] = [None] * len(groups)
+    counts = {split: 0 for split in split_order}
+    failed_states: set[tuple[str | None, ...]] = set()
+
+    def satisfied(split: str, candidates: tuple[int, ...]) -> bool:
+        return any(assignments[index] == split for index in candidates)
+
+    def search() -> bool:
+        state = tuple(assignments)
+        if state in failed_states:
+            return False
+        if state_budget[0] <= 0:
+            raise RuntimeError("split solver budget exceeded; refusing a heuristic split")
+        state_budget[0] -= 1
+
+        unsatisfied = []
+        for split, facet, candidates in indexed_requirements:
+            if satisfied(split, candidates):
+                continue
+            if counts[split] >= capacities[split]:
+                failed_states.add(state)
+                return False
+            options = tuple(index for index in candidates if assignments[index] is None)
+            if not options:
+                failed_states.add(state)
+                return False
+            unsatisfied.append((len(options), split_order.index(split), facet, split, options))
+
+        if not unsatisfied:
+            remaining = [index for index, value in enumerate(assignments) if value is None]
+            cursor = 0
+            for split in ("test", "val", "train"):
+                needed = capacities[split] - counts[split]
+                if needed < 0 or cursor + needed > len(remaining):
+                    failed_states.add(state)
+                    return False
+                for index in remaining[cursor:cursor + needed]:
+                    assignments[index] = split
+                cursor += needed
+            return cursor == len(remaining)
+
+        _count, _split_rank, _facet, split, options = min(unsatisfied)
+        unsatisfied_for_split = [
+            candidates for required_split, _required_facet, candidates in indexed_requirements
+            if required_split == split and not satisfied(required_split, candidates)
+        ]
+        ordered_options = sorted(
+            options,
+            key=lambda index: (
+                -sum(index in candidates for candidates in unsatisfied_for_split),
+                index,
+            ),
+        )
+        for index in ordered_options:
+            assignments[index] = split
+            counts[split] += 1
+            if search():
+                return True
+            counts[split] -= 1
+            assignments[index] = None
+        failed_states.add(state)
+        return False
+
+    if not search():
+        return None
+    result = {group: assignments[index] for index, group in enumerate(groups)}
+    if any(split is None for split in result.values()):
+        raise AssertionError("split solver returned an incomplete assignment")
+    return result  # type: ignore[return-value]
+
+
+def assign_group_splits(
+    groups: list[str],
+    facet_candidates: dict[tuple[str, str], list[str]],
+    *,
+    test_target: int,
+    val_target: int,
+    required_test_candidates: dict[tuple[str, str], list[str]] | None = None,
+    state_limit: int = 1_000_000,
+) -> dict[str, str]:
+    """Solve simultaneous leakage-safe facet coverage, expanding held-out sizes if needed."""
+    canonical_groups = sorted(
+        groups, key=lambda group: (hashlib.sha256(group.encode()).hexdigest(), group)
+    )
+    if len(set(canonical_groups)) != len(canonical_groups):
+        raise ValueError("source groups must be unique")
+    group_set = set(canonical_groups)
+    active_splits = ["train"]
+    if val_target:
+        active_splits.append("val")
+    if test_target:
+        active_splits.append("test")
+
+    requirements: list[tuple[str, tuple[str, str], tuple[str, ...]]] = []
+    for facet, candidates in sorted(facet_candidates.items()):
+        canonical_candidates = tuple(group for group in canonical_groups if group in set(candidates))
+        required_groups = len(active_splits)
+        if len(canonical_candidates) < required_groups:
+            raise ValueError(
+                f"{facet[0]} {facet[1]!r} needs {required_groups} source groups for "
+                f"train/val/test stratification; found {len(canonical_candidates)}"
+            )
+        for split in active_splits:
+            requirements.append((split, facet, canonical_candidates))
+
+    for facet, candidates in sorted((required_test_candidates or {}).items()):
+        if not test_target:
+            raise ValueError(
+                f"test split is missing required placement slices: {[facet[1]]}; present=[]"
+            )
+        canonical_candidates = tuple(group for group in canonical_groups if group in set(candidates))
+        if not canonical_candidates:
+            raise ValueError(
+                f"test split is missing required placement slices: {[facet[1]]}; present=[]"
+            )
+        requirement = ("test", facet, canonical_candidates)
+        if requirement not in requirements:
+            requirements.append(requirement)
+
+    unknown = {
+        group for _split, _facet, candidates in requirements for group in candidates
+        if group not in group_set
+    }
+    if unknown:
+        raise ValueError(f"facet candidates contain unknown source groups: {sorted(unknown)}")
+    requirements.sort(key=lambda item: (("train", "val", "test").index(item[0]), item[1]))
+
+    group_count = len(canonical_groups)
+    state_budget = [state_limit]
+    max_total_excess = group_count - 1 - test_target - val_target
+    for total_excess in range(max_total_excess + 1):
+        capacity_options = []
+        for test_excess in range(total_excess + 1):
+            val_excess = total_excess - test_excess
+            if not test_target and test_excess:
+                continue
+            if not val_target and val_excess:
+                continue
+            test_count = test_target + test_excess
+            val_count = val_target + val_excess
+            train_count = group_count - test_count - val_count
+            if train_count < 1:
+                continue
+            capacity_options.append((
+                max(test_excess, val_excess),
+                abs(test_excess - val_excess),
+                test_count,
+                val_count,
+                {"train": train_count, "val": val_count, "test": test_count},
+            ))
+        for *_score, capacities in sorted(capacity_options, key=lambda item: item[:-1]):
+            assignment = _fixed_capacity_assignment(
+                canonical_groups, requirements, capacities, state_budget
+            )
+            if assignment is None:
+                continue
+            for split, _facet, candidates in requirements:
+                if not any(assignment[group] == split for group in candidates):
+                    raise AssertionError("split solver postvalidation failed")
+            if {split: sum(value == split for value in assignment.values())
+                    for split in ("train", "val", "test")} != capacities:
+                raise AssertionError("split solver capacity postvalidation failed")
+            return assignment
+    raise ValueError(
+        "no leakage-safe train/val/test assignment satisfies simultaneous facet coverage"
+    )
+
+
 def validate_normalized_rect(region: dict, source: Path) -> None:
     values = [float(region[key]) for key in ("x", "y", "width", "height")]
     x, y, width, height = values
@@ -229,12 +410,6 @@ def build(root: Path, output: Path, val_fraction: float, test_fraction: float,
             "no reviewed, licensed, non-duplicate images with valid labels" + method_note
         )
 
-    if output.exists():
-        shutil.rmtree(output)
-    for split in ("train", "val", "test"):
-        (output / "images" / split).mkdir(parents=True)
-        (output / "labels" / split).mkdir(parents=True)
-
     counts = Counter()
     class_counts = Counter()
     placement_counts = Counter()
@@ -269,9 +444,6 @@ def build(root: Path, output: Path, val_fraction: float, test_fraction: float,
         group_placements[group].update(item[3])
         group_negative_placements[group].update(item[0].get("negative_placements", []))
         group_preservation_kinds[group].update(region["kind"] for region in item[6])
-    test_groups: set[str] = set()
-    val_groups: set[str] = set()
-    protected_train_groups: set[str] = set()
     facet_groups = {
         **{("placement", value): group_placements for value in (stratify_placements or set())},
         **{("preservation kind", value): group_preservation_kinds
@@ -283,64 +455,25 @@ def build(root: Path, output: Path, val_fraction: float, test_fraction: float,
         facet: [group for group in groups if facet[1] in group_values[group]]
         for facet, group_values in facet_groups.items()
     }
-    # Reserve scarce slices first so a broad slice (for example car_livery)
-    # cannot consume the only viable identity/jersey/venue groups.
-    for (facet_name, value), candidates in sorted(
-        facet_candidates.items(), key=lambda item: (len(item[1]), item[0])
-    ):
-        group_values = facet_groups[(facet_name, value)]
-        required_groups = 1 + int(test_n > 0) + int(val_n > 0)
-        if len(candidates) < required_groups:
-            raise ValueError(
-                f"{facet_name} {value!r} needs {required_groups} source groups for "
-                f"train/val/test stratification; found {len(candidates)}"
-            )
-        train_candidate = next(
-            (group for group in candidates if group in protected_train_groups),
-            None,
-        ) or next(
-            (group for group in reversed(candidates)
-             if group not in test_groups and group not in val_groups),
-            None,
-        )
-        if train_candidate is None:
-            raise ValueError(f"cannot reserve a training group for {facet_name} {value!r}")
-        protected_train_groups.add(train_candidate)
-        if test_n and not any(value in group_values[group] for group in test_groups):
-            candidate = next(
-                (group for group in candidates
-                 if group not in val_groups and group not in protected_train_groups),
-                None,
-            )
-            if candidate is None:
-                raise ValueError(f"cannot reserve a test group for {facet_name} {value!r}")
-            test_groups.add(candidate)
-        if val_n and not any(value in group_values[group] for group in val_groups):
-            candidate = next(
-                (group for group in candidates
-                 if group not in test_groups and group not in protected_train_groups),
-                None,
-            )
-            if candidate is None:
-                raise ValueError(f"cannot reserve a validation group for {facet_name} {value!r}")
-            val_groups.add(candidate)
-
-    test_target = max(test_n, len(test_groups))
-    val_target = max(val_n, len(val_groups))
-    if test_target + val_target >= len(groups):
-        raise ValueError("stratification leaves no training groups")
-    for group in groups:
-        if (len(test_groups) < test_target and group not in val_groups
-                and group not in protected_train_groups):
-            test_groups.add(group)
-    for group in groups:
-        if (len(val_groups) < val_target and group not in test_groups
-                and group not in protected_train_groups):
-            val_groups.add(group)
-    group_splits = {
-        group: "test" if group in test_groups else "val" if group in val_groups else "train"
-        for group in groups
+    required_test_candidates = {
+        ("placement", value): [
+            group for group in groups if value in group_placements[group]
+        ]
+        for value in (required_test_placements or set())
     }
+    group_splits = assign_group_splits(
+        groups,
+        facet_candidates,
+        test_target=test_n,
+        val_target=val_n,
+        required_test_candidates=required_test_candidates,
+    )
+
+    if output.exists():
+        shutil.rmtree(output)
+    for split in ("train", "val", "test"):
+        (output / "images" / split).mkdir(parents=True)
+        (output / "labels" / split).mkdir(parents=True)
 
     for record, image, boxes, placements, image_dhash, review_method, preserve_regions in accepted:
         group = record_group((record, image, boxes, placements, image_dhash, review_method,

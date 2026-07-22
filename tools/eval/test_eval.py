@@ -109,6 +109,32 @@ def test_evaluate_slices_false_positives_on_contextual_hard_negatives(tmp_path, 
     }
 
 
+def test_evaluate_slices_only_unmatched_predictions_on_mixed_contextual_negative(
+    tmp_path, monkeypatch,
+):
+    image = tmp_path / "mixed.jpg"
+    image.write_bytes(b"fixture")
+    image.with_suffix(".json").write_text(json.dumps({
+        "boxes": [
+            {"class_id": 1, "box": [0, 0, 10, 10], "placement": "venue_board"},
+        ],
+        "negative": False,
+        "negative_placements": ["jersey"],
+    }))
+    monkeypatch.setattr(run_eval, "_load_model", lambda _path: object())
+    monkeypatch.setattr(run_eval, "_predict", lambda *_args: [
+        {"class_id": 1, "box": [0, 0, 10, 10], "score": 0.9},
+        {"class_id": 0, "box": [30, 30, 10, 10], "score": 0.8},
+    ])
+
+    result = run_eval.evaluate("model.pt", str(tmp_path))
+    assert result["tp"] == 1
+    assert result["fp"] == 1
+    assert result["negative_placements"] == {
+        "jersey": {"false_positives": 1, "images": 1},
+    }
+
+
 def test_evaluate_reports_ground_truth_placement_recall(tmp_path, monkeypatch):
     image = tmp_path / "fixture.jpg"
     image.write_bytes(b"fixture")

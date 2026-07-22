@@ -286,6 +286,16 @@ def evaluate(
         agg["fp"] += fp
         agg["fn"] += fn
 
+        # Contextual negatives can coexist with valid sponsor truths elsewhere
+        # in the image. Attribute only unmatched detections to those contexts;
+        # matched sponsor predictions remain true positives.
+        for placement in negative_contexts:
+            counters = negative_placements.setdefault(
+                placement, {"false_positives": 0, "images": 0}
+            )
+            counters["false_positives"] += fp
+            counters["images"] += 1
+
         # Placement is ground-truth metadata, not a predicted class. Report
         # slice recall (TP/FN) without inventing a placement for unmatched FPs.
         for placement in {truth.get("placement", "unknown") for truth in truths}:

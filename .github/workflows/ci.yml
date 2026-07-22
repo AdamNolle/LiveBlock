@@ -1,0 +1,799 @@
+name: Desktop CI
+
+on:
+  pull_request:
+    branches: [main, feat/openvocab-detector]
+  push:
+    branches: [main, feat/openvocab-detector]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shared-contracts:
+    name: Shared Rust, Python, and frontend contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: platform/_shared-frontend/package-lock.json
+      - name: Install model-signing test dependency
+        run: python -m pip install 'cryptography>=45.0'
+      - name: Rust formatting
+        run: cargo fmt --manifest-path core/Cargo.toml --all -- --check
+      - name: Shared Rust tests
+        run: cargo test --manifest-path core/Cargo.toml --workspace --lib
+      - name: Label and desktop adapter contract tests
+        env:
+          PYTHONPATH: tools
+        run: python -m unittest tools.test_export_labels tools.test_desktop_contracts tools.test_model_distribution tools.test_release_docs tools.test_desktop_validation_evidence tools.test_release_evidence tools.test_release_blockers tools.test_dependency_obligations tools.test_macos_accessibility tools.test_macos_failure_modes tools.test_flatpak_sources tools.test_linux_runtime_staging tools.test_linux_packaging tools.test_windows_runtime_staging tools.test_windows_packaging tools.test_windows_application_update tools.test_windows_directml_readiness
+      - name: Explicit migration, installer, and update recovery gates
+        env:
+          PYTHONPATH: tools
+        run: |
+          cargo test --manifest-path core/Cargo.toml --workspace --lib migrat
+          cargo test --manifest-path core/Cargo.toml -p liveblock-config --lib model_manifest::tests::atomic_install
+          cargo test --manifest-path core/Cargo.toml -p liveblock-config --lib model_update::tests::
+          python -m unittest \
+            tools.test_model_distribution.ModelDistributionTests.test_install_cli_strips_canonical_signing_secret \
+            tools.test_model_distribution.ModelDistributionTests.test_signed_coreml_bundle_verifier_binds_compiled_artifact
+      - name: Release profile stays inference-only
+        run: cargo test --manifest-path core/Cargo.toml -p liveblock-config --lib --release build_profile_controls_training_runtime
+      - name: Parse published JSON Schemas
+        run: |
+          python -m json.tool contracts/regions.schema.json >/dev/null
+          python -m json.tool contracts/labels.schema.json >/dev/null
+          python -m json.tool contracts/settings.schema.json >/dev/null
+          python -m json.tool contracts/model-manifest.schema.json >/dev/null
+          python -m json.tool contracts/model-keyring.schema.json >/dev/null
+          python -m json.tool contracts/model-update-state.schema.json >/dev/null
+          python -m json.tool contracts/release-artifact-inventory.schema.json >/dev/null
+          python -m json.tool contracts/release-blocker-assessment.schema.json >/dev/null
+          python -m json.tool contracts/windows-application-update.schema.json >/dev/null
+          python -m json.tool contracts/windows-directml-transport-readiness.schema.json >/dev/null
+      - name: Shared frontend build
+        working-directory: platform/_shared-frontend
+        run: npm ci && npm run build
+      - name: Generate dependency SBOM, license report, and webview inventory
+        run: |
+          git ls-files --error-unmatch core/Cargo.lock platform/windows/Cargo.lock platform/linux/Cargo.lock
+          mkdir -p tools/runs/ci-release-evidence
+          python tools/verify_windows_directml_readiness.py \
+            --output tools/runs/ci-release-evidence/windows-directml-readiness.json
+          python tools/release_blockers.py \
+            --commit "$GITHUB_SHA" \
+            --output tools/runs/ci-release-evidence/release-blockers.json
+          cargo metadata --manifest-path core/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/core-metadata.json
+          cargo metadata --manifest-path platform/windows/src-tauri/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/windows-metadata.json
+          cargo metadata --manifest-path platform/linux/src-tauri/Cargo.toml --locked --format-version 1 > tools/runs/ci-release-evidence/linux-metadata.json
+          python tools/release_evidence.py sbom \
+            --cargo-metadata tools/runs/ci-release-evidence/core-metadata.json \
+            --cargo-metadata tools/runs/ci-release-evidence/windows-metadata.json \
+            --cargo-metadata tools/runs/ci-release-evidence/linux-metadata.json \
+            --npm-lock platform/_shared-frontend/package-lock.json \
+            --license-decisions licenses/dependency-license-decisions.json \
+            --output tools/runs/ci-release-evidence/liveblock.cdx.json \
+            --license-report tools/runs/ci-release-evidence/dependency-licenses.json \
+            --commit "$GITHUB_SHA"
+          python tools/verify_dependency_obligations.py \
+            --license-report tools/runs/ci-release-evidence/dependency-licenses.json \
+            --license-decisions licenses/dependency-license-decisions.json \
+            --source-offer licenses/mpl-source-offer.json \
+            --cargo-lock core/Cargo.lock \
+            --cargo-lock platform/windows/Cargo.lock \
+            --cargo-lock platform/linux/Cargo.lock \
+            --output tools/runs/ci-release-evidence/dependency-obligations.json
+          python tools/release_evidence.py inventory \
+            --root platform/_shared-frontend/dist \
+            --output tools/runs/ci-release-evidence/webview-inventory.json \
+            --platform shared \
+            --artifact-type webview-payload-build-only \
+            --commit "$GITHUB_SHA" \
+            --require control-panel.html --require labeling.html \
+            --require region-editor.html --require render-layer.html --require training.html
+          python tools/release_evidence.py verify \
+            --root platform/_shared-frontend/dist \
+            --manifest tools/runs/ci-release-evidence/webview-inventory.json
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -cf tools/runs/ci-release-evidence/webview-payload.tar \
+            -C platform/_shared-frontend/dist .
+          sha256sum tools/runs/ci-release-evidence/webview-payload.tar \
+            > tools/runs/ci-release-evidence/webview-payload.tar.sha256
+      - name: Preserve release dependency and integrity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dependency-integrity-evidence
+          path: |
+            tools/runs/ci-release-evidence/liveblock.cdx.json
+            tools/runs/ci-release-evidence/dependency-licenses.json
+            tools/runs/ci-release-evidence/dependency-obligations.json
+            tools/runs/ci-release-evidence/windows-directml-readiness.json
+            tools/runs/ci-release-evidence/release-blockers.json
+            licenses/dependency-license-decisions.json
+            licenses/mpl-source-offer.json
+            licenses/MPL-2.0.txt
+            licenses/README.md
+            tools/runs/ci-release-evidence/webview-inventory.json
+            tools/runs/ci-release-evidence/webview-payload.tar
+            tools/runs/ci-release-evidence/webview-payload.tar.sha256
+          if-no-files-found: error
+
+  macos:
+    name: macOS 26 build and tests
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate bridge inputs
+        run: LB_BRIDGE_HOST_ONLY=1 tools/build_bridge.sh
+      - name: Empty macOS production model inputs fail closed
+        run: |
+          mkdir -p tools/runs
+          xcodegen generate
+          if xcodebuild -quiet -project LiveBlock.xcodeproj -scheme LiveBlock \
+            -configuration Release -destination 'platform=macOS' \
+            -derivedDataPath tools/runs/ci-macos-keyring-gate \
+            build CODE_SIGNING_ALLOWED=NO >tools/runs/ci-macos-keyring-gate.log 2>&1; then
+            echo "empty macOS production model inputs were accepted" >&2
+            exit 1
+          fi
+          grep -q "model keyring must be a regular file\|production model keyring must contain at least one key" \
+            tools/runs/ci-macos-keyring-gate.log
+      - name: Generate, test Debug, and compile Release
+        env:
+          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING: "1"
+        run: |
+          xcodegen generate
+          xcodebuild -project LiveBlock.xcodeproj -scheme LiveBlock \
+            -destination 'platform=macOS' \
+            -derivedDataPath tools/runs/ci-macos-derived \
+            test CODE_SIGNING_ALLOWED=NO
+          xcodebuild -project LiveBlock.xcodeproj -scheme LiveBlock \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath tools/runs/ci-macos-derived \
+            build CODE_SIGNING_ALLOWED=NO
+      - name: Preserve macOS test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-xcresult
+          path: |
+            tools/runs/ci-macos-derived/Logs/Test/*.xcresult
+            tools/runs/ci-macos-keyring-gate.log
+          if-no-files-found: warn
+
+  windows:
+    name: Windows 11 compile
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/windows
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: platform/_shared-frontend/package-lock.json
+      - name: Build shared frontend
+        working-directory: platform/_shared-frontend
+        run: npm ci && npm run build
+      - name: Validate Windows release PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($path in @("tools/release_windows.ps1", "tools/verify_windows_application_update.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -ne 0) {
+              $messages = ($errors | ForEach-Object { $_.Message }) -join "`n"
+              throw "PowerShell syntax validation failed for $path`n$messages"
+            }
+          }
+      - name: Compile Windows adapter (debug and release, all targets)
+        run: |
+          cargo test --manifest-path core/Cargo.toml --locked -p liveblock-regions --lib
+          cargo test --manifest-path core/Cargo.toml --locked -p liveblock-config --lib managed_path::tests::
+          cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets
+          cargo test --manifest-path platform/windows/src-tauri/Cargo.toml --locked --lib
+          $output = cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets --release 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0 -or $output -notmatch "release packages require a nonempty") {
+            throw "empty production model keyring was not rejected as expected`n$output"
+          }
+          $env:LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING = "1"
+          cargo check --manifest-path platform/windows/src-tauri/Cargo.toml --locked --all-targets --release
+      - name: Build prior-version Windows package fixture
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/release_windows.ps1 -Mode BuildOnly `
+            -BuildOnlyFixtureVersion 0.0.9 -OutputDir tools/runs/ci-windows-previous
+      - name: Build and inventory unsigned build-only Windows installers
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/release_windows.ps1 -Mode BuildOnly -OutputDir tools/runs/ci-windows-package
+      - name: Exercise build-only MSI and NSIS lifecycles
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/test_windows_package_lifecycle.ps1 `
+            -EvidenceDir tools/runs/ci-windows-package `
+            -PreviousEvidenceDir tools/runs/ci-windows-previous -LaunchSeconds 12
+      - name: Preserve Windows build-only package evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-only-package-evidence
+          path: |
+            tools/runs/ci-windows-package/packages/*.msi
+            tools/runs/ci-windows-package/packages/*.exe
+            tools/runs/ci-windows-package/package-inventory.json
+            tools/runs/ci-windows-package/package.sha256
+            tools/runs/ci-windows-package/msi-payload-inventory.json
+            tools/runs/ci-windows-package/msi-administrative-extract.log
+            tools/runs/ci-windows-package/msi-extracted/**
+            tools/runs/ci-windows-package/release-manifest.json
+            tools/runs/ci-windows-package/lifecycle/**
+            tools/runs/ci-windows-previous/packages/*
+            tools/runs/ci-windows-previous/package-inventory.json
+            tools/runs/ci-windows-previous/package.sha256
+            tools/runs/ci-windows-previous/release-manifest.json
+          if-no-files-found: warn
+
+  linux:
+    name: Ubuntu Linux compile
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/linux
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: platform/_shared-frontend/package-lock.json
+      - name: Install Tauri, PipeWire, Wayland, and X11 headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            rpm cpio xvfb dbus-x11 \
+            libx11-xcb-dev libxcomposite-dev libxfixes-dev libxinerama-dev \
+            libxkbcommon-dev libwayland-dev libgtk-layer-shell-dev
+      - name: Build shared frontend
+        working-directory: platform/_shared-frontend
+        run: npm ci && npm run build
+      - name: Compile Linux adapter (debug and release, all targets)
+        run: |
+          cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets
+          cargo test --manifest-path platform/linux/src-tauri/Cargo.toml --locked --lib
+          for provider in cuda rocm openvino tensorrt; do
+            cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked \
+              --lib --no-default-features --features "$provider"
+          done
+          if cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked \
+            --lib --no-default-features --features cuda,rocm 2>multiple-provider.log; then
+            echo "multiple optional ONNX Runtime providers were accepted" >&2
+            exit 1
+          fi
+          grep -q "select at most one optional Linux ONNX Runtime" multiple-provider.log
+          if cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release 2>empty-ring.log; then
+            echo "empty production model keyring was accepted" >&2
+            exit 1
+          fi
+          grep -q "release packages require a nonempty" empty-ring.log
+          if LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 \
+            cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release 2>missing-ort.log; then
+            echo "unpackaged ONNX Runtime was accepted" >&2
+            exit 1
+          fi
+          grep -q "release package runtime file is missing" missing-ort.log
+          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1 \
+            cargo check --manifest-path platform/linux/src-tauri/Cargo.toml --locked --all-targets --release
+      - name: Stage runtime and build prior-version Linux package fixtures
+        run: |
+          python3 tools/stage_linux_onnxruntime.py --architecture x86_64
+          cd platform/linux/src-tauri
+          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 \
+            ../../_shared-frontend/node_modules/.bin/tauri build --bundles deb,rpm --ci \
+              --config '{"version":"0.0.9"}'
+          cd "$GITHUB_WORKSPACE"
+          fixture=tools/runs/ci-linux-previous
+          mkdir -p "$fixture/packages"
+          mapfile -t debs < <(find platform/linux/target/release/bundle/deb -maxdepth 1 -type f -name '*0.0.9*.deb' -print)
+          mapfile -t rpms < <(find platform/linux/target/release/bundle/rpm -maxdepth 1 -type f -name '*0.0.9*.rpm' -print)
+          test "${#debs[@]}" -eq 1
+          test "${#rpms[@]}" -eq 1
+          cp "${debs[0]}" "${rpms[0]}" "$fixture/packages/"
+          python3 tools/release_evidence.py inventory \
+            --root "$fixture/packages" --output "$fixture/package-inventory.json" \
+            --platform linux-x86_64 --artifact-type native-version-fixtures-build-only \
+            --commit "$GITHUB_SHA" \
+            --require "$(basename "${debs[0]}")" --require "$(basename "${rpms[0]}")"
+          python3 tools/release_evidence.py verify \
+            --root "$fixture/packages" --manifest "$fixture/package-inventory.json"
+          (cd "$fixture/packages" && sha256sum * > ../packages.sha256)
+          rm -rf platform/linux/target/release/bundle/deb platform/linux/target/release/bundle/rpm
+      - name: Build current native build-only bundles
+        run: |
+          cd platform/linux/src-tauri
+          LIVEBLOCK_ALLOW_EMPTY_MODEL_KEYRING=1 \
+            ../../_shared-frontend/node_modules/.bin/tauri build --bundles deb,rpm,appimage --ci
+      - name: Extract and inventory exact native bundle payloads
+        run: |
+          evidence=tools/runs/ci-linux-packages
+          mkdir -p "$evidence/packages" "$evidence/deb-root" "$evidence/rpm-root" "$evidence/appimage-extract"
+          mapfile -t debs < <(find platform/linux/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -print)
+          mapfile -t rpms < <(find platform/linux/target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' -print)
+          mapfile -t appimages < <(find platform/linux/target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -print)
+          test "${#debs[@]}" -eq 1
+          test "${#rpms[@]}" -eq 1
+          test "${#appimages[@]}" -eq 1
+          deb="${debs[0]}"; rpm="${rpms[0]}"; appimage="${appimages[0]}"
+          deb_name="$(basename "$deb")"; rpm_name="$(basename "$rpm")"; appimage_name="$(basename "$appimage")"
+          cp "$deb" "$rpm" "$appimage" "$evidence/packages/"
+          dpkg-deb --extract "$deb" "$evidence/deb-root"
+          echo "extracted deb payload"
+          (cd "$evidence/rpm-root" && rpm2cpio "$GITHUB_WORKSPACE/$rpm" | cpio -idm)
+          echo "extracted rpm payload"
+          chmod +x "$evidence/packages/$appimage_name"
+          (cd "$evidence/appimage-extract" && ../packages/"$appimage_name" --appimage-extract > ../appimage-extraction.log)
+          echo "extracted AppImage payload"
+          for root in "$evidence/deb-root" "$evidence/rpm-root" "$evidence/appimage-extract/squashfs-root"; do
+            echo "validating $root"
+            find "$root/usr" -maxdepth 7 \( -type f -o -type l \) \
+              \( -name 'liveblock-linux' -o -name 'libonnxruntime.so' -o -name 'trusted-model-keys.json' \) \
+              -printf '%y %p\n' | sort
+            test -x "$root/usr/bin/liveblock-linux"
+            test -f "$root/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so"
+            test ! -L "$root/usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so"
+            test -s "$root/usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt"
+            test -s "$root/usr/lib/LiveBlock/resources/onnxruntime/LICENSE.onnxruntime.txt"
+            test -f "$root/usr/lib/LiveBlock/resources/trusted-model-keys.json"
+          done
+          mkdir -p "$evidence/appimage-payload/usr/bin" "$evidence/appimage-payload/usr/lib/LiveBlock"
+          cp --preserve=all "$evidence/appimage-extract/squashfs-root/usr/bin/liveblock-linux" \
+            "$evidence/appimage-payload/usr/bin/liveblock-linux"
+          cp -a "$evidence/appimage-extract/squashfs-root/usr/lib/LiveBlock/resources" \
+            "$evidence/appimage-payload/usr/lib/LiveBlock/resources"
+          for format in deb rpm appimage; do
+            case "$format" in
+              deb) root="$evidence/deb-root" ;;
+              rpm) root="$evidence/rpm-root" ;;
+              appimage) root="$evidence/appimage-payload" ;;
+            esac
+            python3 tools/release_evidence.py inventory \
+              --root "$root" \
+              --output "$evidence/$format-payload-inventory.json" \
+              --platform linux-x86_64 \
+              --artifact-type "$format-build-only" \
+              --commit "$GITHUB_SHA" \
+              --require usr/bin/liveblock-linux \
+              --require usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so \
+              --require usr/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt \
+              --require usr/lib/LiveBlock/resources/onnxruntime/LICENSE.onnxruntime.txt \
+              --require usr/lib/LiveBlock/resources/onnxruntime/STAGING-MANIFEST.json \
+              --require usr/lib/LiveBlock/resources/trusted-model-keys.json
+            python3 tools/release_evidence.py verify \
+              --root "$root" \
+              --manifest "$evidence/$format-payload-inventory.json"
+          done
+          python3 tools/release_evidence.py inventory \
+            --root "$evidence/packages" \
+            --output "$evidence/package-inventory.json" \
+            --platform linux-x86_64 \
+            --artifact-type native-packages-build-only \
+            --commit "$GITHUB_SHA" \
+            --require "$deb_name" --require "$rpm_name" --require "$appimage_name"
+          python3 tools/release_evidence.py verify \
+            --root "$evidence/packages" \
+            --manifest "$evidence/package-inventory.json"
+          cp platform/linux/src-tauri/resources/onnxruntime/STAGING-MANIFEST.json \
+            "$evidence/runtime-staging-manifest.json"
+          (cd "$evidence/packages" && sha256sum "$deb_name" "$rpm_name" "$appimage_name" > ../packages.sha256)
+      - name: Exercise build-only deb and AppImage lifecycle
+        run: |
+          evidence=tools/runs/ci-linux-packages
+          deb="$(find "$evidence/packages" -maxdepth 1 -type f -name '*.deb' -print)"
+          previous_deb="$(find tools/runs/ci-linux-previous/packages -maxdepth 1 -type f -name '*.deb' -print)"
+          appimage_root="$evidence/appimage-extract/squashfs-root"
+          package_id="$(dpkg-deb --field "$deb" Package)"
+          current_version="$(dpkg-deb --field "$deb" Version)"
+          previous_version="$(dpkg-deb --field "$previous_deb" Version)"
+          test -n "$package_id"
+          test "$current_version" = 0.1.0
+          test "$previous_version" = 0.0.9
+          mkdir -m 700 "$evidence/deb-home"
+          mkdir -m 700 -p "$evidence/deb-home/.local/share/LiveBlock"
+          user_data_sentinel="$evidence/deb-home/.local/share/LiveBlock/package-transition-sentinel.txt"
+          printf %s liveblock-package-transition-sentinel-v1 > "$user_data_sentinel"
+          chmod 600 "$user_data_sentinel"
+          assert_user_data_sentinel() {
+            test "$(cat "$user_data_sentinel")" = liveblock-package-transition-sentinel-v1
+          }
+          test ! -e /usr/bin/liveblock-linux
+          if dpkg-query --show "$package_id" >/dev/null 2>&1; then
+            echo "package unexpectedly installed before clean-install test: $package_id" >&2
+            exit 1
+          fi
+          sudo apt-get install -y "$GITHUB_WORKSPACE/$previous_deb" > "$evidence/deb-install.log" 2>&1
+          test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$previous_version"
+          assert_user_data_sentinel
+          sudo apt-get install -y "$GITHUB_WORKSPACE/$deb" > "$evidence/deb-upgrade.log" 2>&1
+          test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$current_version"
+          assert_user_data_sentinel
+          sudo apt-get install --reinstall -y "$GITHUB_WORKSPACE/$deb" > "$evidence/deb-repair.log" 2>&1
+          test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$current_version"
+          assert_user_data_sentinel
+          set +e
+          sudo apt-get install -y "$GITHUB_WORKSPACE/$previous_deb" > "$evidence/deb-downgrade.log" 2>&1
+          deb_downgrade_status=$?
+          set -e
+          test "$deb_downgrade_status" -ne 0
+          test "$(dpkg-query --showformat='${Version}' --show "$package_id")" = "$current_version"
+          assert_user_data_sentinel
+          test -x /usr/bin/liveblock-linux
+          test -f /usr/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so
+          mkdir -m 700 "$evidence/deb-runtime"
+          set +e
+          timeout --kill-after=5s 12s env \
+            HOME="$GITHUB_WORKSPACE/$evidence/deb-home" \
+            XDG_DATA_HOME="$GITHUB_WORKSPACE/$evidence/deb-home/.local/share" \
+            XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/$evidence/deb-runtime" \
+            XDG_SESSION_TYPE=x11 xvfb-run -a dbus-run-session -- /usr/bin/liveblock-linux \
+            > "$evidence/deb-launch.log" 2>&1
+          deb_launch_status=$?
+          set -e
+          test "$deb_launch_status" -eq 124
+          grep -q "Loaded ONNX Runtime dylib with version '1.18.1'" "$evidence/deb-launch.log"
+          grep -q "trusted model keyring is empty" "$evidence/deb-launch.log"
+          grep -q "X11 global shortcuts registered" "$evidence/deb-launch.log"
+          sudo apt-get remove -y "$package_id" > "$evidence/deb-uninstall.log" 2>&1
+          test ! -e /usr/bin/liveblock-linux
+          test ! -e /usr/lib/LiveBlock
+          assert_user_data_sentinel
+          mkdir -m 700 "$evidence/appimage-home" "$evidence/appimage-runtime"
+          set +e
+          timeout --kill-after=5s 12s env \
+            HOME="$GITHUB_WORKSPACE/$evidence/appimage-home" \
+            XDG_DATA_HOME="$GITHUB_WORKSPACE/$evidence/appimage-home/.local/share" \
+            XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/$evidence/appimage-runtime" \
+            XDG_SESSION_TYPE=x11 xvfb-run -a dbus-run-session -- \
+            "$GITHUB_WORKSPACE/$appimage_root/AppRun" \
+            > "$evidence/appimage-launch.log" 2>&1
+          appimage_launch_status=$?
+          set -e
+          test "$appimage_launch_status" -eq 124
+          grep -q "Loaded ONNX Runtime dylib with version '1.18.1'" "$evidence/appimage-launch.log"
+          grep -q "trusted model keyring is empty" "$evidence/appimage-launch.log"
+          grep -q "X11 global shortcuts registered" "$evidence/appimage-launch.log"
+          python3 - "$evidence/lifecycle-summary.json" "$package_id" "$deb_launch_status" "$appimage_launch_status" "$previous_version" "$current_version" "$deb_downgrade_status" <<'PY'
+          import json, sys
+          from pathlib import Path
+          output, package_id, deb_status, appimage_status, previous_version, current_version, downgrade_status = sys.argv[1:]
+          Path(output).write_text(json.dumps({
+              "schemaVersion": 1,
+              "evidenceClass": "build-only-hosted-ubuntu",
+              "debPackage": package_id,
+              "debCleanPriorVersionInstall": True,
+              "debPriorVersionFixture": previous_version,
+              "debUpgradeToCurrent": current_version,
+              "debSameVersionRepair": True,
+              "debDefaultDowngradeRejected": True,
+              "debDowngradeExitStatus": int(downgrade_status),
+              "debUserDataSentinelPreservedAcrossTransitionsAndUninstall": True,
+              "debLaunchSurvivedSeconds": 12,
+              "debLaunchTimeoutStatus": int(deb_status),
+              "debUninstallRemovedSystemPayload": True,
+              "appImageExtractedLaunchSurvivedSeconds": 12,
+              "appImageLaunchTimeoutStatus": int(appimage_status),
+              "packagedOnnxRuntimeLoaded": True,
+              "emptyDevelopmentKeyringRejected": True,
+              "x11GlobalShortcutsRegistered": True,
+              "rpmLifecycle": "not-run-on-ubuntu",
+              "productionModelAndTrustRoots": False,
+          }, sort_keys=True, indent=2) + "\n")
+          PY
+      - name: Preserve Linux build-only package evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build-only-package-evidence
+          path: |
+            tools/runs/ci-linux-packages/packages/*
+            tools/runs/ci-linux-packages/*-inventory.json
+            tools/runs/ci-linux-packages/runtime-staging-manifest.json
+            tools/runs/ci-linux-packages/packages.sha256
+            tools/runs/ci-linux-packages/*-extraction.log
+            tools/runs/ci-linux-packages/*-install.log
+            tools/runs/ci-linux-packages/*-launch.log
+            tools/runs/ci-linux-packages/*-uninstall.log
+            tools/runs/ci-linux-packages/lifecycle-summary.json
+            tools/runs/ci-linux-packages/*-upgrade.log
+            tools/runs/ci-linux-packages/*-repair.log
+            tools/runs/ci-linux-packages/*-downgrade.log
+          if-no-files-found: error
+      - name: Preserve Linux prior-version fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-version-fixture-evidence
+          path: |
+            tools/runs/ci-linux-previous/packages/*
+            tools/runs/ci-linux-previous/package-inventory.json
+            tools/runs/ci-linux-previous/packages.sha256
+          if-no-files-found: error
+
+  rpm-lifecycle:
+    name: Fedora 44 RPM lifecycle
+    needs: linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download inventoried native packages
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-build-only-package-evidence
+          path: tools/runs/ci-linux-packages
+      - name: Download prior-version Linux fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-version-fixture-evidence
+          path: tools/runs/ci-linux-previous
+      - name: Exercise RPM lifecycle in checksum-pinned Fedora container
+        run: |
+          image="registry.fedoraproject.org/fedora@sha256:e70db1fd517c7d6990715fb200b1aae95ef6a1ef1492dc12c8ca25cc129a5094"
+          mapfile -t rpms < <(find tools/runs/ci-linux-packages/packages -maxdepth 1 -type f -name '*.rpm' -print)
+          mapfile -t previous_rpms < <(find tools/runs/ci-linux-previous/packages -maxdepth 1 -type f -name '*.rpm' -print)
+          test "${#rpms[@]}" -eq 1
+          test "${#previous_rpms[@]}" -eq 1
+          docker pull "$image"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            "$image" \
+            ./tools/test_linux_rpm_lifecycle.sh \
+              --package "/workspace/${rpms[0]}" \
+              --previous-package "/workspace/${previous_rpms[0]}" \
+              --evidence-dir /workspace/tools/runs/ci-rpm-lifecycle \
+              --launch-seconds 12
+          python3 tools/release_evidence.py inventory \
+            --root tools/runs/ci-rpm-lifecycle \
+            --output tools/runs/ci-rpm-lifecycle-inventory.json \
+            --platform linux-x86_64 \
+            --artifact-type rpm-lifecycle-build-only \
+            --commit "$GITHUB_SHA" \
+            --require rpm-package-metadata.txt \
+            --require rpm-package-requires.txt \
+            --require rpm-installed-files.txt \
+            --require rpm-runtime-linkage.txt \
+            --require rpm-install.log \
+            --require rpm-upgrade.log \
+            --require rpm-repair.log \
+            --require rpm-downgrade.log \
+            --require rpm-launch.log \
+            --require rpm-uninstall.log \
+            --require rpm-uninstall-residue.txt \
+            --require rpm-lifecycle-summary.json
+          python3 tools/release_evidence.py verify \
+            --root tools/runs/ci-rpm-lifecycle \
+            --manifest tools/runs/ci-rpm-lifecycle-inventory.json
+      - name: Preserve RPM build-only lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-lifecycle-build-only-evidence
+          path: |
+            tools/runs/ci-rpm-lifecycle/*
+            tools/runs/ci-rpm-lifecycle-inventory.json
+          if-no-files-found: warn
+
+  flatpak:
+    name: Flatpak offline build and lifecycle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Flatpak builder and headless X11 tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder xvfb dbus-x11
+          flatpak remote-add --user --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Verify lock-derived offline sources
+        env:
+          PYTHONPATH: tools
+        run: |
+          python3 tools/verify_flatpak_sources.py
+          python3 -m unittest tools.test_flatpak_sources tools.test_linux_packaging
+      - name: Build sandboxed build-only Flatpak
+        run: |
+          set -o pipefail
+          evidence=tools/runs/ci-flatpak
+          fixture_manifest=platform/linux/flatpak/com.adamnolle.LiveBlock.fixture.json
+          mkdir -p "$evidence"
+          python3 tools/create_flatpak_fixture_manifest.py \
+            --source platform/linux/flatpak/com.adamnolle.LiveBlock.json \
+            --output "$fixture_manifest"
+          trap 'rm -f "$fixture_manifest"' EXIT
+          flatpak-builder --user --install-deps-from=flathub --force-clean \
+            --disable-rofiles-fuse \
+            --state-dir=/tmp/liveblock-flatpak-state \
+            --repo=/tmp/liveblock-flatpak-repo \
+            /tmp/liveblock-flatpak-previous-build \
+            "$fixture_manifest" \
+            2>&1 | tee "$evidence/previous-build.log"
+          remote="file:///tmp/liveblock-flatpak-repo"
+          flatpak remote-add --user --if-not-exists --no-gpg-verify liveblock-ci "$remote"
+          if flatpak info --user com.adamnolle.LiveBlock >/dev/null 2>&1; then
+            echo "LiveBlock unexpectedly installed before prior Flatpak fixture" >&2
+            exit 1
+          fi
+          flatpak install --user -y --noninteractive liveblock-ci com.adamnolle.LiveBlock
+          flatpak info --user --show-commit com.adamnolle.LiveBlock > "$evidence/previous-commit.txt"
+          flatpak run --user --command=sh com.adamnolle.LiveBlock -c \
+            'test "$(cat /app/share/liveblock-build-only-version-fixture)" = 0.0.9'
+          rm -f "$fixture_manifest"
+          flatpak-builder --user --install-deps-from=flathub --force-clean \
+            --disable-rofiles-fuse \
+            --state-dir=/tmp/liveblock-flatpak-state \
+            --repo=/tmp/liveblock-flatpak-repo \
+            /tmp/liveblock-flatpak-build \
+            platform/linux/flatpak/com.adamnolle.LiveBlock.json \
+            2>&1 | tee "$evidence/build.log"
+          mkdir -p tools/runs/ci-flatpak/bundle
+          flatpak build-bundle /tmp/liveblock-flatpak-repo \
+            tools/runs/ci-flatpak/bundle/LiveBlock_0.1.0_x86_64_build-only.flatpak \
+            com.adamnolle.LiveBlock master
+          python3 tools/release_evidence.py inventory \
+            --root tools/runs/ci-flatpak/bundle \
+            --output tools/runs/ci-flatpak/bundle-inventory.json \
+            --platform linux-x86_64 \
+            --artifact-type flatpak-build-only \
+            --commit "$GITHUB_SHA" \
+            --require LiveBlock_0.1.0_x86_64_build-only.flatpak
+          python3 tools/release_evidence.py verify \
+            --root tools/runs/ci-flatpak/bundle \
+            --manifest tools/runs/ci-flatpak/bundle-inventory.json
+          (cd tools/runs/ci-flatpak/bundle && \
+            sha256sum LiveBlock_0.1.0_x86_64_build-only.flatpak > ../bundle.sha256)
+      - name: Install, inspect, launch, and uninstall build-only Flatpak
+        run: |
+          evidence=tools/runs/ci-flatpak
+          remote="file:///tmp/liveblock-flatpak-repo"
+          flatpak remote-add --user --if-not-exists --no-gpg-verify liveblock-ci "$remote"
+          if ! flatpak info --user com.adamnolle.LiveBlock >/dev/null 2>&1; then
+            echo "Prior Flatpak fixture is not installed before update test" >&2
+            exit 1
+          fi
+          previous_commit="$(cat "$evidence/previous-commit.txt")"
+          user_data_root="$HOME/.var/app/com.adamnolle.LiveBlock/data/LiveBlock"
+          user_data_sentinel="$user_data_root/package-transition-sentinel.txt"
+          mkdir -p -m 700 "$user_data_root"
+          printf %s liveblock-package-transition-sentinel-v1 > "$user_data_sentinel"
+          chmod 600 "$user_data_sentinel"
+          assert_flatpak_user_data() {
+            test "$(cat "$user_data_sentinel")" = liveblock-package-transition-sentinel-v1
+          }
+          flatpak update --user -y --noninteractive com.adamnolle.LiveBlock \
+            > "$evidence/upgrade.log" 2>&1
+          current_commit="$(flatpak info --user --show-commit com.adamnolle.LiveBlock)"
+          test "$current_commit" != "$previous_commit"
+          assert_flatpak_user_data
+          flatpak run --user --command=sh com.adamnolle.LiveBlock -c \
+            'test ! -e /app/share/liveblock-build-only-version-fixture'
+          flatpak update --user -y --noninteractive com.adamnolle.LiveBlock \
+            > "$evidence/repair.log" 2>&1
+          test "$(flatpak info --user --show-commit com.adamnolle.LiveBlock)" = "$current_commit"
+          assert_flatpak_user_data
+          flatpak update --user -y --noninteractive com.adamnolle.LiveBlock \
+            > "$evidence/downgrade.log" 2>&1
+          test "$(flatpak info --user --show-commit com.adamnolle.LiveBlock)" = "$current_commit"
+          assert_flatpak_user_data
+          flatpak run --user --command=sh com.adamnolle.LiveBlock -c '
+            test -x /app/bin/liveblock-linux &&
+            test -f /app/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so &&
+            test ! -L /app/lib/LiveBlock/resources/onnxruntime/libonnxruntime.so &&
+            test -s /app/lib/LiveBlock/resources/onnxruntime/LICENSE.onnxruntime.txt &&
+            test -s /app/lib/LiveBlock/resources/onnxruntime/THIRD-PARTY-NOTICES.txt &&
+            test -f /app/lib/LiveBlock/resources/trusted-model-keys.json'
+          mkdir -m 700 "$evidence/runtime"
+          set +e
+          timeout --kill-after=5s 12s env \
+            XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/$evidence/runtime" \
+            XDG_SESSION_TYPE=x11 xvfb-run -a dbus-run-session -- \
+            flatpak run --user --env=XDG_SESSION_TYPE=x11 com.adamnolle.LiveBlock \
+            > "$evidence/launch.log" 2>&1
+          launch_status=$?
+          set -e
+          test "$launch_status" -eq 124
+          grep -q "Loaded ONNX Runtime dylib with version '1.18.1'" "$evidence/launch.log"
+          grep -q "trusted model keyring is empty" "$evidence/launch.log"
+          grep -q "X11 global shortcuts registered" "$evidence/launch.log"
+          flatpak uninstall --user -y --noninteractive com.adamnolle.LiveBlock
+          if flatpak info --user com.adamnolle.LiveBlock >/dev/null 2>&1; then
+            echo "Flatpak uninstall left LiveBlock installed" >&2
+            exit 1
+          fi
+          assert_flatpak_user_data
+          rm -rf "$HOME/.var/app/com.adamnolle.LiveBlock"
+          flatpak remote-delete --user --force liveblock-ci
+          python3 - "$evidence/lifecycle-summary.json" "$launch_status" "$previous_commit" "$current_commit" <<'PY'
+          import json, sys
+          from pathlib import Path
+          output, launch_status, previous_commit, current_commit = sys.argv[1:]
+          Path(output).write_text(json.dumps({
+              "schemaVersion": 1,
+              "evidenceClass": "build-only-hosted-flatpak",
+              "cleanPriorFixtureInstall": True,
+              "priorFixtureMarker": "0.0.9",
+              "priorCommit": previous_commit,
+              "upgradeToCurrent": True,
+              "currentCommit": current_commit,
+              "sameVersionUpdateRetainedCurrent": True,
+              "standardUpdateDidNotDowngrade": True,
+              "userDataSentinelPreservedAcrossUpdateAndUninstall": True,
+              "requiredPayloadPathsVerified": True,
+              "launchSurvivedSeconds": 12,
+              "launchTimeoutStatus": int(launch_status),
+              "packagedOnnxRuntimeLoaded": True,
+              "emptyDevelopmentKeyringRejected": True,
+              "x11GlobalShortcutsRegistered": True,
+              "uninstallRemovedApplication": True,
+              "sandboxNetworkPermission": False,
+              "productionModelAndTrustRoots": False,
+              "portalAndCompositorCertification": False,
+          }, sort_keys=True, indent=2) + "\n")
+          PY
+      - name: Preserve Flatpak build-only evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-build-only-evidence
+          path: |
+            tools/runs/ci-flatpak/build.log
+            tools/runs/ci-flatpak/previous-build.log
+            tools/runs/ci-flatpak/previous-commit.txt
+            tools/runs/ci-flatpak/upgrade.log
+            tools/runs/ci-flatpak/repair.log
+            tools/runs/ci-flatpak/downgrade.log
+            tools/runs/ci-flatpak/bundle/*.flatpak
+            tools/runs/ci-flatpak/bundle-inventory.json
+            tools/runs/ci-flatpak/bundle.sha256
+            tools/runs/ci-flatpak/launch.log
+            tools/runs/ci-flatpak/lifecycle-summary.json
+            platform/linux/flatpak/generated-sources.lock.json
+          if-no-files-found: warn

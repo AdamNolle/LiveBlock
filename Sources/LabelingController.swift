@@ -28,11 +28,71 @@ struct LabelBox: Codable, Identifiable, Hashable, Sendable {
 
 /// Persisted JSON sidecar for one labeled screenshot.
 struct LabelDocument: Codable, Sendable {
+    static let currentSchemaVersion = 1
+    var schemaVersion: Int = currentSchemaVersion
     var image: String          // filename only (no path) so the dataset is portable
     var imageWidth: Int
     var imageHeight: Int
     var boxes: [LabelBox]
     var labeledAt: Date
+}
+
+enum LabelingFileMover {
+    /// Move a screenshot and optional sidecar into trash without replacing any
+    /// existing bytes. Moving the label first permits rollback if the screenshot
+    /// move fails, matching the paired no-replace behavior of other adapters.
+    static func movePairToTrashNoReplace(
+        screenshot: URL,
+        label: URL,
+        trash: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        let screenshotDestination = trash.appendingPathComponent(screenshot.lastPathComponent)
+        let labelDestination = trash.appendingPathComponent(label.lastPathComponent)
+        let labelExists = fileManager.fileExists(atPath: label.path)
+        guard !fileManager.fileExists(atPath: screenshotDestination.path),
+              !labelExists || !fileManager.fileExists(atPath: labelDestination.path) else {
+            throw CocoaError(.fileWriteFileExists)
+        }
+
+        var movedLabel = false
+        if labelExists {
+            try fileManager.moveItem(at: label, to: labelDestination)
+            movedLabel = true
+        }
+        do {
+            try fileManager.moveItem(at: screenshot, to: screenshotDestination)
+        } catch {
+            if movedLabel {
+                try? fileManager.moveItem(at: labelDestination, to: label)
+            }
+            throw error
+        }
+    }
+}
+
+extension LabelDocument {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, image, imageWidth, imageHeight, boxes, labeledAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let version = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        guard version == Self.currentSchemaVersion else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: values,
+                debugDescription: "Unsupported labels schema \(version)"
+            )
+        }
+        schemaVersion = version
+        image = try values.decode(String.self, forKey: .image)
+        imageWidth = try values.decode(Int.self, forKey: .imageWidth)
+        imageHeight = try values.decode(Int.self, forKey: .imageHeight)
+        boxes = try values.decode([LabelBox].self, forKey: .boxes)
+        labeledAt = try values.decode(Date.self, forKey: .labeledAt)
+    }
 }
 
 /// Manages the unlabeled / labeled screenshot queue and persistence.
@@ -50,6 +110,9 @@ final class LabelingController: ObservableObject {
     /// True if the current image already has a label JSON. Drawing additional boxes
     /// will overwrite on save.
     @Published private(set) var currentIsLabeled: Bool = false
+    /// Non-nil when an existing sidecar is malformed or from a future schema.
+    /// Such files are read-only and never overwritten by navigation/autosave.
+    @Published private(set) var currentLabelCompatibilityError: String? = nil
 
     /// Boxes proposed by the bundled detector but not yet confirmed by the user.
     /// Drawn in yellow. Accepting one moves it into `currentBoxes` (drawn green)
@@ -57,21 +120,32 @@ final class LabelingController: ObservableObject {
     @Published var currentSuggestions: [LabelBox] = []
 
     private let visionProcessor = VisionProcessor()
+    private var shutdownRequested = false
 
     init() {
         TrainingPaths.ensureDirectories()
         refresh()
     }
 
+    /// Install a terminal barrier before windows are hidden. AppKit may still
+    /// deliver a close callback during termination; it must not save, migrate,
+    /// or discard labeling files after quit begins.
+    func prepareForShutdown() {
+        shutdownRequested = true
+        currentSuggestions = []
+    }
+
     /// Drop the cached CoreML model so the next labeling-suggestion call
     /// reloads from disk. Called by TrainingController after install.
     func reloadDetectionModel() {
+        guard !shutdownRequested else { return }
         visionProcessor.reloadModel()
     }
 
     // MARK: - Disk discovery
 
     func refresh() {
+        guard !shutdownRequested else { return }
         TrainingPaths.ensureDirectories()
         let fm = FileManager.default
         let dir = TrainingPaths.screenshots
@@ -164,12 +238,13 @@ final class LabelingController: ObservableObject {
     /// Generate detector proposals for the current image, using the controller's
     /// own VisionProcessor. Runs off the main actor.
     func generateSuggestionsForCurrent() async {
-        guard let url = currentURL else { return }
+        guard !shutdownRequested, let url = currentURL else { return }
         let detector = visionProcessor
         let detected = await detector.detectBoxesInPNGFile(at: url)
 
-        // Only apply if the user hasn't moved on while we were detecting.
-        guard currentURL == url else { return }
+        // Only apply if the user hasn't moved on or shutdown while detection
+        // was suspended off the main actor.
+        guard !shutdownRequested, currentURL == url else { return }
         let confirmed = currentBoxes
         let proposals = detected.filter { proposal in
             !confirmed.contains { confirmedOverlaps(proposal, $0, threshold: 0.5) }
@@ -194,6 +269,11 @@ final class LabelingController: ObservableObject {
     /// Save the current state. Returns true on success or if there's nothing to save.
     @discardableResult
     func saveLabels() -> Bool {
+        guard !shutdownRequested else { return false }
+        guard currentLabelCompatibilityError == nil else {
+            NSLog("LabelingController: refusing to overwrite incompatible label sidecar")
+            return false
+        }
         guard let url = currentURL else { return true }
         let labelURL = TrainingPaths.labelURL(forScreenshot: url)
         let doc = LabelDocument(image: url.lastPathComponent,
@@ -218,21 +298,29 @@ final class LabelingController: ObservableObject {
     }
 
     func markCurrentAsNoAds() {
+        guard !shutdownRequested, currentLabelCompatibilityError == nil else { return }
         currentBoxes.removeAll()
         _ = saveLabels()
     }
 
     /// Move the current screenshot (and any partial label) to the trash folder.
     func discardCurrent() {
-        guard let url = currentURL else { return }
+        guard !shutdownRequested, let url = currentURL else { return }
         let label = TrainingPaths.labelURL(forScreenshot: url)
-        let fm = FileManager.default
-        TrainingPaths.ensureDirectories()
-        let dest = TrainingPaths.trash.appendingPathComponent(url.lastPathComponent)
-        try? fm.removeItem(at: dest)
-        try? fm.moveItem(at: url, to: dest)
-        try? fm.removeItem(at: label)
-        // Remove from list and adjust index.
+        guard TrainingPaths.ensureDirectories() else { return }
+        do {
+            // Preserve sidecars—including unknown future schemas—beside the
+            // discarded screenshot without replacing an earlier trash entry.
+            try LabelingFileMover.movePairToTrashNoReplace(
+                screenshot: url,
+                label: label,
+                trash: TrainingPaths.trash
+            )
+        } catch {
+            NSLog("LabelingController: discard failed: \(error.localizedDescription)")
+            return
+        }
+        // Remove from list and adjust index only after the paired move commits.
         if index < screenshots.count { screenshots.remove(at: index) }
         totalCount = screenshots.count
         recomputeLabeledCount()
@@ -249,6 +337,7 @@ final class LabelingController: ObservableObject {
             currentBoxes = []
             currentSuggestions = []
             currentIsLabeled = false
+            currentLabelCompatibilityError = nil
             return
         }
 
@@ -261,15 +350,33 @@ final class LabelingController: ObservableObject {
         }
 
         let labelURL = TrainingPaths.labelURL(forScreenshot: url)
+        currentLabelCompatibilityError = nil
         if let data = try? Data(contentsOf: labelURL) {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             if let doc = try? decoder.decode(LabelDocument.self, from: data) {
                 currentBoxes = doc.boxes
                 currentIsLabeled = true
+                // Legacy sidecars had no schemaVersion. Rewrite only after a
+                // successful decode so malformed/future documents stay intact.
+                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                if !shutdownRequested, object?["schemaVersion"] == nil {
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    encoder.dateEncodingStrategy = .iso8601
+                    if let migrated = try? encoder.encode(doc) {
+                        try? migrated.write(to: labelURL, options: .atomic)
+                    }
+                }
             } else {
                 currentBoxes = []
                 currentIsLabeled = false
+                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                if let version = object?["schemaVersion"] as? Int, version > 1 {
+                    currentLabelCompatibilityError = "Labels use unsupported schema \(version); file preserved."
+                } else {
+                    currentLabelCompatibilityError = "Label sidecar is unreadable; file preserved."
+                }
             }
         } else {
             currentBoxes = []

@@ -15,8 +15,8 @@ use thiserror::Error;
 
 pub use liveblock_config::{self as config, CoordinatorConfig};
 pub use liveblock_detection::{
-    self as detection, flip_y, iou as detection_iou, non_max_suppression, to_pixel_rect_bottom_left,
-    to_pixel_rect_top_left, Detection, PixelRect,
+    self as detection, flip_y, iou as detection_iou, non_max_suppression,
+    to_pixel_rect_bottom_left, to_pixel_rect_top_left, Detection, PixelRect,
 };
 pub use liveblock_labels::{self as labels, Iso8601, LabelBox, LabelDocument};
 pub use liveblock_regions::{self as regions, NormalizedRegion, RegionStore};
@@ -104,13 +104,7 @@ impl MaskCache {
 
     /// Look up a cached mask matching `(width, height, signature)` or compute
     /// it via `build`.
-    pub fn get_or_build<F>(
-        &self,
-        width: u32,
-        height: u32,
-        signature: u64,
-        build: F,
-    ) -> Arc<Mask>
+    pub fn get_or_build<F>(&self, width: u32, height: u32, signature: u64, build: F) -> Arc<Mask>
     where
         F: FnOnce() -> Mask,
     {

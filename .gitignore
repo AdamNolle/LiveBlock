@@ -37,8 +37,11 @@ LiveBlock *.xcodeproj/
 Package.resolved
 .build/
 
-# CoreML build artifacts
+# CoreML build artifacts and protected release-only model inputs
 *.mlmodelc
+/Sources/Resources/release-liveblock-detector.mlmodelc/
+/Sources/Resources/release-liveblock-detector.manifest.json
+/Sources/Resources/release-trusted-model-keys.json
 
 # Python
 __pycache__/
@@ -58,13 +61,20 @@ tools/runs/
 tools/datasets/
 tools/wandb/
 
-# Local model backups
+# Local model backups and experimental training weights
 *.mlpackage.bak/
 *.pt.bak
+/weights/
+/*.pt
 
-# Rust (when core/ exists)
+# Local coding-agent state (never product source)
+/.pi-subagents/
+/.ralph/
+/.serena/
+/AGENTS.md
+
+# Rust workspaces (application lockfiles are tracked for reproducible evidence)
 core/target/
-core/Cargo.lock
 **/target/
 
 # swift-bridge generated glue (regenerated from build.rs each build)
@@ -87,6 +97,7 @@ platform/windows/Release/
 # Linux port
 platform/linux/target/
 platform/linux/build/
+platform/linux/src-tauri/resources/onnxruntime/
 
 # Editors / IDEs
 .idea/

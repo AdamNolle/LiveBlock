@@ -32,8 +32,8 @@ struct AdBoundingBox: Sendable {
 /// `liveblock-detector.mlpackage`.
 ///
 /// The bundled model is the open-vocabulary detector baked by
-/// `tools/build_openvocab.py` from YOLO-World-v2 — 9 concept prompts flattened
-/// from `tools/vocab/liveblock-vocab.json` (Logo / Ad banner / Sponsored),
+/// `tools/build_openvocab.py` from YOLO-World-v2 — one primary prompt for each
+/// class in `tools/vocab/liveblock-vocab.json` (Logo / Ad banner / Sponsored),
 /// exported NMS-baked to CoreML. No training data: the vocabulary is text, and
 /// it generalises to unseen brands. Per-class enable flags + score thresholds
 /// are read from the shared `liveblock-config` store via `DetectionVocabulary`.
@@ -44,6 +44,7 @@ final class VisionProcessor: @unchecked Sendable {
     private var realtimeRequest: VNCoreMLRequest?  // reused on the videoQueue
     private var labelingRequest: VNCoreMLRequest?  // reused on background labeling tasks
     private var loadFailed = false
+    private var modelGeneration: UInt64 = 0
     private var _minimumConfidence: Float = 0.25
 
     /// Per-class vocabulary + thresholds from the shared Rust config. Built
@@ -94,15 +95,10 @@ final class VisionProcessor: @unchecked Sendable {
             vocabulary = ensureVocabularyLocked()
         }
 
-        // Reuse the cached request — VNCoreMLRequest is designed for create-once-reuse.
-        let request: VNCoreMLRequest = {
-            lock.lock(); defer { lock.unlock() }
-            if let r = realtimeRequest { return r }
-            let r = VNCoreMLRequest(model: vnModel)
-            r.imageCropAndScaleOption = .scaleFill
-            realtimeRequest = r
-            return r
-        }()
+        // Publish a request only if this exact model is still current. An
+        // authenticated update may invalidate the generation between
+        // `ensureModel` and this lock acquisition.
+        guard let request = request(for: vnModel, labeling: false) else { return [] }
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         do {
@@ -136,9 +132,31 @@ final class VisionProcessor: @unchecked Sendable {
         }
     }
 
+    private func request(for candidate: VNCoreMLModel, labeling: Bool) -> VNCoreMLRequest? {
+        lock.lock(); defer { lock.unlock() }
+        guard let model, model === candidate else { return nil }
+        if labeling, let labelingRequest { return labelingRequest }
+        if !labeling, let realtimeRequest { return realtimeRequest }
+        let request = VNCoreMLRequest(model: candidate)
+        request.imageCropAndScaleOption = .scaleFill
+        if labeling { labelingRequest = request } else { realtimeRequest = request }
+        return request
+    }
+
     func updateMinimumConfidence(_ value: Float) {
         lock.lock(); defer { lock.unlock() }
         _minimumConfidence = max(0, min(1, value))
+    }
+
+    func detectorRules() -> [DetectorClassRule] {
+        lock.lock(); defer { lock.unlock() }
+        return ensureVocabularyLocked().rules
+    }
+
+    @discardableResult
+    func setDetectorClassEnabled(id: UInt32, enabled: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ensureVocabularyLocked().setClassEnabled(id: id, enabled: enabled)
     }
 
     /// Detect against a PNG on disk. Returns proposals as `LabelBox` (normalized,
@@ -151,14 +169,7 @@ final class VisionProcessor: @unchecked Sendable {
             return []
         }
 
-        let request: VNCoreMLRequest = {
-            lock.lock(); defer { lock.unlock() }
-            if let r = labelingRequest { return r }
-            let r = VNCoreMLRequest(model: vnModel)
-            r.imageCropAndScaleOption = .scaleFill
-            labelingRequest = r
-            return r
-        }()
+        guard let request = request(for: vnModel, labeling: true) else { return [] }
         let proposalThreshold: Float = 0.20  // lower than the 0.35 realtime default
 
         let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up)
@@ -201,43 +212,67 @@ final class VisionProcessor: @unchecked Sendable {
     func reloadModel() {
         lock.lock()
         defer { lock.unlock() }
+        modelGeneration &+= 1
         model = nil
+        realtimeRequest = nil
+        labelingRequest = nil
         loadFailed = false
         NSLog("VisionProcessor: model cache cleared; will reload on next inference.")
     }
 
     private func ensureModel() -> VNCoreMLModel? {
-        lock.lock(); defer { lock.unlock() }
-        if let model { return model }
-        if loadFailed { return nil }
+        lock.lock()
+        if let model { lock.unlock(); return model }
+        if loadFailed { lock.unlock(); return nil }
+        let generation = modelGeneration
+        lock.unlock()
 
         do {
+            // Distribution recovery may wait for an installer transaction. Do
+            // not hold the processor lock: installer activation must be able to
+            // invalidate this generation without deadlocking.
             let mlModel = try Self.loadModel()
             let vnModel = try VNCoreMLModel(for: mlModel)
+            lock.lock(); defer { lock.unlock() }
+            guard modelGeneration == generation else { return model }
             self.model = vnModel
             NSLog("VisionProcessor: loaded liveblock-detector CoreML model.")
             return vnModel
         } catch {
-            loadFailed = true
+            lock.lock(); defer { lock.unlock() }
+            if modelGeneration == generation { loadFailed = true }
             NSLog("VisionProcessor: failed to load liveblock-detector model: \(error.localizedDescription)")
             return nil
         }
     }
 
-    /// Look up the model in priority order:
-    ///   1. The runtime directory the trainer writes to (newer than bundle).
-    ///   2. The app bundle (the original ships-with-app default).
+    /// Release builds accept only a model authenticated by the embedded keyring
+    /// and signed manifest. Debug/source builds retain the explicit developer
+    /// candidate path used by the local training workflow.
     private static func loadModel() throws -> MLModel {
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .all
 
+#if !DEBUG
+        guard let authenticated = try MacModelDistribution().resolveAuthenticatedModel() else {
+            throw NSError(domain: "VisionProcessor", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "no authenticated CoreML detector is installed or packaged"
+            ])
+        }
+        return try MLModel(contentsOf: authenticated, configuration: configuration)
+#else
         let runtimeDir = runtimeModelDirectory
-        for ext in ["mlmodelc", "mlpackage"] {
-            let url = runtimeDir.appendingPathComponent("liveblock-detector.\(ext)")
-            if FileManager.default.fileExists(atPath: url.path) {
-                NSLog("VisionProcessor: loading model from runtime dir \(url.path)")
-                return try MLModel(contentsOf: url, configuration: configuration)
+        let runtimeCandidates = ["mlmodelc", "mlpackage"]
+            .map { runtimeDir.appendingPathComponent("liveblock-detector.\($0)") }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+            .sorted {
+                let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhs > rhs
             }
+        if let url = runtimeCandidates.first {
+            NSLog("VisionProcessor: loading newest runtime model \(url.path)")
+            return try MLModel(contentsOf: url, configuration: configuration)
         }
 
         let bundle = Bundle.main
@@ -249,5 +284,6 @@ final class VisionProcessor: @unchecked Sendable {
         throw NSError(domain: "VisionProcessor", code: 1, userInfo: [
             NSLocalizedDescriptionKey: "liveblock-detector model not found in bundle or runtime dir"
         ])
+#endif
     }
 }

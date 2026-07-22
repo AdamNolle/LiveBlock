@@ -1,26 +1,25 @@
-//! `zwlr_layer_shell_v1` overlay — works on Sway / Hyprland / river / KDE /
-//! wlroots compositors. Anchors the surface to the whole output and assigns
-//! it to the OVERLAY layer with an empty input region (click-through).
+//! Configure Tauri's GTK render window as a non-interactive layer-shell
+//! surface on KDE/wlroots compositors.
 
-use anyhow::{anyhow, Result};
-use smithay_client_toolkit::reexports::client::{
-    globals::registry_queue_init, Connection, QueueHandle,
-};
+use anyhow::{Context, Result};
+use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use tauri::Manager;
 
-pub fn install() -> Result<()> {
-    let conn = Connection::connect_to_env()
-        .map_err(|e| anyhow!("connect to wayland: {e}"))?;
-    let (_globals, mut _qh) = registry_queue_init::<State>(&conn)
-        .map_err(|e| anyhow!("registry init: {e}"))?;
-
-    // TODO(linux-port): bind zwlr_layer_shell_v1 + zwlr_layer_surface_v1,
-    // create a layer surface with:
-    //   - layer = OVERLAY
-    //   - keyboard_interactivity = NONE
-    //   - exclusive_zone = -1 (don't reserve, don't be reserved)
-    //   - anchor = TOP|BOTTOM|LEFT|RIGHT (full-screen)
-    // Then set wl_surface::set_input_region(empty) for click-through.
+pub fn install(app: &tauri::AppHandle) -> Result<()> {
+    let render = app
+        .get_webview_window("render")
+        .context("render window is unavailable")?;
+    let gtk_window = render.gtk_window().context("resolve GTK render window")?;
+    gtk_window.init_layer_shell();
+    gtk_window.set_layer(Layer::Overlay);
+    gtk_window.set_keyboard_mode(KeyboardMode::None);
+    gtk_window.set_exclusive_zone(0);
+    gtk_window.set_namespace("liveblock-overlay");
+    for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+        gtk_window.set_anchor(edge, true);
+    }
+    render
+        .set_ignore_cursor_events(true)
+        .context("make layer-shell overlay click-through")?;
     Ok(())
 }
-
-struct State;

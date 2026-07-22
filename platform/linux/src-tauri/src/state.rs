@@ -1,14 +1,167 @@
-//! Central app state. Held inside Tauri's State<>.
+//! Central Linux application and capture lifecycle state.
 
+use crate::capture::FrameView;
+use crate::detection::Detector;
+use crate::inpainting::Inpainter;
 use crate::regions::SharedRegionStore;
+use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
-use std::sync::atomic::AtomicBool;
+use serde::Serialize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub struct CaptureRuntime {
+    pub generation: u64,
+    pub stop_requested: Arc<AtomicBool>,
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+pub fn take_finished_capture_runtime(
+    runtime: &mut Option<CaptureRuntime>,
+) -> Option<CaptureRuntime> {
+    if runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.task.is_finished())
+    {
+        runtime.take()
+    } else {
+        None
+    }
+}
+
+pub struct LatestFrame {
+    pub generation: u64,
+    pub frame: FrameView,
+}
+
+pub fn advance_capture_generation(generation: &AtomicU64) -> u64 {
+    let next = generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    if next == 0 {
+        generation.store(1, Ordering::SeqCst);
+        1
+    } else {
+        next
+    }
+}
+
+pub fn claim_user_action(
+    latest_action_sequence: &AtomicU64,
+    shutdown_requested: bool,
+    action_sequence: u64,
+) -> bool {
+    if shutdown_requested || action_sequence == 0 {
+        return false;
+    }
+    latest_action_sequence
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            (action_sequence > current).then_some(action_sequence)
+        })
+        .is_ok()
+}
+
+pub fn user_action_is_current(
+    latest_action_sequence: &AtomicU64,
+    shutdown_requested: bool,
+    action_sequence: u64,
+) -> bool {
+    !shutdown_requested
+        && action_sequence != 0
+        && latest_action_sequence.load(Ordering::SeqCst) == action_sequence
+}
+
+pub fn window_action_is_newer_than_barriers(
+    action_sequence: u64,
+    latest_capture_action: u64,
+    last_panic_action: u64,
+    shutdown_requested: bool,
+) -> bool {
+    action_sequence != 0
+        && !shutdown_requested
+        && action_sequence > latest_capture_action.max(last_panic_action)
+}
+
+pub fn frame_belongs_to_active_generation(
+    current_generation: u64,
+    capture_running: bool,
+    frame_generation: u64,
+) -> bool {
+    current_generation != 0 && capture_running && current_generation == frame_generation
+}
+
+#[derive(Default)]
+pub struct CaptureTelemetry {
+    captured_frames: AtomicU64,
+    processed_frames: AtomicU64,
+    dropped_frames: AtomicU64,
+    copy_errors: AtomicU64,
+    last_frame_unix_ms: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureTelemetrySnapshot {
+    pub captured_frames: u64,
+    pub processed_frames: u64,
+    pub dropped_frames: u64,
+    pub copy_errors: u64,
+    pub protected_frames: u64,
+    pub protected_content: bool,
+    pub last_frame_unix_ms: u64,
+}
+
+impl CaptureTelemetry {
+    pub fn reset(&self) {
+        self.captured_frames.store(0, Ordering::Relaxed);
+        self.processed_frames.store(0, Ordering::Relaxed);
+        self.dropped_frames.store(0, Ordering::Relaxed);
+        self.copy_errors.store(0, Ordering::Relaxed);
+        self.last_frame_unix_ms.store(0, Ordering::Relaxed);
+    }
+    pub fn captured(&self) {
+        self.captured_frames.fetch_add(1, Ordering::Relaxed);
+        self.last_frame_unix_ms
+            .store(unix_millis(), Ordering::Relaxed);
+    }
+    pub fn processed(&self) {
+        self.processed_frames.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn copy_error(&self) {
+        self.copy_errors.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn set_dropped(&self, value: u64) {
+        self.dropped_frames.store(value, Ordering::Relaxed);
+    }
+    pub fn snapshot(&self) -> CaptureTelemetrySnapshot {
+        CaptureTelemetrySnapshot {
+            captured_frames: self.captured_frames.load(Ordering::Relaxed),
+            processed_frames: self.processed_frames.load(Ordering::Relaxed),
+            dropped_frames: self.dropped_frames.load(Ordering::Relaxed),
+            copy_errors: self.copy_errors.load(Ordering::Relaxed),
+            protected_frames: 0,
+            protected_content: false,
+            last_frame_unix_ms: self.last_frame_unix_ms.load(Ordering::Relaxed),
+        }
+    }
+}
 
 pub struct AppState {
     pub region_store: SharedRegionStore,
     pub capture_running: AtomicBool,
+    pub capture_generation: AtomicU64,
+    pub latest_action_sequence: AtomicU64,
+    pub last_panic_action: AtomicU64,
+    pub shutdown_requested: AtomicBool,
+    pub capture: tokio::sync::Mutex<Option<CaptureRuntime>>,
+    pub capture_telemetry: CaptureTelemetry,
+    pub latest_frame: ArcSwapOption<LatestFrame>,
+    pub hotkeys_initialized: AtomicBool,
+    pub hotkeys_available: AtomicBool,
     pub detection_enabled: AtomicBool,
+    pub detector: Mutex<Option<Detector>>,
+    pub persistent_mutation: Mutex<()>,
+    pub model_update: Mutex<()>,
+    pub inpainter: Mutex<Inpainter>,
     pub current_patches: Mutex<Vec<crate::inpainting::PatchPayload>>,
     pub last_detections: Mutex<Vec<String>>,
 }
@@ -18,9 +171,88 @@ impl AppState {
         Arc::new(Self {
             region_store,
             capture_running: AtomicBool::new(false),
+            capture_generation: AtomicU64::new(0),
+            latest_action_sequence: AtomicU64::new(0),
+            last_panic_action: AtomicU64::new(0),
+            shutdown_requested: AtomicBool::new(false),
+            capture: tokio::sync::Mutex::new(None),
+            capture_telemetry: CaptureTelemetry::default(),
+            latest_frame: ArcSwapOption::from(None),
+            hotkeys_initialized: AtomicBool::new(false),
+            hotkeys_available: AtomicBool::new(false),
             detection_enabled: AtomicBool::new(false),
+            detector: Mutex::new(None),
+            persistent_mutation: Mutex::new(()),
+            model_update: Mutex::new(()),
+            inpainter: Mutex::new(Inpainter::new()),
             current_patches: Mutex::new(Vec::new()),
             last_detections: Mutex::new(Vec::new()),
         })
+    }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_capture_runtime_is_reaped_but_live_runtime_is_retained() {
+        let finished_task = tokio::spawn(async {});
+        tokio::task::yield_now().await;
+        assert!(finished_task.is_finished());
+        let mut finished = Some(CaptureRuntime {
+            generation: 7,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            task: finished_task,
+        });
+        let reaped = take_finished_capture_runtime(&mut finished).unwrap();
+        assert_eq!(reaped.generation, 7);
+        reaped.task.await.unwrap();
+        assert!(finished.is_none());
+
+        let live_task = tokio::spawn(std::future::pending());
+        let mut live = Some(CaptureRuntime {
+            generation: 8,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            task: live_task,
+        });
+        assert!(take_finished_capture_runtime(&mut live).is_none());
+        let live = live.take().unwrap();
+        live.task.abort();
+        let _ = live.task.await;
+    }
+
+    #[test]
+    fn user_actions_are_monotonic_and_shutdown_is_terminal() {
+        let latest = AtomicU64::new(0);
+        assert!(!claim_user_action(&latest, false, 0));
+        assert!(claim_user_action(&latest, false, 3));
+        assert!(!claim_user_action(&latest, false, 2));
+        assert!(!claim_user_action(&latest, false, 3));
+        assert!(user_action_is_current(&latest, false, 3));
+        assert!(!user_action_is_current(&latest, false, 2));
+        assert!(!claim_user_action(&latest, true, 4));
+        assert!(!user_action_is_current(&latest, true, 3));
+        assert!(window_action_is_newer_than_barriers(6, 4, 5, false));
+        assert!(!window_action_is_newer_than_barriers(5, 4, 5, false));
+        assert!(!window_action_is_newer_than_barriers(6, 4, 5, true));
+    }
+
+    #[test]
+    fn latest_frame_requires_running_matching_nonzero_generation() {
+        let generation = AtomicU64::new(u64::MAX);
+        assert_eq!(advance_capture_generation(&generation), 1);
+        assert_eq!(generation.load(Ordering::SeqCst), 1);
+        assert!(frame_belongs_to_active_generation(4, true, 4));
+        assert!(!frame_belongs_to_active_generation(0, true, 0));
+        assert!(!frame_belongs_to_active_generation(4, false, 4));
+        assert!(!frame_belongs_to_active_generation(5, true, 4));
     }
 }

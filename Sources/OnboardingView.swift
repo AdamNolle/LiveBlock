@@ -37,7 +37,7 @@ struct OnboardingView: View {
     private var header: some View {
         HStack(spacing: 10) {
             LiveBlockerLogo(size: 20, cornerRadius: 5)
-            Text("LiveBlocker")
+            Text("LiveBlock")
                 .font(Theme.ui(size: 13, weight: .semibold))
                 .tracking(-0.18)
                 .foregroundStyle(Theme.ink1)
@@ -60,18 +60,13 @@ struct OnboardingView: View {
 
             LiveBlockerLogo(size: 76, cornerRadius: 18)
 
-            (
-                Text("Take the ads\n")
-                    .foregroundColor(Theme.ink1)
-                + Text("out of your screen.")
-                    .foregroundColor(Theme.accent)
-            )
+            Text("\(Text("Take the ads\n").foregroundColor(Theme.ink1))\(Text("out of your screen.").foregroundColor(Theme.accent))")
             .font(Theme.display(size: 30, weight: .bold))
             .tracking(-0.75)
             .lineSpacing(2)
             .padding(.top, 24)
 
-            Text("LiveBlocker reads what's on your display, finds the bits you didn't ask for, and paints over them — locally, on your machine, before they reach your eyes.")
+            Text("LiveBlock reads what's on your display, finds the bits you didn't ask for, and paints over them locally on your machine.")
                 .font(Theme.ui(size: 14))
                 .foregroundStyle(Theme.ink3)
                 .lineSpacing(3)
@@ -87,7 +82,7 @@ struct OnboardingView: View {
                     Text("Nothing leaves this device")
                         .font(Theme.ui(size: 13, weight: .semibold))
                         .foregroundStyle(Theme.ink1)
-                    Text("No pixel content, ever. Just frame timing if you opt in.")
+                    Text("Pixel content stays local and is not sent as telemetry.")
                         .font(Theme.ui(size: 12))
                         .foregroundStyle(Theme.ink3)
                 }
@@ -104,13 +99,13 @@ struct OnboardingView: View {
     private var stepPermissions: some View {
         VStack(alignment: .leading, spacing: 0) {
             Caption("Step 2 — permissions")
-            Text("Two quick grants.")
+            Text("Two required grants.")
                 .font(Theme.ui(size: 24, weight: .semibold))
                 .tracking(-0.48)
                 .foregroundStyle(Theme.ink1)
                 .padding(.top, 8)
                 .padding(.bottom, 6)
-            Text("Both stay on this device. You can revoke either anytime from System Settings.")
+            Text("You can revoke either grant anytime from System Settings.")
                 .font(Theme.ui(size: 13))
                 .foregroundStyle(Theme.ink3)
                 .lineSpacing(2)
@@ -118,12 +113,12 @@ struct OnboardingView: View {
             VStack(spacing: 10) {
                 permissionRow(kind: .screenCapture,
                               name: "Screen recording",
-                              detail: "So LiveBlocker can read each frame and decide what to fill.",
+                              detail: "So LiveBlock can process display frames locally and render selected regions.",
                               system: "cpu", required: true)
                 permissionRow(kind: .accessibility,
                               name: "Accessibility",
-                              detail: "Optional — lets blocks snap to real UI elements instead of pixels.",
-                              system: "shield.lefthalf.filled", required: false)
+                              detail: "Enables LiveBlock's global keyboard shortcuts while another app has focus.",
+                              system: "keyboard", required: true)
             }
             .padding(.top, 18)
 
@@ -134,12 +129,7 @@ struct OnboardingView: View {
                 Image(systemName: "lock")
                     .font(.system(size: 14, weight: .regular))
                     .foregroundStyle(Theme.ml)
-                (
-                    Text("Frames are processed inside a sandboxed GPU pipeline and discarded the moment they've been composited. ")
-                        .foregroundColor(Theme.ink3)
-                    + Text("Nothing is saved.")
-                        .foregroundColor(Theme.ink2)
-                )
+                Text("\(Text("Frames are processed locally with GPU or CPU fallback and discarded after processing. ").foregroundColor(Theme.ink3))\(Text("Nothing is saved.").foregroundColor(Theme.ink2))")
                 .font(Theme.ui(size: 12))
                 .lineSpacing(2)
                 Spacer(minLength: 0)
@@ -155,7 +145,16 @@ struct OnboardingView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    enum PermissionKind { case screenCapture, accessibility }
+    enum PermissionKind {
+        case screenCapture, accessibility
+
+        var accessibilityIdentifier: String {
+            switch self {
+            case .screenCapture: "onboarding.allow-screen-recording"
+            case .accessibility: "onboarding.allow-accessibility"
+            }
+        }
+    }
 
     private func permissionRow(kind: PermissionKind,
                                name: String,
@@ -200,13 +199,13 @@ struct OnboardingView: View {
                         Permissions.requestScreenRecording()
                         Permissions.openSystemSettings(.screenRecording)
                     case .accessibility:
-                        // Fires the Accessibility modal the first time;
-                        // routes to Settings if user already saw it.
                         if !Permissions.requestAccessibility() {
                             Permissions.openSystemSettings(.accessibility)
                         }
                     }
                 }
+                .accessibilityLabel("Allow \(name)")
+                .accessibilityIdentifier(kind.accessibilityIdentifier)
             }
         }
         .padding(14)

@@ -104,10 +104,7 @@ struct RegionLibraryView: View {
     private var footRow: some View {
         HStack(spacing: 10) {
             let shown = filteredRegions.count
-            (Text("Showing ")
-             + Text("\(shown)").font(Theme.mono(size: 12, weight: .medium)).foregroundColor(Theme.ink1)
-             + Text(" of ")
-             + Text("\(controller.regionCount)").font(Theme.mono(size: 12, weight: .medium)).foregroundColor(Theme.ink1))
+            Text("Showing \(Text("\(shown)").font(Theme.mono(size: 12, weight: .medium)).foregroundColor(Theme.ink1)) of \(Text("\(controller.regionCount)").font(Theme.mono(size: 12, weight: .medium)).foregroundColor(Theme.ink1))")
                 .font(Theme.ui(size: 12))
                 .foregroundStyle(Theme.ink3)
             Spacer(minLength: 0)
@@ -221,7 +218,9 @@ struct RegionLibraryView: View {
             LBToggle(isOn: Binding(
                 get: { controller.regionEnabled(id: r.id) },
                 set: { controller.setRegionEnabled(id: r.id, on: $0) }
-            ), size: .sm)
+            ), accessibilityName: "Region \(index + 1) enabled",
+               accessibilityIdentifier: "region-library-toggle.\(r.id.uuidString)",
+               size: .sm)
             .frame(width: wOn, alignment: .leading)
             .help(isOn ? "Disable this region (keeps it in the list)" : "Re-enable this region")
 

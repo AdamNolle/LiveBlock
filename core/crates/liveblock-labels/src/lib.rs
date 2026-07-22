@@ -1,8 +1,9 @@
 //! Training-label types for LiveBlock.
 //!
 //! Mirrors `LabelBox` and `LabelDocument` in `Sources/LabelingController.swift`.
-//! Saved JSON uses pretty-printed, sorted-key encoding with ISO-8601 dates,
-//! matching the Swift output byte-for-byte for the round-tripping fields.
+//! Schema 1 sidecars use pretty-printed, sorted-key encoding with ISO-8601
+//! dates. Legacy unversioned documents migrate atomically; future versions are
+//! rejected without rewriting.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
@@ -20,6 +21,8 @@ pub enum LabelError {
     Json(#[from] serde_json::Error),
     #[error("invalid date: {0}")]
     Date(String),
+    #[error("unsupported labels schema version {found}; current version is {current}")]
+    UnsupportedSchema { found: u32, current: u32 },
 }
 
 /// A single labeled box on a screenshot. Coords normalized [0..1] with
@@ -90,9 +93,17 @@ pub fn iou(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> f64 {
     }
 }
 
+pub const LABELS_SCHEMA_VERSION: u32 = 1;
+
+fn current_labels_schema() -> u32 {
+    LABELS_SCHEMA_VERSION
+}
+
 /// Persisted JSON sidecar for one labeled screenshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabelDocument {
+    #[serde(rename = "schemaVersion", default = "current_labels_schema")]
+    pub schema_version: u32,
     /// Filename only (no path) so the dataset is portable.
     pub image: String,
     #[serde(rename = "imageWidth")]
@@ -181,7 +192,11 @@ fn format_iso8601(unix_secs: i64) -> String {
 /// Howard Hinnant's days-from-civil algorithm, reversed.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = (z - era * 146_097) as u64; // [0, 146096]
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
     let y = yoe as i64 + era * 400;
@@ -223,13 +238,31 @@ impl LabelDocument {
 
     /// Load a document from disk.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, LabelError> {
+        let path = path.as_ref();
         let bytes = fs::read(path)?;
-        let doc: LabelDocument = serde_json::from_slice(&bytes)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let had_schema = value.get("schemaVersion").is_some();
+        let doc: LabelDocument = serde_json::from_value(value)?;
+        if doc.schema_version != LABELS_SCHEMA_VERSION {
+            return Err(LabelError::UnsupportedSchema {
+                found: doc.schema_version,
+                current: LABELS_SCHEMA_VERSION,
+            });
+        }
+        if !had_schema {
+            doc.save(path)?;
+        }
         Ok(doc)
     }
 
     /// Render to bytes with sorted keys and 2-space indent.
     pub fn to_pretty_sorted_bytes(&self) -> Result<Vec<u8>, LabelError> {
+        if self.schema_version != LABELS_SCHEMA_VERSION {
+            return Err(LabelError::UnsupportedSchema {
+                found: self.schema_version,
+                current: LABELS_SCHEMA_VERSION,
+            });
+        }
         // Build a sorted representation per box plus the doc.
         let boxes: Vec<serde_json::Value> = self
             .boxes
@@ -257,6 +290,7 @@ impl LabelDocument {
             "labeledAt",
             serde_json::Value::String(self.labeled_at.0.clone()),
         );
+        top.insert("schemaVersion", serde_json::json!(LABELS_SCHEMA_VERSION));
 
         let value = serde_json::Value::from_iter(top);
         let mut buf = Vec::new();
@@ -271,6 +305,16 @@ impl LabelDocument {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn published_schema_matches_runtime_version() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../contracts/labels.schema.json")).unwrap();
+        assert_eq!(
+            schema["properties"]["schemaVersion"]["const"],
+            LABELS_SCHEMA_VERSION
+        );
+    }
 
     #[test]
     fn iou_zero_when_disjoint() {
@@ -322,6 +366,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("shot.json");
         let doc = LabelDocument {
+            schema_version: LABELS_SCHEMA_VERSION,
             image: "shot.png".to_string(),
             image_width: 1920,
             image_height: 1080,
@@ -336,6 +381,7 @@ mod tests {
     #[test]
     fn saved_json_has_sorted_top_level_keys() {
         let doc = LabelDocument {
+            schema_version: LABELS_SCHEMA_VERSION,
             image: "shot.png".to_string(),
             image_width: 1,
             image_height: 1,
@@ -349,9 +395,33 @@ mod tests {
         let height_pos = s.find("\"imageHeight\"").unwrap();
         let width_pos = s.find("\"imageWidth\"").unwrap();
         let labeled_pos = s.find("\"labeledAt\"").unwrap();
+        let schema_pos = s.find("\"schemaVersion\"").unwrap();
         assert!(boxes_pos < image_pos);
         assert!(image_pos < height_pos);
         assert!(height_pos < width_pos);
         assert!(width_pos < labeled_pos);
+        assert!(labeled_pos < schema_pos);
+    }
+
+    #[test]
+    fn legacy_label_migrates_and_future_schema_is_preserved() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("shot.json");
+        let legacy = r#"{"image":"shot.png","imageWidth":1,"imageHeight":1,"boxes":[],"labeledAt":"1970-01-01T00:00:00Z"}"#;
+        std::fs::write(&path, legacy).unwrap();
+        let loaded = LabelDocument::load(&path).unwrap();
+        assert_eq!(loaded.schema_version, LABELS_SCHEMA_VERSION);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"schemaVersion\": 1"));
+
+        let future = r#"{"schemaVersion":99,"image":"shot.png","imageWidth":1,"imageHeight":1,"boxes":[],"labeledAt":"1970-01-01T00:00:00Z"}"#;
+        std::fs::write(&path, future).unwrap();
+        let error = LabelDocument::load(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            LabelError::UnsupportedSchema { found: 99, .. }
+        ));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), future);
     }
 }

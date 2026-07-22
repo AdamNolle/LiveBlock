@@ -4,7 +4,7 @@ import SwiftUI
 /// First-run onboarding window. 3-step welcome → permissions → first-block.
 /// Shown automatically on first launch when `UserDefaults` flag is unset;
 /// can also be re-opened from the menu bar.
-final class OnboardingWindow: NSWindow, NSWindowDelegate {
+final class OnboardingWindow: NSWindow {
     init(rootView: AnyView) {
         super.init(contentRect: NSRect(x: 100, y: 100, width: 540, height: 640),
                    styleMask: [.titled, .closable, .resizable],
@@ -20,10 +20,5 @@ final class OnboardingWindow: NSWindow, NSWindowDelegate {
         let host = NSHostingView(rootView: rootView)
         host.translatesAutoresizingMaskIntoConstraints = false
         self.contentView = host
-        self.delegate = self
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        UserDefaults.standard.set(true, forKey: "didOnboard")
     }
 }

@@ -7,21 +7,35 @@ Liquid Glass aesthetic.
 
 ## Status
 
-**Skeleton.** The crate compiles a runnable Tauri bundle, with stubbed but
-real-API capture / detection / inpaint paths. Display-server detection,
-overlay strategy selection, and the data layer (regions / labels) are
-fully implemented. The actual frame loops (PipeWire stream pumping, X11
-shm copy, wgpu compute dispatch) are flagged with `// TODO(linux-port):`
-and need on-Linux iteration.
+**Experimental, not release-ready.** Wayland uses the ScreenCast portal and a
+dedicated PipeWire loop with capacity-one newest-frame delivery and BGRA/BGRx,
+NV12, and YUY2 conversion. Valid PipeWire format/size renegotiation replaces the
+active layout; errors, revocation/disconnect, timed-out format removal, and
+malformed packed frames clear output and fail closed. Format removal permits a
+bounded two-second replacement window for resize. X11 captures the virtual root
+through XComposite and fd-backed MIT-SHM, converting padded 24/32-bit server
+pixels to packed BGRA. It polls root geometry at a bounded cadence and replaces
+the SHM mapping/stride behind a reset event when the virtual desktop resizes.
+Both paths feed local ONNX detection, bounded wgpu/WGSL mirror-blend
+inpainting when Vulkan/GL initialization succeeds, explicit CPU fallback,
+webview patch compositing, telemetry, and labeling screenshots. Capture tasks
+and screenshots are generation-bound so stop, panic, and restart invalidate
+stale publication. Monotonic user-action barriers reject delayed pre-stop or
+pre-panic starts/window opens; quit hides privacy-visible windows and awaits
+capture teardown before exit. GPU output is
+read back for PNG patch transport; this is not DMA-BUF or zero-copy rendering.
+Native CI proves compilation, WGSL parsing, CPU policy tests, and opportunistic
+software-adapter parity where available; real compositor/server, multi-output,
+GPU, overlay, hotkey, and lifecycle certification remain open.
 
 ## Distribution-server matrix
 
 | Compositor | Capture | Overlay | Notes |
 |---|---|---|---|
-| Sway / Hyprland / river / wlroots | Portal + PipeWire | wlr-layer-shell | Full feature parity |
-| KDE Plasma (Wayland) | Portal + PipeWire | wlr-layer-shell | KWin supports layer-shell since 5.27 |
-| GNOME / Mutter (Wayland) | Portal + PipeWire | **GNOME mode** | Visible movable window — no layer-shell |
-| X11 (any) | XComposite + XShm | override-redirect + xfixes | Best feature compatibility, going away |
+| Sway / Hyprland / river / wlroots | Portal + PipeWire (experimental) | GTK layer-shell click-through (experimental) | Target full support; not certified |
+| KDE Plasma (Wayland) | Portal + PipeWire (experimental) | GTK layer-shell click-through (experimental) | Target full support; not certified |
+| GNOME / Mutter (Wayland) | Portal + PipeWire (experimental) | **limited decorated preview window** | No global click-through overlay |
+| X11 (any) | XComposite + XShm (experimental) | override-redirect + XFixes click-through (experimental) | Target full support; not certified |
 
 Picked at runtime from `XDG_SESSION_TYPE` and `XDG_CURRENT_DESKTOP`.
 
@@ -76,15 +90,20 @@ cargo tauri build         # produces .deb, .rpm, .AppImage in src-tauri/target/r
 
 ## Hotkeys
 
-| Combo                  | Action                                      |
-|------------------------|---------------------------------------------|
-| Ctrl + Shift + L       | Toggle capture                              |
-| Ctrl + Shift + B       | Toggle region editor                        |
-| Ctrl + Shift + S       | Capture screenshot for labeling             |
-| Ctrl + Shift + Alt + . | Panic disable (close editor, show panel)   |
+Global hotkeys are implemented through the permissioned Wayland
+GlobalShortcuts portal and passive X11 `XGrabKey` registrations:
 
-System-wide hotkeys on Wayland require granting access via the GlobalShortcuts
-portal (one-time prompt). On X11 they use XGrabKey on the root.
+| Combo | Action |
+|---|---|
+| Ctrl+Shift+L | Toggle capture |
+| Ctrl+Shift+B | Toggle region editor |
+| Ctrl+Shift+S | Save a labeling frame |
+| Ctrl+Shift+Alt+. | Panic disable |
+
+Availability is runtime state, not assumed: the capability response and control
+panel report unavailable until every binding succeeds. Portal denial, shortcut
+conflicts, or an unsupported environment fail closed. Always retain control-panel
+access as the fallback until the target compositor is certified.
 
 ## Data layout
 
@@ -116,18 +135,35 @@ Schema is byte-compatible with macOS + Windows so labels round-trip.
 cargo tauri build --features cuda
 ```
 
-The first run downloads `libonnxruntime.so` automatically (ort `load-dynamic`).
+Production packages must bundle `resources/onnxruntime/libonnxruntime.so` as a
+real non-symlink 64-bit target-architecture ELF shared object beside a nonempty
+`THIRD-PARTY-NOTICES.txt`; runtime initialization is pinned to that package
+resource before any detector session opens and checks the ONNX Runtime API.
+Optional
+provider packages additionally require `libonnxruntime_providers_shared.so` and
+the one selected provider library. Every transitive vendor library and notice
+must be included in the final artifact inventory/SBOM. The EP registration is
+preferred with ONNX Runtime's explicit CPU fallback; capability output reports
+configuration, not proof that a GPU EP actually executed. LiveBlock does not
+download runtimes, code, or replacement weights.
+
+Release builds reject an unpackaged runtime. The
+`LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1` escape hatch is compile-only for source/CI,
+is accepted only alongside the actually empty development keyring override,
+and must never be used to create a distributed package. It cannot accompany
+production trust roots.
 
 ## Known limitations
 
 - **GNOME mode is not click-through.** Mutter does not implement
-  `wlr-layer-shell`, so the overlay is a normal always-on-top window. Move
-  it out of the way when not editing.
+  `wlr-layer-shell`, so rendering is confined to a bounded decorated preview
+  window. Move or close it when necessary.
 - **DRM-protected windows on Wayland** may return black frames depending on
   the compositor's portal implementation.
 - **Anti-cheat tooling** in some games will treat any overlay as suspicious.
-- **The bundled detection model is generic YOLOv8n on COCO** — it doesn't
-  detect ads. Train your own with `tools/auto.sh` (root of repo).
+- Production packages require the exact authenticated promoted ONNX model and
+  a nonempty embedded public-key ring. The current source/CI empty-ring build is
+  intentionally not distributable.
 - **Flatpak distribution requires portal-only operation.** The X11 path
   won't work inside a Flatpak sandbox; document this in the Flathub listing.
 
@@ -144,12 +180,13 @@ flatpak run com.adamnolle.LiveBlock
 
 ## Top 3 things to verify on real Linux
 
-1. **PipeWire SPA pod negotiation** — BGRA8888 is preferred, but some
-   compositors only offer YUY2 / NV12. `src-tauri/src/capture/wayland.rs`
-   needs format-specific conversion paths.
-2. **Wayland layer-shell click-through with wgpu surface** — the empty
-   input region must be re-applied after every `wl_surface::commit` and
-   resize. KWin in particular re-asserts the input region on commit.
+1. **PipeWire SPA pod negotiation** — BGRA/BGRx, YUY2, and NV12 conversion is
+   implemented and unit-tested, but DMA-BUF-only portals, plane metadata, color
+   range, resize, revocation, and compositor-specific negotiation need devices.
+2. **wgpu dispatch and layer-shell click-through** — validate mirror-blend
+   output/250 ms fallback on Vulkan and GL drivers, then confirm the empty input
+   region remains effective after every `wl_surface::commit` and resize. KWin
+   in particular re-asserts the input region on commit.
 3. **ort EP shared-library discovery in Flatpak** — `libonnxruntime_providers_*.so`
    must be reachable inside the sandbox. The default `cpu` feature avoids
    this; CUDA/ROCm/OpenVINO need explicit `--filesystem` permissions.

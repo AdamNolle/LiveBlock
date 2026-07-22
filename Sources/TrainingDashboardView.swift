@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TrainingDashboardView: View {
     @ObservedObject var controller: AppController
@@ -34,7 +35,25 @@ struct TrainingDashboardView: View {
     /// `tools/.venv` and offers a one-click install.
     @ViewBuilder
     private var preconditionCard: some View {
-        if !training.venvInstalled {
+        if !training.trainingRuntimeAvailable {
+            HStack(spacing: 10) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Theme.info)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Inference-only release build")
+                        .font(Theme.ui(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.ink1)
+                    Text("Release builds never download Python or training packages. Use the explicit source companion workflow to export candidates.")
+                        .font(Theme.ui(size: 12))
+                        .foregroundStyle(Theme.ink3)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .lbCard(Theme.infoSoft, radius: Theme.Radius.r4, stroke: Theme.info.opacity(0.35))
+        } else if !training.venvInstalled {
             HStack(spacing: 10) {
                 Image(systemName: "wrench.and.screwdriver.fill")
                     .font(.system(size: 16, weight: .semibold))
@@ -305,6 +324,9 @@ struct TrainingDashboardView: View {
                 stepper("Img sz", value: $imgszField, range: 320...1280, step: 32)
             }
             actionRow
+            if let candidate = training.candidateModelPath {
+                verifiedCandidateRow(candidate)
+            }
             if case .training(let p) = training.state {
                 progressRow(progress: p)
             }
@@ -334,6 +356,7 @@ struct TrainingDashboardView: View {
     }
 
     private var trainNowDisabledReason: String? {
+        if !training.trainingRuntimeAvailable { return "Signed releases are inference-only; train from a source checkout." }
         if !training.venvInstalled { return "Install the training environment first." }
         if labeling.labeledCount < 20 { return "Label at least 20 screenshots first (currently \(labeling.labeledCount))." }
         return nil
@@ -351,8 +374,8 @@ struct TrainingDashboardView: View {
                          systemIcon: "play.fill", fullWidth: true) {
                     training.startTraining(epochs: epochsField, imgsz: imgszField, batch: batchField)
                 }
-                .disabled(labeling.labeledCount < 20 || !training.venvInstalled)
-                .opacity(labeling.labeledCount < 20 || !training.venvInstalled ? 0.5 : 1)
+                .disabled(labeling.labeledCount < 20 || !training.venvInstalled || !training.trainingRuntimeAvailable)
+                .opacity(labeling.labeledCount < 20 || !training.venvInstalled || !training.trainingRuntimeAvailable ? 0.5 : 1)
                 .help(trainNowDisabledReason ?? "Train a model on your labeled screenshots")
             }
             LBButton(title: "Label more", variant: .secondary, size: .lg,
@@ -360,6 +383,39 @@ struct TrainingDashboardView: View {
                 controller.showLabelingWindow()
             }
         }
+    }
+
+    private func verifiedCandidateRow(_ candidate: URL) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.shield")
+                .foregroundStyle(Theme.warn)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Candidate exported — not installed")
+                    .font(Theme.ui(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.ink1)
+                Text(candidate.path)
+                    .font(Theme.mono(size: 10))
+                    .foregroundStyle(Theme.ink3)
+                    .lineLimit(1)
+            }
+            Spacer()
+            LBButton(title: "Install passing report…", variant: .outline, size: .sm,
+                     systemIcon: "lock.shield") {
+                choosePassingReport()
+            }
+        }
+        .padding(12)
+        .lbCard(Theme.surface2, radius: Theme.Radius.r3, stroke: Theme.warn.opacity(0.35))
+    }
+
+    private func choosePassingReport() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a passing schema-5 promotion report"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        training.installVerifiedModel(reportURL: url)
     }
 
     @ViewBuilder
@@ -422,9 +478,9 @@ struct TrainingDashboardView: View {
             if line.hasPrefix("=== Training pipeline started") { out.append("Started training pipeline.") }
             else if line.hasPrefix("=== Installing training environment") { out.append("Installing Python + ultralytics\u{2026}") }
             else if line.hasPrefix("=== Environment installed OK") { out.append("Training environment ready.") }
-            else if line.hasPrefix("=== Pipeline OK") { out.append("Training complete and model installed.") }
+            else if line.hasPrefix("=== Pipeline OK") { out.append("Training complete; candidate awaits verification.") }
             else if line.hasPrefix("FAILED") { out.append(line) }
-            else if line.contains("Hot-reloaded model") { out.append("New model loaded into the running app.") }
+            else if line.contains("Verified model installed") { out.append("Passing verified model installed atomically.") }
         }
         // Add the latest epoch summary if we have one.
         if case .training(let p) = training.state, p.totalEpochs > 0 {

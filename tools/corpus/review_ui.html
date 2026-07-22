@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LiveBlock human review</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b0d10;--panel:#15191f;--raised:#1d232b;--line:#303944;--text:#f4f7fb;--muted:#9ca8b6;--accent:#74e0ba;--danger:#ff7f8d;--keep:#65d9ff;--logo:#58e3a4;--banner:#ffd166;--sponsored:#f879d7}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,select{font:inherit}button,select,input[type=text]{border:1px solid var(--line);border-radius:8px;background:var(--raised);color:var(--text);padding:8px 10px}button{cursor:pointer}button:hover:not(:disabled){border-color:#647487}button:disabled{cursor:not-allowed;opacity:.42}a{color:#8fc9ff}.app{min-height:100vh;display:grid;grid-template-rows:auto 1fr}.topbar{position:sticky;top:0;z-index:4;display:flex;align-items:center;gap:12px;padding:10px 14px;background:rgba(21,25,31,.96);border-bottom:1px solid var(--line);backdrop-filter:blur(12px)}.brand{font-weight:750;font-size:16px}.badge{padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);white-space:nowrap}.spacer{flex:1}.reviewer{color:var(--muted);white-space:nowrap}.layout{display:grid;grid-template-columns:minmax(0,1fr) 340px;min-height:0}.workspace{min-width:0;padding:16px}.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin-bottom:12px}.field{display:grid;gap:4px}.field label,.eyebrow{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}.stage-shell{display:grid;place-items:center;min-height:calc(100vh - 160px);border:1px solid var(--line);border-radius:14px;background:#050608;overflow:hidden}.stage{position:relative;max-width:100%;max-height:calc(100vh - 180px)}#image{display:block;max-width:100%;max-height:calc(100vh - 180px);user-select:none}.stage canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair}.sidebar{border-left:1px solid var(--line);background:var(--panel);padding:16px;overflow:auto;max-height:calc(100vh - 54px);position:sticky;top:54px}.section{padding:14px 0;border-bottom:1px solid var(--line)}.section:first-child{padding-top:0}.section h2{font-size:14px;margin:0 0 8px}.source-title{font-size:16px;font-weight:700;margin-bottom:6px}.muted{color:var(--muted)}.covers{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.covers span{font-size:11px;padding:3px 6px;border-radius:5px;background:#26303a;color:#c8d4e1}.negative-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}.check{display:flex;gap:7px;align-items:flex-start}.annotation-list{display:grid;gap:6px;max-height:210px;overflow:auto}.annotation{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center;padding:7px 8px;border:1px solid var(--line);border-radius:8px;background:var(--raised);text-align:left}.annotation.selected{outline:2px solid #fff}.annotation button{padding:3px 7px;color:var(--danger)}.actions{display:grid;gap:8px;padding-top:14px}.primary{background:#176b55;border-color:#2e9d7c;font-weight:750}.danger{color:#ffb7bf}.help{font-size:12px;color:var(--muted);margin-top:10px}.empty{padding:60px 24px;text-align:center}.empty h1{margin:0 0 8px}.modal{position:fixed;inset:0;z-index:20;display:grid;place-items:center;background:rgba(0,0,0,.78);padding:20px}.modal[hidden]{display:none}.dialog{width:min(480px,100%);padding:24px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 24px 80px #000}.dialog h1{margin:0 0 8px}.dialog input{width:100%;margin:14px 0 8px}.error{color:#ffadb7;min-height:20px}.toast{position:fixed;left:50%;bottom:20px;z-index:30;transform:translateX(-50%);padding:9px 13px;border-radius:9px;background:#25303a;box-shadow:0 8px 30px #000;opacity:0;pointer-events:none;transition:opacity .15s}.toast.show{opacity:1}@media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{position:static;max-height:none;border-left:0;border-top:1px solid var(--line)}.stage-shell{min-height:55vh}.reviewer{display:none}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">LiveBlock · Human review</div>
+    <span class="badge" id="position">Loading…</span>
+    <span class="badge" id="planProgress">Plan status…</span>
+    <div class="spacer"></div>
+    <button id="prev" title="Previous (←)">← Previous</button>
+    <button id="next" title="Next (→)">Next →</button>
+    <span class="reviewer" id="reviewerBadge"></span>
+  </header>
+  <main class="layout" id="reviewLayout">
+    <section class="workspace">
+      <div class="toolbar">
+        <div class="field"><label for="mode">Drawing mode</label><select id="mode"><option value="block">Block sponsor</option><option value="keep">Preserve identity</option></select></div>
+        <div class="field block-option"><label for="cls">Runtime class</label><select id="cls"><option>Logo</option><option>Ad banner</option><option>Sponsored</option></select></div>
+        <div class="field block-option"><label for="place">Placement</label><select id="place"><option>car_livery</option><option>jersey</option><option>venue_board</option><option>broadcast_overlay</option><option>ordinary_screen</option><option>helmet</option></select></div>
+        <div class="field keep-option" hidden><label for="keep">Preserve</label><select id="keep"><option value="team_name">Team name</option><option value="jersey_number">Jersey number</option><option value="vehicle_number">Vehicle number</option><option value="team_crest">Team crest</option><option value="manufacturer_badge">Manufacturer badge</option></select></div>
+        <button id="undo" title="Undo last addition (Cmd/Ctrl+Z)">Undo</button>
+        <button id="deleteSelected" class="danger" disabled title="Delete selected annotation (Backspace)">Delete selected</button>
+      </div>
+      <div class="stage-shell"><div class="stage"><img id="image" alt="Corpus image under review"><canvas id="canvas"></canvas></div></div>
+    </section>
+    <aside class="sidebar">
+      <div class="section">
+        <div class="eyebrow">Source</div>
+        <div class="source-title" id="sourceTitle">Loading…</div>
+        <div class="muted" id="sourcePath"></div>
+        <div id="sourceLink"></div>
+        <div class="muted" id="license"></div>
+        <div class="covers" id="covers"></div>
+        <div class="help" id="reasons"></div>
+      </div>
+      <div class="section">
+        <h2>Contextual hard negatives</h2>
+        <p class="muted">Check only when this context is present and must produce zero sponsor detections.</p>
+        <div class="negative-grid" id="negative">
+          <label class="check"><input type="checkbox" value="ordinary_screen">Ordinary screen</label>
+          <label class="check"><input type="checkbox" value="broadcast_overlay">Broadcast overlay</label>
+          <label class="check"><input type="checkbox" value="jersey">Jersey</label>
+          <label class="check"><input type="checkbox" value="car_livery">Car livery</label>
+          <label class="check"><input type="checkbox" value="venue_board">Venue board</label>
+          <label class="check"><input type="checkbox" value="helmet">Helmet</label>
+        </div>
+      </div>
+      <div class="section">
+        <h2>Annotations <span class="muted" id="annotationCount"></span></h2>
+        <div class="annotation-list" id="annotationList"></div>
+      </div>
+      <div class="section">
+        <label class="check"><input type="checkbox" id="attest" disabled>I personally inspected the full image, corrected sponsor boxes and preservation regions, and verified the hard-negative choices.</label>
+        <div class="actions">
+          <button class="primary" id="approve" disabled>Approve human review</button>
+          <button class="danger" id="reject" disabled>Exclude unusable source…</button>
+        </div>
+        <div class="help">Sponsor boxes are paid brand marks, ads, or sponsorship labels. Preserve team names, numbers, crests, and manufacturer badges. Click an annotation to select it; drag empty space to add.</div>
+      </div>
+    </aside>
+  </main>
+  <div class="empty" id="empty" hidden><h1>Review plan complete</h1><p id="emptyText">All planned representatives have an attributable decision.</p></div>
+</div>
+<div class="modal" id="reviewerModal" hidden>
+  <form class="dialog" id="reviewerForm">
+    <div class="eyebrow">Attribution required</div>
+    <h1>Who is reviewing?</h1>
+    <p class="muted">Enter your name or email. It is fixed for this local review session and recorded with a timezone-aware timestamp on every approval or exclusion.</p>
+    <input id="reviewerInput" type="text" maxlength="200" autocomplete="email" placeholder="name or email" autofocus>
+    <div class="error" id="reviewerError"></div>
+    <button class="primary" type="submit">Start human review</button>
+  </form>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+'use strict';
+const $=selector=>document.querySelector(selector);
+let items=[],index=0,boxes=[],preserveRegions=[],negativePlacements=[],drag=null,lastAdded=null,selected=null,dirty=false,imageReady=false,navigationReady=false,session={reviewer:'',reviewToken:''};
+const img=$('#image'),canvas=$('#canvas'),ctx=canvas.getContext('2d');
+async function api(path,options={}){const request={...options};request.headers=new Headers(options.headers||{});if((request.method||'GET')!=='GET'&&session.reviewToken)request.headers.set('X-LiveBlock-Review-Token',session.reviewToken);const response=await fetch(path,request);if(!response.ok)throw new Error(await response.text());return response.headers.get('content-type')?.includes('json')?response.json():response.text()}
+function toast(message){const node=$('#toast');node.textContent=message;node.classList.add('show');setTimeout(()=>node.classList.remove('show'),1800)}
+async function initialize(){try{session=await api('/api/session');if(!session.reviewer){$('#reviewerModal').hidden=false;return}startReview()}catch(error){alert(error.message)}}
+async function startReview(){session=await api('/api/session');$('#reviewerBadge').textContent=`Reviewer: ${session.reviewer}`;$('#reviewerModal').hidden=true;await reload()}
+async function reload(){const [nextItems,status]=await Promise.all([api('/api/items'),api('/api/status')]);items=nextItems;$('#planProgress').textContent=`${status.counts.approved} approved · ${status.counts.excluded} excluded · ${status.counts.pending} pending`;if(!items.length){$('#reviewLayout').hidden=true;$('#empty').hidden=false;$('#position').textContent='Done';return}$('#reviewLayout').hidden=false;$('#empty').hidden=true;show(Math.min(index,items.length-1))}
+function show(nextIndex){index=(nextIndex+items.length)%items.length;const item=items[index];boxes=structuredClone(item.labels.boxes||[]);preserveRegions=structuredClone(item.labels.preserve_regions||[]);negativePlacements=structuredClone(item.labels.negative_placements||[]);selected=null;lastAdded=null;drag=null;dirty=false;imageReady=false;navigationReady=false;$('#prev').disabled=true;$('#next').disabled=true;$('#attest').checked=false;$('#attest').disabled=true;img.style.visibility='hidden';updateApprove();document.querySelectorAll('#negative input').forEach(input=>input.checked=negativePlacements.includes(input.value));img.onload=()=>{imageReady=true;navigationReady=true;$('#prev').disabled=false;$('#next').disabled=false;$('#attest').disabled=false;img.style.visibility='visible';resize();updateApprove()};img.onerror=()=>{imageReady=false;navigationReady=true;$('#prev').disabled=false;$('#next').disabled=false;$('#attest').disabled=true;$('#attest').checked=false;img.style.visibility='hidden';updateApprove();alert('The review image could not be loaded. This item cannot be approved.')};img.src='/image?path='+encodeURIComponent(item.path);$('#position').textContent=`${index+1} of ${items.length} pending`;$('#sourceTitle').textContent=item.title||item.path;$('#sourcePath').textContent=item.path;$('#license').textContent=item.license?`License: ${item.license}`:'License not reported';$('#reasons').textContent=(item.priority_reasons||[]).join(' · ');$('#covers').replaceChildren(...(item.plan_covers||[]).map(value=>{const span=document.createElement('span');span.textContent=value;return span}));const link=$('#sourceLink');link.replaceChildren();if(item.source_page){const anchor=document.createElement('a');anchor.href=item.source_page;anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.textContent='Open provenance source ↗';link.append(anchor)}renderList()}
+function navigate(delta){if(!navigationReady)return;if(dirty&&!confirm('Discard unsaved annotation changes and leave this image?'))return;show(index+delta)}
+function resize(){canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;draw()}
+function colorFor(box){return {'Logo':'#58e3a4','Ad banner':'#ffd166','Sponsored':'#f879d7'}[box.class]||'#fff'}
+function drawRegion(region,color,label,isSelected){ctx.save();ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=Math.max(isSelected?4:2,canvas.width/650);ctx.strokeRect(region.x*canvas.width,region.y*canvas.height,region.width*canvas.width,region.height*canvas.height);ctx.font=`${Math.max(13,canvas.width/85)}px system-ui`;ctx.fillText(label,region.x*canvas.width+4,region.y*canvas.height+Math.max(15,canvas.width/80));ctx.restore()}
+function draw(){ctx.clearRect(0,0,canvas.width,canvas.height);boxes.forEach((box,i)=>drawRegion(box,colorFor(box),`${i+1} ${box.class} · ${box.placement}`,selected?.type==='block'&&selected.index===i));preserveRegions.forEach((region,i)=>drawRegion(region,'#65d9ff',`KEEP ${i+1} · ${region.kind}`,selected?.type==='keep'&&selected.index===i));if(drag){ctx.save();ctx.strokeStyle='#fff';ctx.setLineDash([10,6]);ctx.lineWidth=2;ctx.strokeRect(drag.x,drag.y,drag.w,drag.h);ctx.restore()}}
+function point(event){const rect=canvas.getBoundingClientRect();const x=(event.clientX-rect.left)*canvas.width/rect.width,y=(event.clientY-rect.top)*canvas.height/rect.height;return{x:Math.max(0,Math.min(canvas.width,x)),y:Math.max(0,Math.min(canvas.height,y))}}
+function contains(region,p){return p.x>=region.x*canvas.width&&p.x<=(region.x+region.width)*canvas.width&&p.y>=region.y*canvas.height&&p.y<=(region.y+region.height)*canvas.height}
+canvas.onpointerdown=event=>{if(!imageReady)return;canvas.setPointerCapture(event.pointerId);const p=point(event);let hit=boxes.findIndex(region=>contains(region,p));if(hit>=0){selected={type:'block',index:hit};renderList();draw();return}hit=preserveRegions.findIndex(region=>contains(region,p));if(hit>=0){selected={type:'keep',index:hit};renderList();draw();return}selected=null;drag={x:p.x,y:p.y,w:0,h:0};renderList()};
+canvas.onpointermove=event=>{if(!drag)return;const p=point(event);drag.w=p.x-drag.x;drag.h=p.y-drag.y;draw()};
+canvas.onpointerup=()=>{if(!drag)return;const x=Math.min(drag.x,drag.x+drag.w),y=Math.min(drag.y,drag.y+drag.h),width=Math.abs(drag.w),height=Math.abs(drag.h);if(width>3&&height>3){const region={x:x/canvas.width,y:y/canvas.height,width:width/canvas.width,height:height/canvas.height};if($('#mode').value==='keep'){preserveRegions.push({kind:$('#keep').value,...region});lastAdded={type:'keep',index:preserveRegions.length-1}}else{boxes.push({class:$('#cls').value,placement:$('#place').value,...region});lastAdded={type:'block',index:boxes.length-1}}markDirty()}drag=null;renderList();draw()};
+function renderList(){const list=$('#annotationList');list.replaceChildren();const rows=[...boxes.map((item,index)=>({type:'block',index,label:`${item.class} · ${item.placement}`,color:colorFor(item)})),...preserveRegions.map((item,index)=>({type:'keep',index,label:`KEEP · ${item.kind}`,color:'#65d9ff'}))];$('#annotationCount').textContent=`(${rows.length})`;rows.forEach(row=>{const wrapper=document.createElement('div');wrapper.className='annotation'+(selected?.type===row.type&&selected.index===row.index?' selected':'');const choose=document.createElement('button');choose.style.borderLeft=`4px solid ${row.color}`;choose.textContent=row.label;choose.onclick=()=>{selected={type:row.type,index:row.index};renderList();draw()};const remove=document.createElement('button');remove.textContent='Delete';remove.onclick=()=>removeAnnotation(row);wrapper.append(choose,remove);list.append(wrapper)});$('#deleteSelected').disabled=!selected}
+function clearAttestation(){$('#attest').checked=false;updateApprove()}
+function markDirty(){dirty=true;clearAttestation()}
+function removeAnnotation(target=selected){if(!target)return;if(target.type==='keep')preserveRegions.splice(target.index,1);else boxes.splice(target.index,1);selected=null;lastAdded=null;markDirty();renderList();draw()}
+function undo(){if(!lastAdded)return;if(lastAdded.type==='keep')preserveRegions.splice(lastAdded.index,1);else boxes.splice(lastAdded.index,1);lastAdded=null;selected=null;markDirty();renderList();draw()}
+function updateMode(){const keep=$('#mode').value==='keep';document.querySelectorAll('.block-option').forEach(node=>node.hidden=keep);document.querySelectorAll('.keep-option').forEach(node=>node.hidden=!keep)}
+function updateApprove(){const disabled=!imageReady||!$('#attest').checked||!session.reviewer;$('#approve').disabled=disabled;$('#reject').disabled=disabled}
+async function approve(){try{negativePlacements=[...document.querySelectorAll('#negative input:checked')].map(input=>input.value);if(!boxes.length&&!negativePlacements.length&&!confirm('This approval has no sponsor boxes and no contextual hard-negative classification. Is that intentional?'))return;$('#approve').disabled=true;await api('/api/label',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:items[index].path,review_revision:items[index].review_revision,attested:true,boxes,preserve_regions:preserveRegions,negative_placements:negativePlacements})});dirty=false;toast('Human review saved');await reload()}catch(error){alert(error.message);updateApprove()}}
+async function rejectItem(){const reason=prompt('Why is this source unusable for the corpus?');if(!reason?.trim())return;try{await api('/api/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:items[index].path,review_revision:items[index].review_revision,attested:true,reason})});dirty=false;toast('Source excluded with audit reason');await reload()}catch(error){alert(error.message)}}
+$('#reviewerForm').onsubmit=async event=>{event.preventDefault();const reviewer=$('#reviewerInput').value.trim();$('#reviewerError').textContent='';try{await api('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reviewer})});await startReview()}catch(error){$('#reviewerError').textContent=error.message}};
+$('#mode').onchange=updateMode;$('#attest').onchange=updateApprove;document.querySelectorAll('#negative input').forEach(input=>input.onchange=markDirty);$('#prev').onclick=()=>navigate(-1);$('#next').onclick=()=>navigate(1);$('#undo').onclick=undo;$('#deleteSelected').onclick=()=>removeAnnotation();$('#approve').onclick=approve;$('#reject').onclick=rejectItem;
+onkeydown=event=>{if($('#reviewerModal').hidden===false)return;if(['INPUT','SELECT','TEXTAREA','BUTTON'].includes(event.target?.tagName))return;if(event.key==='ArrowLeft')navigate(-1);if(event.key==='ArrowRight')navigate(1);if(event.key==='Backspace'||event.key==='Delete'){event.preventDefault();removeAnnotation()}if(event.key.toLowerCase()==='z'&&(event.ctrlKey||event.metaKey)){event.preventDefault();undo()}if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)&&!$('#approve').disabled)approve()};
+window.onbeforeunload=event=>{if(dirty){event.preventDefault();event.returnValue=''}};
+updateMode();initialize();
+</script>
+</body>
+</html>

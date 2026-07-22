@@ -1,0 +1,32 @@
+{
+  "classes": [
+    {
+      "id": 0,
+      "name": "Logo",
+      "prompts": [
+        "sponsor brand logo on a sports jersey or race car",
+        "brand logo",
+        "company logo"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "Ad banner",
+      "prompts": [
+        "advertising banner at a sports stadium or race track",
+        "advertising banner",
+        "billboard advertisement"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Sponsored",
+      "prompts": [
+        "sponsored content label",
+        "sponsored post",
+        "promoted content badge"
+      ]
+    }
+  ],
+  "version": 1
+}

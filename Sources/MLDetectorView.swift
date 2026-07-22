@@ -10,11 +10,7 @@ struct MLDetectorView: View {
     @ObservedObject var controller: AppController
     @Binding var minConfidence: Double
 
-    // Vocab classes the open-vocabulary detector catches. No controller binding
-    // exists for these yet, so they hold local UI state (restyle-only).
-    @State private var catLogo = true
-    @State private var catBanner = true
-    @State private var catSponsored = true
+    @State private var detectorRules: [DetectorClassRule] = []
 
     private let fauxLines: [Double] = [0.14, 0.32, 0.22, 0.38, 0.26, 0.30, 0.18, 0.28, 0.34, 0.22]
 
@@ -42,6 +38,7 @@ struct MLDetectorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.bg)
         .preferredColorScheme(.dark)
+        .onAppear { reloadDetectorRules() }
     }
 
     // MARK: - Status band (spans both columns)
@@ -71,6 +68,20 @@ struct MLDetectorView: View {
 
             Spacer(minLength: 8)
 
+            VStack(alignment: .trailing, spacing: 6) {
+                LBButton(title: controller.modelUpdateInProgress ? "Verifying…" : "Install signed update",
+                         variant: .outline, size: .md, systemIcon: "checkmark.shield") {
+                    controller.chooseAndInstallSignedModelUpdate()
+                }
+                .disabled(controller.modelUpdateInProgress)
+                if let status = controller.modelUpdateStatus {
+                    Text(status)
+                        .font(Theme.ui(size: 10))
+                        .foregroundStyle(Theme.ink3)
+                        .lineLimit(2)
+                        .frame(maxWidth: 240, alignment: .trailing)
+                }
+            }
             LBButton(title: "Train", variant: .outline, size: .md,
                      systemIcon: "sparkles") {
                 controller.showTrainingDashboard()
@@ -182,20 +193,18 @@ struct MLDetectorView: View {
                                   y: h * (0.08 + Double(i) * 0.08))
                 }
 
-                // Live detection boxes (from the inpaint patches the model found).
-                let patches = controller.captureManager.currentPatches
-                let labels = controller.captureManager.lastDetectionLabels
-                ForEach(Array(patches.prefix(6).enumerated()), id: \.offset) { idx, patch in
-                    let r = patch.normalizedRect
-                    let label = idx < labels.count ? labels[idx] : "Detection"
-                    detectionBox(label: label,
+                // Live model detections only (manual regions are intentionally excluded).
+                let detections = controller.captureManager.currentDetections
+                ForEach(detections.prefix(6)) { detection in
+                    let r = detection.normalizedRect
+                    detectionBox(label: "\(detection.label) (\(Int(detection.confidence * 100))%)",
                                  width: max(8, r.width * w),
                                  height: max(8, r.height * h),
                                  x: (r.minX + r.width / 2) * w,
                                  y: (r.minY + r.height / 2) * h)
                 }
 
-                if patches.isEmpty {
+                if detections.isEmpty {
                     Text(controller.isRunning
                          ? "No detections in this frame — lower the threshold or move to a busier scene."
                          : "Start capture to see live detections.")
@@ -240,7 +249,7 @@ struct MLDetectorView: View {
                 Text("What to catch")
                     .font(Theme.ui(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.ink1)
-                LBPill(text: "3 classes", tone: .ghost, size: .sm)
+                LBPill(text: "\(detectorRules.count) classes", tone: .ghost, size: .sm)
                 Spacer()
                 LBPill(text: "open vocab", tone: .ml, size: .sm)
             }
@@ -250,12 +259,16 @@ struct MLDetectorView: View {
                 Rectangle().fill(Theme.line).frame(height: 1)
             }
 
-            categoryRow(name: "Logo", caught: 412, progress: 0.82,
-                        isOn: $catLogo, first: true)
-            categoryRow(name: "Ad banner", caught: 234, progress: 0.47,
-                        isOn: $catBanner, first: false)
-            categoryRow(name: "Sponsored", caught: 188, progress: 0.38,
-                        isOn: $catSponsored, first: false)
+            if detectorRules.isEmpty {
+                Text("Detector vocabulary unavailable")
+                    .font(Theme.ui(size: 12))
+                    .foregroundStyle(Theme.ink3)
+                    .padding(14)
+            } else {
+                ForEach(Array(detectorRules.enumerated()), id: \.element.id) { index, rule in
+                    categoryRow(rule: rule, first: index == 0)
+                }
+            }
 
             Spacer(minLength: 0)
         }
@@ -265,39 +278,43 @@ struct MLDetectorView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.r4, style: .continuous))
     }
 
-    private func categoryRow(name: String, caught: Int, progress: Double,
-                             isOn: Binding<Bool>, first: Bool) -> some View {
-        HStack(spacing: 12) {
+    private func categoryRow(rule: DetectorClassRule, first: Bool) -> some View {
+        let isOn = Binding(
+            get: { detectorRules.first(where: { $0.id == rule.id })?.enabled ?? rule.enabled },
+            set: { enabled in
+                guard controller.captureManager.setDetectorClassEnabled(id: rule.id, enabled: enabled) else { return }
+                reloadDetectorRules()
+            }
+        )
+        return HStack(spacing: 12) {
             RoundedRectangle(cornerRadius: 2, style: .continuous)
                 .fill(isOn.wrappedValue ? Theme.accent : Theme.ink5)
                 .frame(width: 3, height: 26)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(name)
+                Text(rule.name)
                     .font(Theme.ui(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.ink1)
-                HStack(spacing: 4) {
-                    Text("\(caught)")
-                        .font(Theme.mono(size: 11))
-                        .foregroundStyle(Theme.ink3)
-                    Text("caught in the last 30 days")
-                        .font(Theme.ui(size: 11))
-                        .foregroundStyle(Theme.ink3)
-                }
+                Text("Class threshold \(Int(rule.threshold * 100))%")
+                    .font(Theme.ui(size: 11))
+                    .foregroundStyle(Theme.ink3)
             }
 
             Spacer(minLength: 8)
 
-            LBProgress(value: progress,
-                       color: isOn.wrappedValue ? Theme.accent : Theme.ink5)
-                .frame(width: 72)
-
-            LBToggle(isOn: isOn, size: .sm)
+            LBToggle(isOn: isOn,
+                     accessibilityName: "Detect \(rule.name)",
+                     accessibilityIdentifier: "detector-class-toggle.\(rule.id)",
+                     size: .sm)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .overlay(alignment: .top) {
             if !first { Rectangle().fill(Theme.line).frame(height: 1) }
         }
+    }
+
+    private func reloadDetectorRules() {
+        detectorRules = controller.captureManager.detectorRules()
     }
 }

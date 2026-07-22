@@ -45,6 +45,8 @@ final class RegionStore: @unchecked Sendable {
     private var regions: [NormalizedRegion] = []
     private let handle: RegionStoreHandle
     private let storageURL: URL
+    private let unsupportedSchemaVersion: Int?
+    private var shutdownRequested = false
 
     init(storageURL: URL? = nil) {
         if let storageURL {
@@ -57,34 +59,56 @@ final class RegionStore: @unchecked Sendable {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             self.storageURL = dir.appendingPathComponent("regions.json")
         }
-        // Pre-flight: if the on-disk file exists but is invalid JSON, the
-        // Rust side will silently return an empty store and the user will
-        // see "no regions" with no idea their data was lost. Detect that
-        // and rename the bad file so it's recoverable later.
-        Self.quarantineIfCorrupt(at: self.storageURL)
+        // Pre-flight malformed data so it remains recoverable. Valid legacy
+        // arrays are migrated by Rust. Unknown future schema envelopes are
+        // deliberately left untouched so a downgrade never destroys them.
+        self.unsupportedSchemaVersion = Self.prepareStorage(at: self.storageURL)
         self.handle = region_store_open(self.storageURL.path)
         self.regions = Self.snapshot(handle: handle)
     }
 
-    /// If `regions.json` exists but isn't a parseable JSON array, rename it
-    /// to `regions.json.corrupt-<timestamp>` so the Rust store starts clean
-    /// and the user can recover the bad file by hand if needed.
-    private static func quarantineIfCorrupt(at url: URL) {
+    private struct PersistedRegionDocument: Decodable {
+        let regions: [NormalizedRegion]
+        let schemaVersion: Int
+    }
+
+    /// Quarantine malformed JSON, but preserve well-formed future schemas in
+    /// place. The Rust store rejects those versions and will not persist over
+    /// the file.
+    private static func prepareStorage(at url: URL) -> Int? {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return }
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return }
-        let parsed = try? JSONDecoder().decode([NormalizedRegion].self, from: data)
-        if parsed == nil {
-            let stamp = Int(Date().timeIntervalSince1970)
-            let dst = url.deletingLastPathComponent()
-                .appendingPathComponent("regions.json.corrupt-\(stamp)")
-            do {
-                try fm.moveItem(at: url, to: dst)
-                NSLog("RegionStore: corrupt regions.json moved aside to \(dst.lastPathComponent)")
-            } catch {
-                NSLog("RegionStore: failed to quarantine corrupt regions.json: \(error.localizedDescription)")
-            }
+        guard fm.fileExists(atPath: url.path) else { return nil }
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+        let decoder = JSONDecoder()
+        if (try? decoder.decode([NormalizedRegion].self, from: data)) != nil { return nil }
+        // Inspect the discriminator before decoding the payload. A future
+        // schema may intentionally change the regions shape; downgrades must
+        // preserve it rather than misclassifying it as corrupt.
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let version = object["schemaVersion"] as? Int,
+           version > 1 {
+            NSLog("RegionStore: refusing unsupported regions schema \(version)")
+            return version
         }
+        if let document = try? decoder.decode(PersistedRegionDocument.self, from: data),
+           document.schemaVersion == 1 {
+            return nil
+        }
+
+        let stamp = Int(Date().timeIntervalSince1970)
+        let dst = url.deletingLastPathComponent()
+            .appendingPathComponent("regions.json.corrupt-\(stamp)")
+        do {
+            try fm.moveItem(at: url, to: dst)
+            NSLog("RegionStore: corrupt regions.json moved aside to \(dst.lastPathComponent)")
+        } catch {
+            NSLog("RegionStore: failed to quarantine corrupt regions.json: \(error.localizedDescription)")
+        }
+        return nil
+    }
+
+    var persistenceCompatibilityError: String? {
+        unsupportedSchemaVersion.map { "Regions use unsupported schema \($0); file is read-only." }
     }
 
     var current: [NormalizedRegion] {
@@ -92,45 +116,71 @@ final class RegionStore: @unchecked Sendable {
         return regions
     }
 
+    func current(excluding disabledIDs: Set<UUID>) -> [NormalizedRegion] {
+        lock.lock(); defer { lock.unlock() }
+        guard !disabledIDs.isEmpty else { return regions }
+        return regions.filter { !disabledIDs.contains($0.id) }
+    }
+
+    /// Install the terminal persistence barrier synchronously. Region editor
+    /// callbacks can retain this store independently of AppController, so the
+    /// store itself must reject any mutation that reaches it after quit begins.
+    func prepareForShutdown() {
+        lock.lock()
+        shutdownRequested = true
+        lock.unlock()
+    }
+
     func add(_ region: NormalizedRegion) {
+        guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
+        guard !shutdownRequested else { return }
         _ = handle.add_with_id(region.id.uuidString,
                                region.x, region.y, region.width, region.height)
         regions = Self.snapshot(handle: handle)
     }
 
     func remove(id: UUID) {
+        guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
+        guard !shutdownRequested else { return }
         _ = handle.remove(id.uuidString)
         regions = Self.snapshot(handle: handle)
     }
 
     func replace(_ newRegions: [NormalizedRegion]) {
+        guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
-        _ = handle.clear()
-        for r in newRegions {
-            _ = handle.add_with_id(r.id.uuidString, r.x, r.y, r.width, r.height)
-        }
+        guard !shutdownRequested,
+              let data = try? JSONEncoder().encode(newRegions),
+              let json = String(data: data, encoding: .utf8),
+              handle.replace_all_json(json) else { return }
+        // The Rust store persists one complete candidate document before it
+        // publishes the replacement in memory; clear/add partial states are
+        // never visible after a failed write or process interruption.
         regions = Self.snapshot(handle: handle)
     }
 
     /// Replace a single region by id, preserving its id.
     func replace(id: UUID, with newRegion: NormalizedRegion) {
+        guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
+        guard !shutdownRequested else { return }
         _ = handle.replace_id(id.uuidString,
                               newRegion.x, newRegion.y, newRegion.width, newRegion.height)
         regions = Self.snapshot(handle: handle)
     }
 
     func clear() {
+        guard unsupportedSchemaVersion == nil else { return }
         lock.lock()
         defer { lock.unlock() }
-        _ = handle.clear()
-        regions = []
+        guard !shutdownRequested, handle.clear() else { return }
+        regions = Self.snapshot(handle: handle)
     }
 
     // MARK: - Persistence helpers

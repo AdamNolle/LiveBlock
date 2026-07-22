@@ -5,9 +5,13 @@
 //! targets use. Generated headers + Swift glue land in
 //! `core/crates/liveblock-bridge/generated/` after `cargo build`.
 //!
-//! Compatibility note: the underlying `RegionStore` writes JSON with sorted
-//! keys + 2-space pretty indentation, so files written by Swift's
-//! `RegionStore.swift` and by the bridge are byte-identical.
+//! Compatibility note: the underlying `RegionStore` owns the shared schema-1
+//! envelope and atomically migrates legacy arrays. Swift consumes snapshots
+//! through this bridge rather than maintaining a second on-disk encoder.
+
+// swift-bridge 0.1's generated glue performs same-type raw-pointer casts.
+// They are harmless and outside this crate's handwritten code.
+#![allow(clippy::unnecessary_cast)]
 
 use liveblock_config::{SettingsStore, Vocabulary};
 use liveblock_regions::{NormalizedRegion, RegionStore};
@@ -47,11 +51,18 @@ mod ffi {
             height: f64,
         ) -> bool;
 
+        fn replace_all_json(self: &RegionStoreHandle, json: String) -> bool;
+
         fn remove(self: &RegionStoreHandle, id: String) -> bool;
 
         fn clear(self: &RegionStoreHandle) -> bool;
 
         fn to_json(self: &RegionStoreHandle) -> String;
+    }
+
+    extern "Rust" {
+        fn macos_capabilities_json() -> String;
+        fn desktop_behavior_contract_json() -> String;
     }
 
     extern "Rust" {
@@ -72,6 +83,22 @@ mod ffi {
 
         fn to_json(self: &VocabularyHandle) -> String;
     }
+}
+
+fn macos_capabilities_json() -> String {
+    let profile = liveblock_config::DesktopCapabilityProfile::macos();
+    if profile.validate().is_err() {
+        return String::new();
+    }
+    serde_json::to_string(&profile).unwrap_or_default()
+}
+
+fn desktop_behavior_contract_json() -> String {
+    let contract = liveblock_config::DesktopBehaviorContract::default();
+    if contract.validate().is_err() {
+        return String::new();
+    }
+    serde_json::to_string(&contract).unwrap_or_default()
 }
 
 pub struct RegionStoreHandle {
@@ -114,6 +141,13 @@ impl RegionStoreHandle {
         self.inner.replace_id(uuid, region).is_ok()
     }
 
+    fn replace_all_json(&self, json: String) -> bool {
+        let Ok(regions) = serde_json::from_str::<Vec<NormalizedRegion>>(&json) else {
+            return false;
+        };
+        self.inner.replace(regions).is_ok()
+    }
+
     fn remove(&self, id: String) -> bool {
         let Ok(uuid) = Uuid::parse_str(&id) else {
             return false;
@@ -144,7 +178,12 @@ impl RegionStoreHandle {
                 m
             })
             .collect();
-        let value = serde_json::Value::Array(array.into_iter().map(serde_json::Value::from_iter).collect());
+        let value = serde_json::Value::Array(
+            array
+                .into_iter()
+                .map(serde_json::Value::from_iter)
+                .collect(),
+        );
         let mut buf = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(b"  ");
         let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
@@ -252,7 +291,10 @@ impl VocabularyHandle {
     fn set_class_threshold(&self, class_id: u32, threshold: f32) -> bool {
         let guard = self.inner.lock().expect("vocabulary mutex poisoned");
         let store = &guard.1;
-        if store.set_class_threshold(class_id, Some(threshold)).is_err() {
+        if store
+            .set_class_threshold(class_id, Some(threshold))
+            .is_err()
+        {
             return false;
         }
         store.persist().is_ok()
@@ -265,7 +307,8 @@ impl VocabularyHandle {
 }
 
 fn vocabulary_open(path: String) -> VocabularyHandle {
-    let store = SettingsStore::open(PathBuf::from(path)).unwrap_or_else(|_| SettingsStore::in_memory());
+    let store =
+        SettingsStore::open(PathBuf::from(path)).unwrap_or_else(|_| SettingsStore::in_memory());
     VocabularyHandle {
         inner: Mutex::new((
             Vocabulary {
@@ -280,6 +323,19 @@ fn vocabulary_open(path: String) -> VocabularyHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_contracts_bridge_as_valid_json() {
+        let capabilities: serde_json::Value =
+            serde_json::from_str(&macos_capabilities_json()).unwrap();
+        assert_eq!(capabilities["platform"], "macos");
+        assert_eq!(capabilities["localFrameProcessing"], true);
+        assert_eq!(capabilities["releaseReady"], false);
+        let behavior: serde_json::Value =
+            serde_json::from_str(&desktop_behavior_contract_json()).unwrap();
+        assert_eq!(behavior["runtimeClasses"][0], "Logo");
+        assert_eq!(behavior["panicClearsCaptureIntent"], true);
+    }
 
     #[test]
     fn add_then_count() {
@@ -315,6 +371,20 @@ mod tests {
         assert_eq!(store.count(), 1);
         let s = store.to_json();
         assert!(s.contains("0.5"));
+    }
+
+    #[test]
+    fn replace_all_json_commits_one_complete_snapshot() {
+        let store = RegionStoreHandle::new();
+        let _ = store.add(0.1, 0.1, 0.2, 0.2);
+        let replacement = r#"[{"id":"11111111-2222-3333-4444-555555555555","x":0.4,"y":0.4,"width":0.3,"height":0.3}]"#;
+        assert!(store.replace_all_json(replacement.to_string()));
+        assert_eq!(store.count(), 1);
+        assert!(store
+            .to_json()
+            .contains("11111111-2222-3333-4444-555555555555"));
+        assert!(!store.replace_all_json("{}".to_string()));
+        assert_eq!(store.count(), 1);
     }
 
     #[test]

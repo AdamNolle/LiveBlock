@@ -1,8 +1,29 @@
+pub mod desktop_contract;
 pub mod embeddings;
+pub mod managed_path;
+pub mod model_manifest;
+pub mod model_update;
 pub mod settings;
 pub mod vocabulary;
 
+pub use desktop_contract::{
+    developer_training_runtime_available, DesktopAction, DesktopBehaviorContract,
+    DesktopCapabilityProfile, DesktopPlatform, HotkeyContract, SupportMode,
+    DESKTOP_CONTRACT_VERSION,
+};
 pub use embeddings::ClassEmbeddings;
+pub use managed_path::{
+    move_regular_file_no_replace, move_regular_file_pair_no_replace, validate_managed_file_path,
+    ManagedPathMode,
+};
+pub use model_manifest::{
+    artifact_sha256, install_verified_artifact, verifying_key_from_base64, ArtifactFormat,
+    ModelManifest, ModelManifestError, TrustedKeyring, TrustedKeyringDocument, TrustedPublicKey,
+};
+pub use model_update::{
+    apply_verified_file_update, recover_verified_active_manifest, ModelUpdateError,
+    ModelUpdateReceipt, ModelUpdateState, MODEL_UPDATE_STATE_SCHEMA_VERSION,
+};
 pub use settings::{ClassRule, CoordinatorConfig, DetectionSettings, SettingsStore};
 pub use vocabulary::{VocabClass, Vocabulary};
 
@@ -16,6 +37,12 @@ pub enum ConfigError {
     VocabVersion { settings: u32, vocab: u32 },
     #[error("embedding version mismatch: {emb} vs vocabulary {vocab}")]
     EmbeddingVersion { emb: u32, vocab: u32 },
+    #[error("unsupported {document} schema version {found}; current version is {current}")]
+    UnsupportedSchema {
+        document: &'static str,
+        found: u32,
+        current: u32,
+    },
 }
 
 /// 2-space, sorted-key pretty JSON identical to Swift JSONEncoder([.prettyPrinted,.sortedKeys]).

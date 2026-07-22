@@ -190,7 +190,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Theme.registerFonts()
-        let screen = NSScreen.main ?? NSScreen.screens.first!
+        guard let screen = controller.currentScreen() ?? NSScreen.main ?? NSScreen.screens.first else {
+            NSLog("LiveBlock: no display is available during launch.")
+            return
+        }
 
         // Render layer (always click-through)
         let renderLayer = RenderLayerWindow(
@@ -237,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: AnyView(MiniHUDView(controller: controller))
         )
         controller.miniHUDWindow = miniHUD
+        miniHUD.align(to: screen)
 
         // Show / hide HUD with capture state.
         controller.captureManager.$isRunning
@@ -247,23 +251,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.controller.handleScreenConfigurationChange() }
+            .store(in: &cancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.controller.handleActiveSpaceChange() }
+            .store(in: &cancellables)
+
         // Build the onboarding window up-front so the menu bar's "Show
         // onboarding tour" can re-show it later. It is created hidden;
         // first-launch is what calls showOnboarding().
         let onboarding = OnboardingWindow(
             rootView: AnyView(OnboardingView(
                 onFinish: { [weak self] in
-                    UserDefaults.standard.set(true, forKey: "didOnboard")
-                    self?.controller.onboardingWindow?.close()
+                    self?.controller.finishOnboarding()
                 },
                 onTryFirstBlock: { [weak self] in
-                    // Start blocking AND open the editor in one click — the
-                    // visual-first replacement for "memorize ⌘⇧B".
-                    guard let self else { return }
-                    if !self.controller.isRunning { self.controller.toggleCapture() }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                        self?.controller.openEditor()
-                    }
+                    // Start blocking AND open the editor through one sequenced
+                    // action. Panic/stop/quit can invalidate the delayed open.
+                    self?.controller.startFirstBlockFromOnboarding()
                 }
             ))
         )
@@ -286,7 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         .receive(on: RunLoop.main)
         .sink { [weak self] running, editing in
             guard let self else { return }
-            if running && !editing {
+            if running && !editing && self.controller.allowsRenderVisibility {
                 self.controller.renderLayer?.orderFrontRegardless()
             } else {
                 self.controller.renderLayer?.orderOut(nil)
@@ -309,6 +318,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.controller.captureScreenshotForLabeling()
         }
         hotKeys.start()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !controller.quitIsReady else { return .terminateNow }
+        controller.quitWhenApplicationRequestsTermination {
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

@@ -64,13 +64,20 @@ struct SettingsView: View {
         .preferredColorScheme(.dark)
     }
 
+    private var measuredCaptureSummary: String {
+        let fps = controller.captureManager.framesPerSecond
+        return fps >= 0.5
+            ? String(format: "ScreenCaptureKit · %.0f fps measured", fps)
+            : "ScreenCaptureKit · starting"
+    }
+
     // MARK: - Sidebar
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 LiveBlockerLogo(size: 26, cornerRadius: 7)
-                Text("LiveBlocker")
+                Text("LiveBlock")
                     .font(Theme.display(size: 15, weight: .bold))
                     .tracking(-0.27)
                     .foregroundStyle(Theme.ink1)
@@ -95,7 +102,7 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.ink1)
                 }
                 Text(controller.isRunning
-                     ? "ScreenCaptureKit · 60 fps"
+                     ? measuredCaptureSummary
                      : "Capture paused")
                     .font(Theme.ui(size: 11))
                     .foregroundStyle(Theme.ink3)
@@ -161,7 +168,7 @@ struct SettingsView: View {
                        size: .sm, dot: true, pulse: controller.isRunning)
                 Spacer()
                 LBButton(title: "Mark region", variant: .primary, size: .sm,
-                         systemIcon: "plus", kbd: "⌘⇧K") {
+                         systemIcon: "plus", kbd: "⌘⇧B") {
                     controller.openEditor()
                 }
             }
@@ -204,6 +211,7 @@ struct SettingsView: View {
     private var overviewPane: some View {
         VStack(alignment: .leading, spacing: 22) {
             heroRow
+            displayTargetCard
             kpiStrip
             fillTechnique
             behaviourSection
@@ -242,10 +250,7 @@ struct SettingsView: View {
                 }
                 .padding(.bottom, 12)
 
-                (Text("Set, and forgotten.\n")
-                    .foregroundColor(Theme.ink1)
-                 + Text("The detector keeps catching ads on its own, frame by frame.")
-                    .foregroundColor(Theme.ink3))
+                Text("\(Text("Set, and forgotten.\n").foregroundColor(Theme.ink1))\(Text("The detector keeps catching ads on its own, frame by frame.").foregroundColor(Theme.ink3))")
                     .font(Theme.display(size: 28, weight: .semibold))
                     .tracking(-0.7)
                     .lineSpacing(2)
@@ -262,7 +267,9 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.ink3)
                     LBToggle(isOn: Binding(
                         get: { controller.isRunning },
-                        set: { _ in controller.toggleCapture() }))
+                        set: { _ in controller.toggleCapture() }),
+                        accessibilityName: "Screen blocking",
+                        accessibilityIdentifier: "settings.capture-toggle")
                 }
                 .padding(.top, 18)
             }
@@ -271,6 +278,44 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .lbCard(Theme.surface, radius: Theme.Radius.r4, stroke: Theme.line)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.r4, style: .continuous))
+    }
+
+    private var displayTargetCard: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "display.2")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Theme.info)
+                .frame(width: 34, height: 34)
+                .background(Theme.info.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.r2, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Protected display")
+                    .font(Theme.ui(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.ink1)
+                Text("LiveBlock protects one explicitly selected display and retains it across restarts.")
+                    .font(Theme.ui(size: 11))
+                    .foregroundStyle(Theme.ink3)
+            }
+            Spacer()
+            if let selected = controller.selectedDisplayID {
+                Picker("Protected display", selection: Binding(
+                    get: { selected },
+                    set: { controller.selectDisplay(id: $0) }
+                )) {
+                    ForEach(controller.availableDisplays) { display in
+                        Text(display.menuLabel).tag(display.id)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 330)
+            } else {
+                Text("No display available")
+                    .font(Theme.ui(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+            }
+        }
+        .padding(14)
+        .lbCard(Theme.surface, radius: Theme.Radius.r4, stroke: Theme.line)
     }
 
     private var counterCard: some View {
@@ -286,16 +331,7 @@ struct SettingsView: View {
                 }
             }
             .padding(.top, 6)
-            (Text("\(controller.captureManager.currentPatches.count)")
-                .font(Theme.mono(size: 12))
-                .foregroundColor(Theme.ink2)
-             + Text(" live patches this frame · ")
-                .foregroundColor(Theme.ink3)
-             + Text("\(controller.regionCount)")
-                .font(Theme.mono(size: 12))
-                .foregroundColor(Theme.ink2)
-             + Text(" active regions")
-                .foregroundColor(Theme.ink3))
+            Text("\(Text("\(controller.captureManager.currentPatches.count)").font(Theme.mono(size: 12)).foregroundColor(Theme.ink2))\(Text(" live patches this frame · ").foregroundColor(Theme.ink3))\(Text("\(controller.regionCount)").font(Theme.mono(size: 12)).foregroundColor(Theme.ink2))\(Text(" active regions").foregroundColor(Theme.ink3))")
                 .font(Theme.ui(size: 12))
                 .padding(.top, 10)
 
@@ -421,6 +457,7 @@ struct SettingsView: View {
         let active = fillStyle == idx
         return Button {
             withAnimation(.easeOut(duration: 0.12)) { fillStyle = idx }
+            controller.captureManager.setInpaintFillStyle(idx)
         } label: {
             VStack(alignment: .leading, spacing: 0) {
                 RoundedRectangle(cornerRadius: Theme.Radius.r2, style: .continuous)
@@ -514,7 +551,9 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.ink3)
             }
             Spacer()
-            LBToggle(isOn: isOn)
+            LBToggle(isOn: isOn,
+                     accessibilityName: label,
+                     accessibilityIdentifier: "settings.behavior.\(label.lowercased().replacingOccurrences(of: " ", with: "-"))")
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .overlay(alignment: .top) {
@@ -595,8 +634,10 @@ struct SettingsView: View {
         return VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 0) {
                 infoRow(label: "Version", value: "\(version) (build \(build))", divider: false)
-                infoRow(label: "Detector", value: "liveblock-detector CoreML (open-vocabulary — blocks logos & ads with no training)", divider: true)
-                infoRow(label: "Capture", value: "Apple ScreenCaptureKit at 60 Hz", divider: true)
+                infoRow(label: "Detector", value: "CoreML candidate; release activation requires verified promotion", divider: true)
+                infoRow(label: "Capture", value: measuredCaptureSummary, divider: true)
+                infoRow(label: "Screen access", value: controller.screenRecordingGranted ? "Granted" : "Not granted", divider: true)
+                infoRow(label: "Accessibility for global hotkeys", value: controller.accessibilityGranted ? "Granted" : "Not granted", divider: true)
                 infoRow(label: "Inpainter", value: "Mirror-blend (sample band, reflect across edge, cross-fade)", divider: true)
                 infoRow(label: "Network", value: "None. Zero outbound traffic. No telemetry.", divider: true)
             }
@@ -615,6 +656,11 @@ struct SettingsView: View {
                          systemIcon: "sparkles") {
                     controller.restartOnboarding()
                 }
+                LBButton(title: "Export diagnostics…", variant: .outline, size: .md,
+                         systemIcon: "stethoscope") {
+                    controller.exportDiagnostics()
+                }
+                .help("Saves frame-free diagnostics; no apps, windows, labels, regions, or user paths")
                 Spacer()
             }
         }

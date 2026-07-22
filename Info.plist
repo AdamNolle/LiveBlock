@@ -20,6 +20,8 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>LiveBlockTrainingRuntimeEnabled</key>
+	<string>$(LIVEBLOCK_TRAINING_RUNTIME_ENABLED)</string>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>LiveBlock uses Accessibility access to register global hotkeys.</string>
 	<key>NSPrincipalClass</key>

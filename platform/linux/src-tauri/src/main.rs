@@ -11,71 +11,487 @@ mod detection;
 mod hotkeys;
 mod inpainting;
 mod labels;
+mod model_updates;
 mod overlay;
 mod paths;
 mod regions;
 mod session;
 mod state;
-mod training;
 
+use parking_lot::MutexGuard;
+use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+use crate::capture::{open_capture, CaptureEvent, CaptureSource};
+use crate::detection::DetBox;
+use crate::inpainting::PatchPayload;
 use crate::labels::{LabelDocument, ScreenshotEntry};
 use crate::regions::{NormalizedRegion, RegionStore, SharedRegionStore};
 use crate::session::detect_session;
-use crate::state::AppState;
+use crate::state::{
+    advance_capture_generation, claim_user_action, frame_belongs_to_active_generation,
+    take_finished_capture_runtime, user_action_is_current,
+    window_action_is_newer_than_barriers, AppState, CaptureRuntime, CaptureTelemetrySnapshot,
+    LatestFrame,
+};
 
 #[tauri::command]
-fn get_session_info() -> serde_json::Value {
-    serde_json::json!({
-        "session": match detect_session() {
-            session::SessionType::Wayland => "wayland",
-            session::SessionType::X11 => "x11",
-            session::SessionType::Unknown => "unknown",
+fn get_behavior_contract() -> Result<liveblock_config::DesktopBehaviorContract, String> {
+    let contract = liveblock_config::DesktopBehaviorContract::default();
+    contract.validate().map_err(|error| error.to_owned())?;
+    Ok(contract)
+}
+
+#[tauri::command]
+fn get_capabilities(
+    state: State<'_, Arc<AppState>>,
+) -> Result<liveblock_config::DesktopCapabilityProfile, String> {
+    use liveblock_config::{DesktopCapabilityProfile, DesktopPlatform};
+    let platform = match detect_session() {
+        session::SessionType::X11 => DesktopPlatform::LinuxX11,
+        session::SessionType::Wayland => match session::detect_compositor() {
+            session::WaylandCompositor::Kwin => DesktopPlatform::LinuxKdeWayland,
+            session::WaylandCompositor::Wlroots => DesktopPlatform::LinuxWlrootsWayland,
+            session::WaylandCompositor::Gnome => DesktopPlatform::LinuxGnomeWayland,
+            session::WaylandCompositor::Unknown => {
+                return Err("unsupported or unknown Wayland compositor".into())
+            }
         },
-        "compositor": format!("{:?}", session::detect_compositor()),
-        "supports_layer_shell": session::supports_layer_shell(session::detect_compositor()),
-        "overlay_strategy": format!("{:?}", overlay::pick_strategy()),
-    })
+        session::SessionType::Unknown => return Err("unknown desktop session".into()),
+    };
+    let mut profile = DesktopCapabilityProfile::linux(platform);
+    profile.inference_backends = detection::configured_inference_backends()
+        .iter()
+        .map(|backend| (*backend).to_string())
+        .collect();
+    let inpainting_backend = state.inpainter.lock().backend_status().to_string();
+    if inpainting_backend.starts_with("wgpu_") && !inpainting_backend.contains("failed") {
+        profile.limitations.push(format!(
+            "{inpainting_backend} initialized for bounded mirror-blend dispatch; real-device GPU certification is pending"
+        ));
+    } else {
+        profile.limitations.push(format!(
+            "wgpu inpainting is unavailable or failed; {inpainting_backend} is active"
+        ));
+    }
+    if !state.hotkeys_initialized.load(Ordering::SeqCst)
+        || !state.hotkeys_available.load(Ordering::SeqCst)
+    {
+        profile.global_hotkeys = false;
+        profile
+            .limitations
+            .push("global shortcuts are unavailable in this runtime session".into());
+    }
+    profile.validate().map_err(str::to_string)?;
+    Ok(profile)
 }
 
 // ---------- Capture / detection lifecycle ----------
 
+static USER_ACTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_user_action_sequence() -> u64 {
+    loop {
+        let current = USER_ACTION_SEQUENCE.load(Ordering::SeqCst);
+        let next = current.wrapping_add(1).max(1);
+        if USER_ACTION_SEQUENCE
+            .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
+fn action_sequence_was_allocated(action_sequence: u64) -> bool {
+    action_sequence != 0 && action_sequence <= USER_ACTION_SEQUENCE.load(Ordering::SeqCst)
+}
+
+fn claim_action(state: &AppState, action_sequence: u64) -> bool {
+    action_sequence_was_allocated(action_sequence)
+        && claim_user_action(
+            &state.latest_action_sequence,
+            state.shutdown_requested.load(Ordering::SeqCst),
+            action_sequence,
+        )
+}
+
+fn action_is_current(state: &AppState, action_sequence: u64) -> bool {
+    user_action_is_current(
+        &state.latest_action_sequence,
+        state.shutdown_requested.load(Ordering::SeqCst),
+        action_sequence,
+    )
+}
+
+fn window_action_is_allowed(state: &AppState, action_sequence: u64) -> bool {
+    action_sequence_was_allocated(action_sequence)
+        && window_action_is_newer_than_barriers(
+            action_sequence,
+            state.latest_action_sequence.load(Ordering::SeqCst),
+            state.last_panic_action.load(Ordering::SeqCst),
+            state.shutdown_requested.load(Ordering::SeqCst),
+        )
+}
+
 #[tauri::command]
-fn start_capture(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    state.capture_running.store(true, Ordering::SeqCst);
+fn begin_user_action() -> u64 {
+    next_user_action_sequence()
+}
+
+#[tauri::command]
+async fn start_capture(
+    monitor_id: String,
+    action_sequence: u64,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if !claim_action(state.inner(), action_sequence) {
+        return Ok(());
+    }
+    start_capture_inner(monitor_id, action_sequence, app, state.inner().clone()).await
+}
+
+async fn start_capture_inner(
+    monitor_id: String,
+    action_sequence: u64,
+    app: AppHandle,
+    state: Arc<AppState>,
+) -> Result<(), String> {
+    let expected_id = match detect_session() {
+        session::SessionType::Wayland => "portal-selection",
+        session::SessionType::X11 => "x11-root",
+        session::SessionType::Unknown => return Err("unknown Linux display server".into()),
+    };
+    if monitor_id != expected_id {
+        return Err("selected Linux capture target is no longer available".into());
+    }
+
+    let mut lifecycle = state.capture.lock().await;
+    if let Some(previous) = lifecycle.take() {
+        previous.stop_requested.store(true, Ordering::Release);
+        let _ = previous.task.await;
+    }
+    if !action_is_current(&state, action_sequence) {
+        return Ok(());
+    }
+    let generation = advance_capture_generation(&state.capture_generation);
+    state.capture_telemetry.reset();
+    state.latest_frame.store(None);
+    state.capture_running.store(false, Ordering::SeqCst);
+    *state.current_patches.lock() = Vec::new();
+    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    if let Some(window) = app.get_webview_window("render") {
+        let _ = window.hide();
+    }
+    let _ = app.emit("capture-state-changed", false);
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let task_stop = stop_requested.clone();
+    let task_state = state.clone();
+    let task_app = app.clone();
+    let task = tokio::spawn(async move {
+        run_capture_task(generation, task_stop, task_state, task_app).await;
+    });
+    *lifecycle = Some(CaptureRuntime {
+        generation,
+        stop_requested,
+        task,
+    });
+    // The task emits `true` only after receiving and validating a first frame.
+    // Portal selection can therefore be cancelled by stop/panic without this
+    // command holding the lifecycle mutex.
     Ok(())
 }
 
 #[tauri::command]
-fn stop_capture(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+async fn stop_capture(
+    action_sequence: u64,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if !claim_action(state.inner(), action_sequence) {
+        return Ok(());
+    }
+    stop_capture_inner(app, state.inner().clone(), Some(action_sequence)).await
+}
+
+async fn stop_capture_inner(
+    app: AppHandle,
+    state: Arc<AppState>,
+    expected_action: Option<u64>,
+) -> Result<(), String> {
+    // Hold the lifecycle lock through join and global-state cleanup so a new
+    // start cannot be overwritten by the previous generation's teardown.
+    let mut lifecycle = state.capture.lock().await;
+    if expected_action.is_some_and(|sequence| !action_is_current(&state, sequence)) {
+        return Ok(());
+    }
+    let runtime = lifecycle.take();
+    if let Some(runtime) = &runtime {
+        runtime.stop_requested.store(true, Ordering::Release);
+    }
+    advance_capture_generation(&state.capture_generation);
     state.capture_running.store(false, Ordering::SeqCst);
+    state.latest_frame.store(None);
+    *state.current_patches.lock() = Vec::new();
+    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+    if let Some(window) = app.get_webview_window("render") {
+        let _ = window.hide();
+    }
+    let _ = app.emit("capture-state-changed", false);
+    if let Some(runtime) = runtime {
+        let _ = runtime.task.await;
+    }
     Ok(())
+}
+
+#[tauri::command]
+fn get_capture_telemetry(state: State<'_, Arc<AppState>>) -> CaptureTelemetrySnapshot {
+    state.capture_telemetry.snapshot()
 }
 
 #[tauri::command]
 fn set_detection_enabled(enabled: bool, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if state.shutdown_requested.load(Ordering::SeqCst) {
+        return Err("runtime changes are unavailable during shutdown".into());
+    }
     state.detection_enabled.store(enabled, Ordering::SeqCst);
     Ok(())
 }
 
 #[tauri::command]
 fn list_monitors() -> Vec<serde_json::Value> {
-    // Linux capture surface is per-output but the runtime enumeration depends
-    // on the live wayland/x11 connection. Until that's wired, return a single
-    // synthetic primary so the frontend's monitor picker doesn't render empty.
-    vec![serde_json::json!({
-        "id": "primary",
-        "name": "Primary display",
-        "is_primary": true,
-    })]
+    match detect_session() {
+        session::SessionType::Wayland => vec![serde_json::json!({
+            "id": "portal-selection",
+            "name": "Choose a display in the system portal",
+            "isPrimary": true,
+        })],
+        session::SessionType::X11 => vec![serde_json::json!({
+            "id": "x11-root",
+            "name": "X11 virtual desktop",
+            "isPrimary": true,
+        })],
+        session::SessionType::Unknown => Vec::new(),
+    }
+}
+
+async fn run_capture_task(
+    generation: u64,
+    stop_requested: Arc<AtomicBool>,
+    state: Arc<AppState>,
+    app: AppHandle,
+) {
+    let source = tokio::select! {
+        source = open_capture() => match source {
+            Ok(source) => source,
+            Err(error) => {
+                if owns_capture_generation(&state, &stop_requested, generation) {
+                    let message = error.to_string();
+                    tracing::error!("Linux capture startup failed: {message}");
+                    let _ = app.emit("capture-runtime-error", message);
+                    let _ = app.emit("capture-state-changed", false);
+                }
+                return;
+            }
+        },
+        _ = wait_for_stop(stop_requested.clone()) => return,
+    };
+    run_capture_loop(source, generation, stop_requested, state, app).await;
+}
+
+fn owns_capture_generation(
+    state: &AppState,
+    stop_requested: &AtomicBool,
+    generation: u64,
+) -> bool {
+    !stop_requested.load(Ordering::Acquire)
+        && state.capture_generation.load(Ordering::SeqCst) == generation
+}
+
+async fn run_capture_loop(
+    mut source: Box<dyn CaptureSource>,
+    generation: u64,
+    stop_requested: Arc<AtomicBool>,
+    state: Arc<AppState>,
+    app: AppHandle,
+) {
+    let mut frame_number = 0u64;
+    let mut recent_detections = (
+        Instant::now() - Duration::from_secs(1),
+        Vec::<DetBox>::new(),
+    );
+    let mut failure = None;
+    let mut announced_running = false;
+    while owns_capture_generation(&state, &stop_requested, generation) {
+        let frame_result = tokio::select! {
+            frame = source.next_event() => Some(frame),
+            _ = wait_for_stop(stop_requested.clone()) => None,
+        };
+        let Some(frame_result) = frame_result else { break; };
+        let frame = match frame_result {
+            Ok(CaptureEvent::Frame(frame)) => frame,
+            Ok(CaptureEvent::Reset) => {
+                if !owns_capture_generation(&state, &stop_requested, generation) {
+                    break;
+                }
+                announced_running = false;
+                recent_detections = (
+                    Instant::now() - Duration::from_secs(1),
+                    Vec::new(),
+                );
+                state.capture_running.store(false, Ordering::SeqCst);
+                state.latest_frame.store(None);
+                *state.current_patches.lock() = Vec::new();
+                let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+                if let Some(window) = app.get_webview_window("render") {
+                    let _ = window.hide();
+                }
+                let _ = app.emit("capture-state-changed", false);
+                continue;
+            }
+            Err(error) => {
+                state.capture_telemetry.copy_error();
+                failure = Some(error.to_string());
+                break;
+            }
+        };
+        if !owns_capture_generation(&state, &stop_requested, generation) {
+            break;
+        }
+        if !frame.is_valid_packed_bgra() {
+            state.capture_telemetry.copy_error();
+            failure = Some("capture backend returned an invalid BGRA frame".into());
+            break;
+        }
+        state.capture_telemetry.captured();
+        state.capture_telemetry.set_dropped(source.dropped_frames());
+        if !announced_running {
+            announced_running = true;
+            state.capture_running.store(true, Ordering::SeqCst);
+            if let Some(window) = app.get_webview_window("render") {
+                let _ = window.show();
+            }
+            let _ = app.emit("capture-state-changed", true);
+        }
+        state.latest_frame.store(Some(Arc::new(LatestFrame {
+            generation,
+            frame: frame.clone(),
+        })));
+        frame_number = frame_number.wrapping_add(1);
+
+        if state.detection_enabled.load(Ordering::Relaxed) && frame_number % 4 == 0 {
+            let detector_state = state.clone();
+            let detection_frame = frame.clone();
+            match tokio::task::spawn_blocking(move || {
+                let mut detector = detector_state.detector.lock();
+                detector
+                    .as_mut()
+                    .map(|detector| {
+                        detector.detect_bgra(
+                            &detection_frame.pixels,
+                            detection_frame.width,
+                            detection_frame.height,
+                        )
+                    })
+                    .transpose()
+            })
+            .await
+            {
+                Ok(Ok(Some(detections))) => {
+                    recent_detections = (Instant::now(), detections);
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => tracing::warn!("Linux detector frame failed: {error}"),
+                Err(error) => tracing::error!("Linux detector worker failed: {error}"),
+            }
+            if !owns_capture_generation(&state, &stop_requested, generation) {
+                break;
+            }
+        }
+
+        let mut regions = state.region_store.current();
+        if recent_detections.0.elapsed() < Duration::from_millis(800) {
+            for detection in &recent_detections.1 {
+                if detection.score < 0.5 {
+                    continue;
+                }
+                regions.push(NormalizedRegion::new(
+                    f64::from(detection.x) / f64::from(frame.width),
+                    f64::from(detection.y) / f64::from(frame.height),
+                    f64::from(detection.w) / f64::from(frame.width),
+                    f64::from(detection.h) / f64::from(frame.height),
+                ));
+            }
+        }
+        let paint_state = state.clone();
+        let paint_frame = frame.clone();
+        let patches = match tokio::task::spawn_blocking(move || {
+            paint_state.inpainter.lock().inpaint(
+                &paint_frame.pixels,
+                paint_frame.width,
+                paint_frame.height,
+                &regions,
+            )
+        })
+        .await
+        {
+            Ok(Ok(patches)) => patches,
+            Ok(Err(error)) => {
+                tracing::warn!("Linux inpainting frame failed: {error}");
+                Vec::new()
+            }
+            Err(error) => {
+                failure = Some(format!("Linux inpainting worker stopped: {error}"));
+                break;
+            }
+        };
+        if !owns_capture_generation(&state, &stop_requested, generation) {
+            break;
+        }
+        *state.current_patches.lock() = patches.clone();
+        state.capture_telemetry.processed();
+        let _ = app.emit("patches-updated", &patches);
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+    source.stop().await;
+    if state.capture_generation.load(Ordering::SeqCst) == generation {
+        state.capture_running.store(false, Ordering::SeqCst);
+        state.latest_frame.store(None);
+        *state.current_patches.lock() = Vec::new();
+        let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
+        if let Some(window) = app.get_webview_window("render") {
+            let _ = window.hide();
+        }
+        let _ = app.emit("capture-state-changed", false);
+        if let Some(message) = failure {
+            tracing::error!("Linux capture stopped: {message}");
+            let _ = app.emit("capture-runtime-error", message);
+        }
+    }
+}
+
+async fn wait_for_stop(stop_requested: Arc<AtomicBool>) {
+    while !stop_requested.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 // ---------- Region CRUD ----------
+
+fn persistent_mutation_guard(state: &AppState) -> Result<MutexGuard<'_, ()>, String> {
+    let guard = state.persistent_mutation.lock();
+    if state.shutdown_requested.load(Ordering::SeqCst) {
+        Err("persistent changes are unavailable during shutdown".into())
+    } else {
+        Ok(guard)
+    }
+}
 
 #[tauri::command]
 fn list_regions(state: State<'_, Arc<AppState>>) -> Vec<NormalizedRegion> {
@@ -87,6 +503,7 @@ fn add_region(
     region: NormalizedRegion,
     state: State<'_, Arc<AppState>>,
 ) -> Result<NormalizedRegion, String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     state
         .region_store
         .add(region.clone())
@@ -100,6 +517,7 @@ fn replace_region(
     region: NormalizedRegion,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     state
         .region_store
         .replace_id(id, region)
@@ -108,23 +526,87 @@ fn replace_region(
 
 #[tauri::command]
 fn delete_region(id: Uuid, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     state.region_store.remove(id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn clear_regions(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
     state.region_store.clear().map_err(|e| e.to_string())
 }
 
 // ---------- Labeling pipeline ----------
 
 #[tauri::command]
-fn capture_screenshot_for_labeling() -> Result<Option<PathBuf>, String> {
-    // The Wayland/X11 capture surface isn't yet plumbed into the labeling
-    // pipeline. Return None so the frontend treats this as "no frame yet"
-    // rather than an error. Wiring is symmetric with Windows once
-    // `capture::latest_frame()` is exposed.
-    Ok(None)
+async fn capture_screenshot_for_labeling(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<PathBuf>, String> {
+    capture_screenshot_serialized(state.inner()).await
+}
+
+async fn capture_screenshot_serialized(state: &Arc<AppState>) -> Result<Option<PathBuf>, String> {
+    let lifecycle = state.capture.lock().await;
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
+    let runtime_is_current = lifecycle.as_ref().is_some_and(|runtime| {
+        !runtime.task.is_finished()
+            && runtime.generation == state.capture_generation.load(Ordering::SeqCst)
+    });
+    if !runtime_is_current {
+        return Ok(None);
+    }
+    capture_screenshot_inner(state.as_ref())
+}
+
+fn capture_screenshot_inner(state: &AppState) -> Result<Option<PathBuf>, String> {
+    let Some(latest) = state.latest_frame.load_full() else {
+        return Ok(None);
+    };
+    let generation = latest.generation;
+    if !screenshot_generation_is_current(state, generation) {
+        return Ok(None);
+    }
+    let frame = &latest.frame;
+    paths::ensure_directories().map_err(|error| error.to_string())?;
+    let stem = paths::new_screenshot_stem();
+    let destination = paths::screenshots_dir().join(format!("{stem}.png"));
+    let mut rgba = Vec::with_capacity(frame.pixels.len());
+    for pixel in frame.pixels.chunks_exact(4) {
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(frame.width, frame.height, rgba)
+        .ok_or("invalid captured frame")?;
+    if !screenshot_generation_is_current(state, generation) {
+        return Ok(None);
+    }
+    let write_result = (|| -> Result<(), String> {
+        use std::io::Write;
+        let file = paths::create_private_file(&destination).map_err(|error| error.to_string())?;
+        let mut writer = std::io::BufWriter::new(file);
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut writer, image::ImageFormat::Png)
+            .map_err(|error| error.to_string())?;
+        writer.flush().map_err(|error| error.to_string())?;
+        writer.get_ref().sync_all().map_err(|error| error.to_string())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&destination);
+        return Err(error);
+    }
+    if !screenshot_generation_is_current(state, generation) {
+        std::fs::remove_file(&destination)
+            .map_err(|error| format!("remove stale labeling screenshot: {error}"))?;
+        return Ok(None);
+    }
+    Ok(Some(destination))
+}
+
+fn screenshot_generation_is_current(state: &AppState, generation: u64) -> bool {
+    frame_belongs_to_active_generation(
+        state.capture_generation.load(Ordering::SeqCst),
+        state.capture_running.load(Ordering::SeqCst),
+        generation,
+    )
 }
 
 #[tauri::command]
@@ -137,15 +619,12 @@ fn list_screenshots() -> Vec<ScreenshotEntry> {
     let mut out: Vec<ScreenshotEntry> = entries
         .flatten()
         .filter_map(|e| {
-            let p = e.path();
-            let ext = p.extension().and_then(|x| x.to_str())?;
-            if !ext.eq_ignore_ascii_case("png") {
-                return None;
-            }
+            let p = paths::validate_screenshot_path(&e.path()).ok()?;
             let stem = p.file_stem()?.to_string_lossy().into_owned();
             let label = paths::label_path_for(&p);
             Some(ScreenshotEntry {
                 path: p,
+                label_path: label.clone(),
                 stem,
                 labeled: label.exists(),
             })
@@ -155,40 +634,198 @@ fn list_screenshots() -> Vec<ScreenshotEntry> {
     out
 }
 
-#[tauri::command]
-fn load_screenshot(path: PathBuf) -> Result<Vec<u8>, String> {
-    std::fs::read(&path).map_err(|e| e.to_string())
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotData {
+    width: u32,
+    height: u32,
+    png_data_url: String,
 }
 
 #[tauri::command]
-fn save_label(path: PathBuf, doc: LabelDocument) -> Result<(), String> {
+fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let path = paths::validate_screenshot_path(&path).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let image = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+    Ok(ScreenshotData {
+        width: image.width(),
+        height: image.height(),
+        png_data_url: format!("data:image/png;base64,{}", STANDARD.encode(bytes)),
+    })
+}
+
+#[tauri::command]
+fn save_label(
+    path: PathBuf,
+    doc: LabelDocument,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
+    let path = paths::validate_label_path(&path, false).map_err(|e| e.to_string())?;
+    if path.exists() {
+        // Validate the existing discriminator before replacement. Unknown future
+        // sidecars remain byte-for-byte untouched even if IPC is invoked directly.
+        LabelDocument::load(&path).map_err(|e| e.to_string())?;
+    }
+    validate_label_binding(&path, &doc)?;
     doc.save(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
     if !path.exists() {
+        paths::validate_label_path(&path, false).map_err(|e| e.to_string())?;
         return Ok(None);
     }
-    LabelDocument::load(&path).map(Some).map_err(|e| e.to_string())
+    let path = paths::validate_label_path(&path, true).map_err(|e| e.to_string())?;
+    LabelDocument::load(&path)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn discard_screenshot(path: PathBuf) -> Result<(), String> {
-    paths::ensure_directories().map_err(|e| e.to_string())?;
+fn discard_screenshot(path: PathBuf, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let _mutation_guard = persistent_mutation_guard(state.as_ref())?;
+    let path = paths::validate_screenshot_path(&path).map_err(|e| e.to_string())?;
     let dst = paths::trash_dir().join(path.file_name().ok_or("no filename")?);
-    std::fs::rename(&path, &dst).map_err(|e| e.to_string())
+    let label = paths::label_path_for(&path);
+    let label_move = if label.exists() {
+        let label = paths::validate_label_path(&label, true).map_err(|e| e.to_string())?;
+        let destination = paths::trash_dir().join(label.file_name().ok_or("no label filename")?);
+        Some((label, destination))
+    } else {
+        None
+    };
+    liveblock_config::move_regular_file_pair_no_replace(
+        &path,
+        &dst,
+        label_move
+            .as_ref()
+            .map(|(source, destination)| (source.as_path(), destination.as_path())),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn validate_label_binding(path: &std::path::Path, doc: &LabelDocument) -> Result<(), String> {
+    let label_stem = path.file_stem().and_then(|value| value.to_str()).ok_or("invalid label name")?;
+    let image = std::path::Path::new(&doc.image);
+    if image.parent().is_some_and(|parent| !parent.as_os_str().is_empty())
+        || image.extension().and_then(|value| value.to_str()) != Some("png")
+        || image.file_stem().and_then(|value| value.to_str()) != Some(label_stem)
+    {
+        return Err("label image must be the matching managed screenshot filename".into());
+    }
+    let screenshot = paths::screenshots_dir().join(&doc.image);
+    paths::validate_screenshot_path(&screenshot).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn dispatch_hotkey(action: hotkeys::HotkeyAction, app: AppHandle, state: Arc<AppState>) {
+    let action_sequence = next_user_action_sequence();
+    match action {
+        hotkeys::HotkeyAction::ToggleCapture => {
+            if !claim_action(&state, action_sequence) {
+                return;
+            }
+            let finished = {
+                let mut lifecycle = state.capture.lock().await;
+                take_finished_capture_runtime(&mut lifecycle)
+            };
+            if let Some(finished) = finished {
+                if let Err(error) = finished.task.await {
+                    tracing::error!(
+                        generation = finished.generation,
+                        "completed Linux capture task join failed: {error}"
+                    );
+                }
+            }
+            let has_runtime = state.capture.lock().await.is_some();
+            if has_runtime {
+                let _ = stop_capture_inner(app, state, Some(action_sequence)).await;
+            } else {
+                let target = match detect_session() {
+                    session::SessionType::Wayland => Some("portal-selection"),
+                    session::SessionType::X11 => Some("x11-root"),
+                    session::SessionType::Unknown => None,
+                };
+                if let Some(target) = target {
+                    let start_state = state.clone();
+                    if let Err(error) = start_capture_inner(
+                        target.into(),
+                        action_sequence,
+                        app.clone(),
+                        state,
+                    )
+                    .await
+                    {
+                        if action_is_current(&start_state, action_sequence) {
+                            let _ = app.emit("capture-runtime-error", error);
+                        }
+                    }
+                }
+            }
+        }
+        hotkeys::HotkeyAction::ToggleEditor => {
+            if !window_action_is_allowed(&state, action_sequence) {
+                return;
+            }
+            if let Some(window) = app.get_webview_window("editor") {
+                if window.is_visible().unwrap_or(false) {
+                    let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }
+        hotkeys::HotkeyAction::CaptureForLabeling => {
+            if !window_action_is_allowed(&state, action_sequence) {
+                return;
+            }
+            if capture_screenshot_serialized(&state)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                if let Some(window) = app.get_webview_window("labeling") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }
+        hotkeys::HotkeyAction::PanicDisable => {
+            state
+                .last_panic_action
+                .fetch_max(action_sequence, Ordering::SeqCst);
+            if !claim_action(&state, action_sequence) {
+                return;
+            }
+            // Clear every privacy-visible window before awaiting source/GPU teardown.
+            for label in ["editor", "render", "labeling", "training"] {
+                if let Some(window) = app.get_webview_window(label) {
+                    let _ = window.hide();
+                }
+            }
+            if let Some(window) = app.get_webview_window("control") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit("panic-disabled", ());
+            let _ = stop_capture_inner(app.clone(), state, Some(action_sequence)).await;
+        }
+    }
 }
 
 // ---------- Training pipeline ----------
 
 #[tauri::command]
 fn start_training(_epochs: u32, _batch: u32, _imgsz: u32) -> Result<(), String> {
-    // Training driver lives in the Python pipeline at tools/train_logos.py.
-    // The Rust side dispatches and pipes progress through stdout; the
-    // training module owns the lifecycle. Stub for now — Linux wires this
-    // identically to Windows once the training module ships.
-    Ok(())
+    if !liveblock_config::developer_training_runtime_available() {
+        return Err("release builds are inference-only; use the source training workflow".into());
+    }
+    Err("Linux source training dispatch is not implemented".into())
 }
 
 #[tauri::command]
@@ -199,25 +836,59 @@ fn cancel_training() -> Result<(), String> {
 // ---------- Window lifecycle ----------
 
 #[tauri::command]
-fn show_window(app: AppHandle, label: &str) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window(label) {
-        let _ = w.show();
-        let _ = w.set_focus();
+fn show_window(
+    app: AppHandle,
+    label: &str,
+    action_sequence: u64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if !matches!(label, "editor" | "labeling" | "training") {
+        return Err(format!("window is not renderer-openable: {label}"));
     }
-    Ok(())
+    if !window_action_is_allowed(state.inner(), action_sequence) {
+        return Ok(());
+    }
+    let window = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("window is unavailable: {label}"))?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn hide_window(app: AppHandle, label: &str) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window(label) {
-        let _ = w.hide();
+    if !matches!(label, "editor" | "labeling" | "training") {
+        return Err(format!("window is not renderer-hideable: {label}"));
     }
-    Ok(())
+    app.get_webview_window(label)
+        .ok_or_else(|| format!("window is unavailable: {label}"))?
+        .hide()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn quit(app: AppHandle) {
+async fn quit(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let action_sequence = next_user_action_sequence();
+    state
+        .latest_action_sequence
+        .fetch_max(action_sequence, Ordering::SeqCst);
+    if state.shutdown_requested.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    for label in ["editor", "render", "labeling", "training"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.hide();
+        }
+    }
+    let _ = stop_capture_inner(app.clone(), state.inner().clone(), None).await;
+    // Finish an already-admitted region/label/screenshot write before exit;
+    // commands queued after the terminal flag fail when they acquire this gate.
+    let _mutation_guard = state.persistent_mutation.lock();
+    // Commands queued after the terminal flag fail admission. An authenticated
+    // update that already owns this mutex completes before normal process exit.
+    let _update_guard = state.model_update.lock();
     app.exit(0);
+    Ok(())
 }
 
 fn main() {
@@ -234,14 +905,65 @@ fn main() {
     );
     let app_state = AppState::new(region_store);
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_os::init())
-        .manage(app_state)
+    tauri::Builder::default().manage(app_state)
         .setup(|app| {
-            if let Err(e) = overlay::install_click_through(overlay::pick_strategy()) {
+            let runtime_path = app
+                .path()
+                .resolve(
+                    "resources/onnxruntime/libonnxruntime.so",
+                    tauri::path::BaseDirectory::Resource,
+                )
+                .ok();
+            let packaged_runtime = runtime_path
+                .as_deref()
+                .filter(|path| std::fs::symlink_metadata(path).is_ok());
+            if let Err(error) = detection::initialize_runtime(packaged_runtime) {
+                tracing::error!("ONNX Runtime initialization failed: {error}");
+                if packaged_runtime.is_some() || !cfg!(debug_assertions) {
+                    return Err(Box::new(std::io::Error::other(error.to_string())));
+                }
+            }
+
+            let detector = match model_updates::load_authenticated_active(app.handle()) {
+                Ok(Some(detector)) => {
+                    tracing::info!("loaded authenticated detector update");
+                    Some(detector)
+                }
+                Ok(None) => match model_updates::load_authenticated_packaged(app.handle()) {
+                    Ok(detector) => detector,
+                    Err(error) => {
+                        tracing::error!("authenticated packaged detector rejected: {error}");
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::error!("authenticated detector update rejected: {error}");
+                    None
+                }
+            };
+            if let (Some(detector), Some(state)) = (detector, app.try_state::<Arc<AppState>>()) {
+                *state.detector.lock() = Some(detector);
+            }
+
+            let (hotkey_tx, hotkey_rx) = crossbeam_channel::unbounded();
+            let hotkey_app = app.handle().clone();
+            let hotkey_state = app.state::<Arc<AppState>>().inner().clone();
+            hotkeys::spawn(hotkey_app.clone(), hotkey_tx, hotkey_state.clone());
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match hotkey_rx.try_recv() {
+                        Ok(action) => {
+                            dispatch_hotkey(action, hotkey_app.clone(), hotkey_state.clone()).await;
+                        }
+                        Err(crossbeam_channel::TryRecvError::Empty) => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                    }
+                }
+            });
+
+            if let Err(e) = overlay::install_click_through(overlay::pick_strategy(), app.handle()) {
                 tracing::warn!("overlay install failed: {e}");
             }
             for label in ["editor", "render", "labeling", "training"] {
@@ -252,9 +974,12 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_session_info,
+            get_capabilities,
+            get_behavior_contract,
+            begin_user_action,
             start_capture,
             stop_capture,
+            get_capture_telemetry,
             set_detection_enabled,
             list_monitors,
             list_regions,
@@ -270,6 +995,7 @@ fn main() {
             discard_screenshot,
             start_training,
             cancel_training,
+            model_updates::install_model_update,
             show_window,
             hide_window,
             quit,

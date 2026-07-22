@@ -83,7 +83,9 @@ struct ControlPanelView: View {
             LBToggle(isOn: Binding(
                 get: { controller.isRunning },
                 set: { _ in controller.toggleCapture() }
-            ), size: .sm)
+            ), accessibilityName: "Screen blocking",
+               accessibilityIdentifier: "control-panel.capture-toggle",
+               size: .sm)
             .help(controller.isRunning ? "Stop blocking (\u{2318}\u{21E7}L)" : "Start blocking (\u{2318}\u{21E7}L)")
 
             Button(action: openSettings) {
@@ -94,7 +96,9 @@ struct ControlPanelView: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut(",", modifiers: [.command])
-            .help("Open Preferences (\u{2318},)")
+            .accessibilityLabel("Open Settings")
+            .accessibilityIdentifier("control-panel.open-settings")
+            .help("Open Settings (\u{2318},)")
         }
     }
 
@@ -103,7 +107,6 @@ struct ControlPanelView: View {
         var b = AttributedString("Block")
         b.foregroundColor = Theme.accent
         s += b
-        s += AttributedString("er")
         return s
     }
 
@@ -129,7 +132,7 @@ struct ControlPanelView: View {
                 .padding(.bottom, 4)
 
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("\(cm.patchesProduced)")
+                Text("\(cm.blockedEvents)")
                     .font(Theme.mono(size: 52, weight: .semibold))
                     .tracking(-52 * 0.04)
                     .foregroundStyle(Theme.ink1)
@@ -156,7 +159,7 @@ struct ControlPanelView: View {
     @ViewBuilder
     private var heroBadge: some View {
         let _ = liveTick
-        if controller.isRunning, case .none = activePause {
+        if controller.isRunning, activePause == nil {
             LBPill(text: "\(Int(cm.framesPerSecond.rounded())) fps", tone: .success, size: .sm)
         } else {
             LBPill(text: "Idle", tone: .neutral, size: .sm)
@@ -174,8 +177,9 @@ struct ControlPanelView: View {
 
     private var quickStats: some View {
         let _ = liveTick
-        let fps = cm.framesPerSecond
-        let frameCost = fps > 0.001 ? String(format: "%.1f ms", 1000.0 / fps) : "—"
+        let frameCost = cm.renderMilliseconds > 0.001
+            ? String(format: "%.1f ms", cm.renderMilliseconds)
+            : "—"
         return HStack(spacing: 8) {
             quickTile(label: "Regions", value: "\(controller.regionCount)", tone: Theme.success)
             quickTile(label: "Live now", value: "\(cm.currentPatches.count)", tone: Theme.info)
@@ -214,6 +218,7 @@ struct ControlPanelView: View {
             controller.toggleEditor()
         }
         .keyboardShortcut("b", modifiers: [.command, .shift])
+        .accessibilityIdentifier("control-panel.mark-region")
         .help("Drag a rectangle on screen to block (\u{2318}\u{21E7}B)")
     }
 
@@ -226,6 +231,7 @@ struct ControlPanelView: View {
                 controller.captureScreenshotForLabeling()
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
+            .accessibilityIdentifier("control-panel.capture-labeling-frame")
             .help("Snapshot the screen for labeling (\u{2318}\u{21E7}S). Starts capture if needed.")
 
             LBButton(title: "Label (\(controller.screenshotCount))",
@@ -233,12 +239,14 @@ struct ControlPanelView: View {
                      systemIcon: "rectangle.and.pencil.and.ellipsis", fullWidth: true) {
                 controller.showLabelingWindow()
             }
+            .accessibilityIdentifier("control-panel.open-labeling")
             .help("Open the labeling window")
 
             LBButton(title: "Train", variant: .secondary, size: .md,
                      systemIcon: "brain.head.profile", fullWidth: true) {
                 controller.showTrainingDashboard()
             }
+            .accessibilityIdentifier("control-panel.open-training")
             .help("Open the Training Dashboard")
         }
     }
@@ -331,7 +339,9 @@ struct ControlPanelView: View {
             LBToggle(isOn: Binding(
                 get: { controller.regionEnabled(id: region.id) },
                 set: { controller.setRegionEnabled(id: region.id, on: $0) }
-            ), size: .sm)
+            ), accessibilityName: "Region \(index + 1) enabled",
+               accessibilityIdentifier: "control-panel-region-toggle.\(region.id.uuidString)",
+               size: .sm)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 10)

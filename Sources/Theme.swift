@@ -240,6 +240,7 @@ struct StatusDot: View {
     var size: CGFloat = 8
     var pulse: Bool = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var animating = false
 
     var body: some View {
@@ -251,7 +252,7 @@ struct StatusDot: View {
             Circle()
                 .fill(color.opacity(0.20))
                 .frame(width: size * 2, height: size * 2)
-            if pulse {
+            if pulse && !reduceMotion {
                 Circle()
                     .stroke(color.opacity(0.4), lineWidth: 1)
                     .frame(width: size, height: size)
@@ -259,11 +260,16 @@ struct StatusDot: View {
                     .opacity(animating ? 0 : 1)
             }
         }
-        .onAppear {
-            guard pulse else { return }
-            withAnimation(.easeOut(duration: 1.5).repeatForever(autoreverses: false)) {
-                animating = true
-            }
+        .accessibilityHidden(true)
+        .onAppear { updateAnimation() }
+        .onChange(of: reduceMotion) { _, _ in updateAnimation() }
+    }
+
+    private func updateAnimation() {
+        animating = false
+        guard pulse, !reduceMotion else { return }
+        withAnimation(.easeOut(duration: 1.5).repeatForever(autoreverses: false)) {
+            animating = true
         }
     }
 }

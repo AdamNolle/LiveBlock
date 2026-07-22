@@ -49,6 +49,108 @@ final class RegionStoreTests: XCTestCase {
         XCTAssertEqual(firstWidth, 0.2, accuracy: 0.001)
     }
 
+    func testBulkReplacePersistsOneCompleteSnapshot() {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveBlockRegionReplaceTests-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let store = RegionStore(storageURL: tmp)
+        store.add(NormalizedRegion(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        let replacements = [
+            NormalizedRegion(x: 0.3, y: 0.3, width: 0.2, height: 0.2),
+            NormalizedRegion(x: 0.6, y: 0.6, width: 0.1, height: 0.1),
+        ]
+
+        store.replace(replacements)
+
+        XCTAssertEqual(store.current, replacements)
+        XCTAssertEqual(RegionStore(storageURL: tmp).current, replacements)
+    }
+
+    func testShutdownBarrierRejectsAllLaterRegionMutations() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveBlockRegionShutdownTests-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let original = NormalizedRegion(x: 0.1, y: 0.1, width: 0.2, height: 0.2)
+        let store = RegionStore(storageURL: tmp)
+        store.add(original)
+        store.prepareForShutdown()
+
+        store.add(NormalizedRegion(x: 0.4, y: 0.4, width: 0.2, height: 0.2))
+        store.replace(id: original.id,
+                      with: NormalizedRegion(id: original.id,
+                                             x: 0.6, y: 0.6, width: 0.1, height: 0.1))
+        store.replace([])
+        store.remove(id: original.id)
+        store.clear()
+
+        XCTAssertEqual(store.current, [original])
+        let reopened = RegionStore(storageURL: tmp)
+        XCTAssertEqual(reopened.current, [original])
+    }
+
+    func testDisabledRegionsAreExcludedFromCaptureSnapshot() {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveBlockDisabledRegionTests-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let enabled = NormalizedRegion(x: 0.1, y: 0.1, width: 0.2, height: 0.2)
+        let disabled = NormalizedRegion(x: 0.5, y: 0.5, width: 0.2, height: 0.2)
+        let store = RegionStore(storageURL: tmp)
+        store.add(enabled)
+        store.add(disabled)
+
+        XCTAssertEqual(store.current(excluding: [disabled.id]).map(\.id), [enabled.id])
+    }
+
+    func testBlockEventsCountAppearancesInsteadOfFrames() {
+        let tracker = BlockEventTracker()
+        let id = UUID()
+        let user = AdBoundingBox(rect: CGRect(x: 0, y: 0, width: 20, height: 20),
+                                 confidence: 1, label: "User", source: .user, regionID: id)
+        let detected = AdBoundingBox(rect: CGRect(x: 40, y: 40, width: 20, height: 20),
+                                     confidence: 0.8, label: "Logo", source: .detection)
+
+        XCTAssertEqual(tracker.update(userBoxes: [user], detectedBoxes: [detected]).total, 2)
+        XCTAssertEqual(tracker.update(userBoxes: [user], detectedBoxes: [detected]).total, 0)
+        _ = tracker.update(userBoxes: [], detectedBoxes: [])
+        XCTAssertEqual(tracker.update(userBoxes: [user], detectedBoxes: [detected]).total, 2)
+    }
+
+    func testActiveStreamIdentityRejectsRetiredObjects() {
+        let identity = AtomicObjectIdentity()
+        let old = NSObject()
+        let current = NSObject()
+        identity.set(old, generation: 1)
+        XCTAssertTrue(identity.matches(old))
+        identity.set(current, generation: 2)
+        identity.clear(ifGeneration: 1)
+        XCTAssertTrue(identity.matches(current))
+        XCTAssertFalse(identity.matches(old))
+        identity.clear(ifMatching: current)
+        XCTAssertFalse(identity.matches(current))
+    }
+
+    func testDetectionCacheRejectsResultsAfterClear() {
+        let cache = DetectionCache()
+        let generation = cache.generation()
+        cache.clear()
+        cache.store([
+            AdBoundingBox(rect: CGRect(x: 0, y: 0, width: 10, height: 10),
+                          confidence: 1, label: "stale", source: .detection)
+        ], ifGeneration: generation)
+        XCTAssertTrue(cache.load().isEmpty)
+    }
+
+    func testSnapshotRequestTimesOutWithoutCapturedFrame() async {
+        let storage = LatestBufferStorage()
+        let started = Date()
+        let result = await storage.requestSnapshot(timeout: 0.1, generation: 1)
+        XCTAssertNil(result)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
+    }
+
     func testInpaintingEngineProducesNoPatchesForEmptyInput() {
         let engine = InpaintingEngine()
         let buffer = makePixelBuffer(width: 64, height: 64)
@@ -56,21 +158,22 @@ final class RegionStoreTests: XCTestCase {
         XCTAssertEqual(patches.count, 0)
     }
 
-    func testInpaintingEngineProducesPatchPerRegion() {
+    func testInpaintingEngineProducesPatchPerRegionForEveryFillStyle() throws {
         let engine = InpaintingEngine()
         let buffer = makePixelBuffer(width: 128, height: 128)
         let region = AdBoundingBox(rect: CGRect(x: 16, y: 16, width: 64, height: 32),
                                    confidence: 1.0,
                                    label: "test",
                                    source: .user)
-        let patches = engine.inpaintPatches(frame: buffer, regions: [region])
-        XCTAssertEqual(patches.count, 1)
-        let patch = try! XCTUnwrap(patches.first)
-        // Normalized rect is in [0..1]
-        XCTAssertGreaterThanOrEqual(patch.normalizedRect.minX, 0)
-        XCTAssertLessThanOrEqual(patch.normalizedRect.maxX, 1)
-        XCTAssertGreaterThan(patch.image.width, 0)
-        XCTAssertGreaterThan(patch.image.height, 0)
+        for style in [InpaintFillStyle.smart, .blur, .averageColor, .solidBlack] {
+            let patches = engine.inpaintPatches(frame: buffer, regions: [region], style: style)
+            XCTAssertEqual(patches.count, 1, "style \(style) must render")
+            let patch = try XCTUnwrap(patches.first)
+            XCTAssertGreaterThanOrEqual(patch.normalizedRect.minX, 0)
+            XCTAssertLessThanOrEqual(patch.normalizedRect.maxX, 1)
+            XCTAssertGreaterThan(patch.image.width, 0)
+            XCTAssertGreaterThan(patch.image.height, 0)
+        }
     }
 
     // MARK: - Helpers

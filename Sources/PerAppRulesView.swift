@@ -149,6 +149,8 @@ struct PerAppRulesPane: View {
                     get: { excluded },
                     set: { rules.setExcluded(bundleID, excluded: $0) }
                 ),
+                accessibilityName: "Pause blocking for \(name)",
+                accessibilityIdentifier: "per-app-toggle.\(app.processIdentifier)",
                 size: .sm
             )
         }
@@ -198,7 +200,7 @@ struct PerAppRulesPane: View {
         HStack(spacing: 8) {
             if !rules.excludedBundleIDs.isEmpty {
                 LBButton(title: "Clear exclusions", variant: .ghost, size: .sm) {
-                    rules.excludedBundleIDs = []
+                    rules.clear()
                 }
             }
             Spacer()

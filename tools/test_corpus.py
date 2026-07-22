@@ -8,7 +8,8 @@ from pathlib import Path
 from PIL import Image
 import pytest
 
-from corpus.build_sports_corpus import HUMAN_REVIEW_ATTESTATION, build, split_for
+from corpus.build_sports_corpus import (HUMAN_REVIEW_ATTESTATION, assign_group_splits,
+                                        build, split_for)
 from corpus.export_eval_fixtures import export as export_eval_fixtures
 from corpus.fetch_wikimedia import fetch_category, fetch_query
 from corpus.propose_labels import predict_yolo
@@ -617,6 +618,31 @@ def test_build_can_require_explicit_human_review(tmp_path):
     assert stats["skipped"] == {"review_method": 1}
 
 
+def test_unconstrained_split_assignment_preserves_legacy_mapping():
+    groups = ["event-a", "event-b", "event-c", "event-d", "event-e"]
+    ordered = sorted(groups, key=lambda group: hashlib.sha256(group.encode()).hexdigest())
+    expected = {
+        group: "test" if index == 0 else "val" if index == 1 else "train"
+        for index, group in enumerate(ordered)
+    }
+    assert assign_group_splits(
+        groups, {}, test_target=1, val_target=1,
+    ) == expected
+
+
+def test_split_solver_budget_is_global_across_capacity_attempts():
+    facets = {
+        ("placement", "jersey"): ["a", "b", "c"],
+        ("placement", "car_livery"): ["a", "b", "d"],
+        ("placement", "venue_board"): ["a", "c", "d"],
+    }
+    with pytest.raises(RuntimeError, match="solver budget exceeded"):
+        assign_group_splits(
+            ["a", "b", "c", "d"], facets,
+            test_target=1, val_target=1, state_limit=2,
+        )
+
+
 def test_build_stratifies_placement_groups_across_val_and_test(tmp_path):
     source = tmp_path / "source"
     for index, placement in enumerate(("jersey", "jersey", "jersey", "car_livery", "venue_board")):
@@ -643,6 +669,75 @@ def test_build_rejects_stratification_without_three_source_groups(tmp_path):
     with pytest.raises(ValueError, match="needs 3 source groups"):
         build(source, tmp_path / "output", val_fraction=0.2, test_fraction=0.2,
               stratify_placements={"jersey"})
+
+
+def test_build_backtracks_for_overlapping_facets_deterministically(tmp_path):
+    source = tmp_path / "source"
+    facets = {
+        "a": {"jersey", "car_livery"},
+        "b": {"jersey", "venue_board"},
+        "c": {"jersey"},
+        "d": {"car_livery", "venue_board"},
+        "e": {"car_livery"},
+        "f": {"venue_board"},
+    }
+    for group, placements in facets.items():
+        boxes = [
+            {
+                "class": "Logo", "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1,
+                "placement": placement,
+            }
+            for placement in sorted(placements)
+        ]
+        make_item(source, f"item-{group}", boxes=boxes, group=group)
+
+    mappings = []
+    for suffix in ("one", "two"):
+        output = tmp_path / f"output-{suffix}"
+        stats = build(
+            source, output, val_fraction=0.15, test_fraction=0.15,
+            stratify_placements={"jersey", "car_livery", "venue_board"},
+        )
+        assert stats["images"] == {"test": 2, "train": 2, "val": 2}
+        for split in ("train", "val", "test"):
+            for placement in ("jersey", "car_livery", "venue_board"):
+                assert stats["placements_by_split"][split][placement] >= 1
+        mappings.append({
+            record["split_group"]: record["split"]
+            for record in map(json.loads, (output / "provenance.jsonl").read_text().splitlines())
+        })
+    assert mappings[0] == mappings[1]
+
+
+def test_build_rejects_global_split_conflict_without_mutating_output(tmp_path):
+    source = tmp_path / "source"
+    facets = {
+        "a": {"jersey", "car_livery", "venue_board"},
+        "b": {"jersey", "car_livery"},
+        "c": {"jersey", "venue_board"},
+        "d": {"car_livery", "venue_board"},
+    }
+    for group, placements in facets.items():
+        boxes = [
+            {
+                "class": "Logo", "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1,
+                "placement": placement,
+            }
+            for placement in sorted(placements)
+        ]
+        make_item(source, f"item-{group}", boxes=boxes, group=group)
+
+    output = tmp_path / "output"
+    output.mkdir()
+    sentinel = output / "preserve-me.txt"
+    sentinel.write_text("previous corpus\n")
+    with pytest.raises(ValueError, match="simultaneous facet coverage"):
+        build(
+            source, output, val_fraction=0.25, test_fraction=0.25,
+            stratify_placements={"jersey", "car_livery", "venue_board"},
+        )
+    assert sentinel.read_text() == "previous corpus\n"
+    assert sorted(path.name for path in output.iterdir()) == ["preserve-me.txt"]
 
 
 def test_build_stratifies_preservation_groups_across_all_splits(tmp_path):

@@ -59,15 +59,12 @@ struct AdBoundingBox: Sendable {
     }
 }
 
-/// Wraps a Vision/CoreML object detector around the bundled `yolov8n.mlpackage`.
-///
-/// IMPORTANT: the shipped model is **generic YOLOv8n trained on COCO** (80 classes:
-/// `person`, `car`, `dog`, …). It is NOT an ad/logo detector. Detection mode wires
-/// the pipeline end-to-end; producing actual ad masks requires a fine-tune
-/// (see ASSESSMENT.md §3 Path A) or a different model entirely.
+/// Local Vision/CoreML detector with explicit remove and protect label semantics.
+/// The bundled starter is fine-tuned on public search-ad screenshots.
 final class VisionProcessor: @unchecked Sendable {
 
     private let lock = NSLock()
+    private let inferenceLock = NSLock()
     private var model: VNCoreMLModel?
     private var realtimeRequest: VNCoreMLRequest?  // reused on the videoQueue
     private var labelingRequest: VNCoreMLRequest?  // reused on background labeling tasks
@@ -87,6 +84,15 @@ final class VisionProcessor: @unchecked Sendable {
         // Build lazily on first detection call so init never blocks.
     }
 
+    /// Vision's label confidences are conditional and sum to one. A single
+    /// label therefore reports 1 even for a weak detection. Combine it with
+    /// the object confidence before applying the user's blocking threshold.
+    static func combinedConfidence(object: Float, classification: Float) -> Float? {
+        guard object.isFinite, classification.isFinite,
+              (0...1).contains(object), (0...1).contains(classification) else { return nil }
+        return object * classification
+    }
+
     /// Detects objects in `pixelBuffer` using the bundled YOLO model.
     /// Returns `[]` if the model cannot be loaded — never throws.
     ///
@@ -95,17 +101,10 @@ final class VisionProcessor: @unchecked Sendable {
     /// across detection intervals and project them onto whatever the current
     /// buffer size is, frame by frame.
     ///
-    /// CLASS-ALLOWLIST SAFETY GATE: the shipped model is generic COCO
-    /// (person/car/dog/…), NOT an ad/sponsor detector. Auto-erasing every COCO
-    /// detection erased people and cars — the confirmed "class-blind erasure"
-    /// bug. We gate detections through `SponsorClassAllowlist`, which is
-    /// intentionally EMPTY until a real sponsor/logo model ships, so nothing
-    /// auto-erases. The raw observations are still surfaced for the live
-    /// detection log (`detectForDisplay`); only the auto-block path is gated.
+    /// Only explicit ad/sponsor classes authorize removal. Protected classes
+    /// suppress overlapping removal boxes; generic object labels remain display-only.
     func detect(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
-        return runDetection(in: pixelBuffer).filter {
-            SponsorClassAllowlist.allowsAutoBlock(label: $0.label)
-        }
+        return SponsorClassAllowlist.removableDetections(runDetection(in: pixelBuffer))
     }
 
     /// Same inference as `detect(in:)` but WITHOUT the auto-block allowlist
@@ -117,17 +116,18 @@ final class VisionProcessor: @unchecked Sendable {
     }
 
     /// One inference pass, two views of the result:
-    ///   • `forErase` — allowlist-gated (currently empty), feeds the eraser.
+    ///   • `forErase` — allowlist-gated, feeds the eraser.
     ///   • `forDisplay` — ungated, feeds the live detection log only.
     /// Use this on the hot capture path so we don't pay for inference twice.
     func detectGatedAndDisplay(in pixelBuffer: CVPixelBuffer)
         -> (forErase: [NormalizedDetection], forDisplay: [NormalizedDetection]) {
         let all = runDetection(in: pixelBuffer)
-        let gated = all.filter { SponsorClassAllowlist.allowsAutoBlock(label: $0.label) }
+        let gated = SponsorClassAllowlist.removableDetections(all)
         return (forErase: gated, forDisplay: all)
     }
 
     private func runDetection(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
+        inferenceLock.lock(); defer { inferenceLock.unlock() }
         guard let vnModel = ensureModel() else { return [] }
         let threshold = minimumConfidence  // snapshot under lock
 
@@ -136,7 +136,7 @@ final class VisionProcessor: @unchecked Sendable {
             lock.lock(); defer { lock.unlock() }
             if let r = realtimeRequest { return r }
             let r = VNCoreMLRequest(model: vnModel)
-            r.imageCropAndScaleOption = .scaleFill
+            r.imageCropAndScaleOption = .scaleFit
             realtimeRequest = r
             return r
         }()
@@ -151,11 +151,13 @@ final class VisionProcessor: @unchecked Sendable {
 
         let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
         return observations.compactMap { obs -> NormalizedDetection? in
-            guard let top = obs.labels.first, top.confidence >= threshold else { return nil }
+            guard let top = obs.labels.first,
+                  let confidence = Self.combinedConfidence(object: obs.confidence, classification: top.confidence),
+                  confidence >= threshold else { return nil }
             // VNRecognizedObjectObservation.boundingBox is already normalized
             // [0..1] with bottom-left origin — cache it as-is, resolution-free.
             return NormalizedDetection(normRect: obs.boundingBox,
-                                       confidence: top.confidence,
+                                       confidence: confidence,
                                        label: top.identifier)
         }
     }
@@ -169,6 +171,11 @@ final class VisionProcessor: @unchecked Sendable {
     /// top-left origin) suitable for the labeling UI. Lower confidence threshold
     /// than realtime detection so the user can prune false positives quickly.
     func detectBoxesInPNGFile(at url: URL) async -> [LabelBox] {
+        await Task.detached(priority: .userInitiated) { self.detectBoxesInPNG(at: url) }.value
+    }
+
+    private func detectBoxesInPNG(at url: URL) -> [LabelBox] {
+        inferenceLock.lock(); defer { inferenceLock.unlock() }
         guard let vnModel = ensureModel() else { return [] }
         guard let nsImage = NSImage(contentsOf: url),
               let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
@@ -179,7 +186,7 @@ final class VisionProcessor: @unchecked Sendable {
             lock.lock(); defer { lock.unlock() }
             if let r = labelingRequest { return r }
             let r = VNCoreMLRequest(model: vnModel)
-            r.imageCropAndScaleOption = .scaleFill
+            r.imageCropAndScaleOption = .scaleFit
             labelingRequest = r
             return r
         }()
@@ -195,14 +202,17 @@ final class VisionProcessor: @unchecked Sendable {
 
         let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
         return observations.compactMap { obs -> LabelBox? in
-            guard let top = obs.labels.first, top.confidence >= proposalThreshold else { return nil }
+            guard let top = obs.labels.first,
+                  let confidence = Self.combinedConfidence(object: obs.confidence, classification: top.confidence),
+                  confidence >= proposalThreshold,
+                  let labelClass = LabelClass(rawValue: top.identifier.lowercased()) else { return nil }
             // VNRecognizedObjectObservation rect is bottom-left origin, normalized.
             // LabelBox uses top-left origin, normalized.
             let bb = obs.boundingBox
             return LabelBox(x: Double(bb.minX),
                             y: Double(1.0 - bb.maxY),
                             width: Double(bb.width),
-                            height: Double(bb.height))
+                            height: Double(bb.height), labelClass: labelClass)
         }
     }
 
@@ -223,9 +233,12 @@ final class VisionProcessor: @unchecked Sendable {
     /// reloads from disk, picking up whatever the training pipeline wrote
     /// into Application Support/LiveBlock/models/.
     func reloadModel() {
+        inferenceLock.lock(); defer { inferenceLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         model = nil
+        realtimeRequest = nil
+        labelingRequest = nil
         loadFailed = false
         NSLog("VisionProcessor: model cache cleared; will reload on next inference.")
     }
@@ -260,14 +273,16 @@ final class VisionProcessor: @unchecked Sendable {
             let url = runtimeDir.appendingPathComponent("yolov8n.\(ext)")
             if FileManager.default.fileExists(atPath: url.path) {
                 NSLog("VisionProcessor: loading model from runtime dir \(url.path)")
-                return try MLModel(contentsOf: url, configuration: configuration)
+                let compiled = ext == "mlpackage" ? try MLModel.compileModel(at: url) : url
+                return try MLModel(contentsOf: compiled, configuration: configuration)
             }
         }
 
         let bundle = Bundle.main
         for ext in ["mlmodelc", "mlpackage"] {
             if let url = bundle.url(forResource: "yolov8n", withExtension: ext) {
-                return try MLModel(contentsOf: url, configuration: configuration)
+                let compiled = ext == "mlpackage" ? try MLModel.compileModel(at: url) : url
+                return try MLModel(contentsOf: compiled, configuration: configuration)
             }
         }
         throw NSError(domain: "VisionProcessor", code: 1, userInfo: [

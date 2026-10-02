@@ -1,0 +1,19 @@
+{
+  "date": "2026-10-01",
+  "app_path": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock.app",
+  "executable_sha256": "84ef1d413090031f5705ba73c426cbd5c4612a309039b23912d6260cfcf7f5f7",
+  "permission": "Exact Developer ID signed app added in System Settings; Ready after Quit & Reopen; grant survived subsequent signed rebuilds.",
+  "manual_region_test": {
+    "regions": 1,
+    "reported_fps_range": [
+      48,
+      54
+    ],
+    "live_patches": 1,
+    "editor_close": "Returned to active blocking, without fullscreen pause.",
+    "stop_all": "Returned to Idle.",
+    "temporary_region_removed": true
+  },
+  "screenshots_saved_during_test": 0,
+  "limits": "One-display manual-region smoke test. No DRM recovery, moving-logo tracking, multi-monitor, native Windows or Linux compositor runtime validation."
+}

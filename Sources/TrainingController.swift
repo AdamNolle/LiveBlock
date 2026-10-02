@@ -1,10 +1,12 @@
 import Foundation
 import AppKit
 import Combine
+import CoreML
+import UniformTypeIdentifiers
 
-/// Drives the export → train → install → rebuild pipeline as an in-app job.
+/// Drives the export → train → install pipeline as an in-app job.
 ///
-/// Spawns `tools/export_labels.py` followed by `tools/auto.sh`, streams stdout
+/// Runs the foreground training entry point, streams stdout
 /// in real time, parses ultralytics' epoch lines into structured progress
 /// updates, and exposes everything as `@Published` state for the dashboard.
 @MainActor
@@ -33,6 +35,7 @@ final class TrainingController: ObservableObject {
     @Published private(set) var lastSuccessAt: Date? = nil
     @Published private(set) var lastError: String? = nil
     @Published private(set) var datasetPath: URL? = nil
+    @Published var selectedDataset: URL? = nil
     /// Mirror of `tools/.venv` presence — drives the dashboard's
     /// "Install training environment" precondition card.
     @Published private(set) var venvInstalled: Bool = false
@@ -45,6 +48,7 @@ final class TrainingController: ObservableObject {
     var onModelInstalled: (() -> Void)?
 
     private let logTailLimit = 200
+    private var jobGeneration = UUID()
     private var process: Process?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
@@ -64,6 +68,16 @@ final class TrainingController: ObservableObject {
         venvInstalled = FileManager.default.fileExists(atPath: venvPython.path)
     }
 
+    func chooseDataset() {
+        guard !isBusy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose a YOLO dataset configuration"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = ["yaml", "yml"].compactMap { UTType(filenameExtension: $0) }
+        if panel.runModal() == .OK { selectedDataset = panel.url }
+    }
+
     var progressFraction: Double {
         if case .training(let p) = state, p.totalEpochs > 0 {
             return Double(p.epoch) / Double(p.totalEpochs)
@@ -75,38 +89,31 @@ final class TrainingController: ObservableObject {
 
     func startTraining(epochs: Int = 50, imgsz: Int = 640, batch: Int = 8) {
         guard !isBusy else { return }
-        Task { await runFullPipeline(epochs: epochs, imgsz: imgsz, batch: batch) }
+        guard (1...1000).contains(epochs), (1...128).contains(batch),
+              (320...2048).contains(imgsz), imgsz % 32 == 0 else {
+            failWith("Use 1–1000 epochs, batch 1–128, and an image size from 320–2048 divisible by 32.")
+            return
+        }
+        jobGeneration = UUID()
+        let generation = jobGeneration
+        state = .exporting
+        lastError = nil
+        Task { await runFullPipeline(epochs: epochs, imgsz: imgsz, batch: batch, generation: generation) }
     }
 
     func cancel() {
         guard isBusy else { return }
-        if let process = process, process.isRunning {
-            // The Process is bash (or python). Bash spawns a python child
-            // (ultralytics trainer). `pkill -P <bash-pid>` reaps the child;
-            // process.terminate() reaps bash itself. Without the pkill the
-            // python child keeps training even after the bash is gone.
-            let pid = process.processIdentifier
+        jobGeneration = UUID()
+        if let active = process, active.isRunning {
+            // Kill only descendants of this foreground job.
             runOneShot(launchPath: "/usr/bin/pkill",
-                       args: ["-TERM", "-P", "\(pid)"],
+                       args: ["-TERM", "-P", "\(active.processIdentifier)"],
                        onLine: { _ in })
-            process.terminate()
-            // Escalate to SIGKILL on anything still alive after a beat.
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { [pid] in
-                Task { @MainActor in
-                    self.runOneShot(launchPath: "/usr/bin/pkill",
-                                    args: ["-KILL", "-P", "\(pid)"],
-                                    onLine: { _ in })
-                    if let p = self.process, p.isRunning {
-                        kill(p.processIdentifier, SIGKILL)
-                    }
-                }
+            active.terminate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                if active.isRunning { kill(active.processIdentifier, SIGKILL) }
             }
         }
-        // Belt-and-suspenders: also tell auto.sh's stop in case there's a
-        // detached runner from a prior invocation.
-        runOneShot(launchPath: "/bin/bash",
-                   args: [repoRoot.appendingPathComponent("tools/auto.sh").path, "stop"],
-                   onLine: { _ in })
         state = .finished(success: false, message: "Cancelled by user.")
     }
 
@@ -205,65 +212,40 @@ final class TrainingController: ObservableObject {
         repoRoot.appendingPathComponent("tools/.venv/bin/python")
     }
 
-    private func runFullPipeline(epochs: Int, imgsz: Int, batch: Int) async {
+    private func runFullPipeline(epochs: Int, imgsz: Int, batch: Int, generation: UUID) async {
+        guard generation == jobGeneration else { return }
         appendLog("=== Training pipeline started \(Date()) ===")
-
         guard FileManager.default.fileExists(atPath: venvPython.path) else {
-            failWith("tools/.venv missing — run `tools/setup_env.sh` first.")
+            failWith("tools/.venv missing — run tools/setup_env.sh first.")
             return
         }
-
-        // Step 1: Export labels to YOLO format.
-        state = .exporting
-        let exportScript = repoRoot.appendingPathComponent("tools/export_labels.py")
-        let exportRoot = TrainingPaths.exports
-
-        let exportResult = await runProcessCapturingOutput(
-            url: venvPython,
-            args: [exportScript.path]
-        )
-        guard exportResult.exitCode == 0 else {
-            failWith("Export failed (exit \(exportResult.exitCode)). See log.")
-            return
+        state = .training(progress: TrainingProgress(epoch: 0, totalEpochs: epochs, box_loss: 0, cls_loss: 0))
+        var arguments: [String]
+        if let selectedDataset {
+            arguments = [repoRoot.appendingPathComponent("tools/train_logos.py").path,
+                         "--data", selectedDataset.path, "--install"]
+            datasetPath = selectedDataset
+        } else {
+            arguments = [repoRoot.appendingPathComponent("tools/train_from_labels.py").path,
+                         "--root", TrainingPaths.root.path]
         }
-
-        // Find the freshly exported data.yaml
-        guard let dataYaml = newestExportYaml(in: exportRoot) else {
-            failWith("Export script reported success but no data.yaml found.")
-            return
-        }
-        datasetPath = dataYaml
-
-        // Step 2: Run auto.sh in foreground (so we can stream output ourselves).
-        // auto.sh's normal mode backgrounds itself; instead we directly run the
-        // unattended runner, which is the inner workhorse.
-        let runner = repoRoot.appendingPathComponent("tools/_unattended_runner.sh")
-        guard FileManager.default.fileExists(atPath: runner.path) else {
-            failWith("tools/_unattended_runner.sh is missing.")
-            return
-        }
-
-        state = .training(progress: TrainingProgress(epoch: 0,
-                                                     totalEpochs: epochs,
-                                                     box_loss: 0,
-                                                     cls_loss: 0))
-        let trainResult = await runProcessCapturingOutput(
-            url: URL(fileURLWithPath: "/bin/bash"),
-            args: [runner.path,
-                   repoRoot.path,
-                   dataYaml.path,
-                   "--epochs", String(epochs),
-                   "--imgsz", String(imgsz),
-                   "--batch", String(batch),
-                   "--install"]
-        )
+        arguments += ["--epochs", String(epochs), "--imgsz", String(imgsz), "--batch", String(batch)]
+        let trainResult = await runProcessCapturingOutput(url: venvPython, args: arguments)
+        guard generation == jobGeneration else { return }
+        if selectedDataset == nil { datasetPath = newestExportYaml(in: TrainingPaths.exports) }
 
         if trainResult.exitCode == 0 {
             // Copy the freshly trained model into Application Support so the
             // running app picks it up without a relaunch.
-            installFreshlyTrainedModel()
+            do { try await installFreshlyTrainedModel(generation: generation) }
+            catch {
+                guard generation == jobGeneration else { return }
+                failWith("Model installation failed: \(error.localizedDescription)")
+                return
+            }
             // Tell VisionProcessor to drop its cached model — next inference
             // will reload from the runtime dir we just populated.
+            guard generation == jobGeneration else { return }
             onModelInstalled?()
             lastSuccessAt = Date()
             state = .finished(success: true, message: "Trained model installed. Detection updated.")
@@ -275,30 +257,38 @@ final class TrainingController: ObservableObject {
 
     /// Copy the trained `.mlpackage` into Application Support so the running
     /// VisionProcessor finds it before falling back to the bundled model.
-    private func installFreshlyTrainedModel() {
+    private func installFreshlyTrainedModel(generation: UUID) async throws {
         let fm = FileManager.default
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support")
         let modelDir = support.appendingPathComponent("LiveBlock/models", isDirectory: true)
-        try? fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
 
         // The trainer writes new weights into `Sources/yolov8n.mlpackage` in
         // the repo. Copy that into the runtime dir so SCStream-driven
         // inference picks it up immediately.
         let src = repoRoot.appendingPathComponent("Sources/yolov8n.mlpackage")
         guard fm.fileExists(atPath: src.path) else {
-            appendLog("Hot-reload skipped: \(src.path) not found.")
-            return
+            throw NSError(domain: "LiveBlockTraining", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Trained model missing at \(src.path)"
+            ])
         }
-        let dst = modelDir.appendingPathComponent("yolov8n.mlpackage")
-        try? fm.removeItem(at: dst)
-        do {
-            try fm.copyItem(at: src, to: dst)
-            appendLog("Hot-reloaded model into \(dst.path)")
-        } catch {
-            appendLog("Hot-reload copy failed: \(error.localizedDescription)")
+        let compiled = try await Task.detached(priority: .utility) {
+            try MLModel.compileModel(at: src)
+        }.value
+        defer { try? fm.removeItem(at: compiled) }
+        guard generation == jobGeneration else { throw CancellationError() }
+        let dst = modelDir.appendingPathComponent("yolov8n.mlmodelc")
+        let staged = modelDir.appendingPathComponent("\(UUID().uuidString).mlmodelc")
+        try fm.copyItem(at: compiled, to: staged)
+        defer { try? fm.removeItem(at: staged) }
+        if fm.fileExists(atPath: dst.path) {
+            _ = try fm.replaceItemAt(dst, withItemAt: staged)
+        } else {
+            try fm.moveItem(at: staged, to: dst)
         }
+        appendLog("Installed compiled model into \(dst.path)")
     }
 
     private func failWith(_ message: String) {
@@ -335,22 +325,30 @@ final class TrainingController: ObservableObject {
                 let data = handle.availableData
                 guard !data.isEmpty,
                       let str = String(data: data, encoding: .utf8) else { return }
-                Task { @MainActor [weak self] in self?.ingestOutput(str) }
+                Task { @MainActor [weak self] in
+                    guard self?.process === proc else { return }
+                    self?.ingestOutput(str)
+                }
             }
             errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 guard !data.isEmpty,
                       let str = String(data: data, encoding: .utf8) else { return }
-                Task { @MainActor [weak self] in self?.ingestOutput(str) }
+                Task { @MainActor [weak self] in
+                    guard self?.process === proc else { return }
+                    self?.ingestOutput(str)
+                }
             }
 
             proc.terminationHandler = { p in
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
                 Task { @MainActor [weak self] in
-                    self?.process = nil
-                    self?.stdoutPipe = nil
-                    self?.stderrPipe = nil
+                    if self?.process === p {
+                        self?.process = nil
+                        self?.stdoutPipe = nil
+                        self?.stderrPipe = nil
+                    }
                 }
                 continuation.resume(returning: RunResult(exitCode: p.terminationStatus))
             }

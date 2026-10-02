@@ -1,7 +1,66 @@
 import XCTest
+import AppKit
 @testable import LiveBlock
 
 final class RegionStoreTests: XCTestCase {
+    @MainActor
+    func testCoverOnlyHonorsRegionSwitchAndExclusionsWithoutStartingCapture() async throws {
+        guard let screen = NSScreen.screens.first else { throw XCTSkip("A display is needed to verify overlay geometry") }
+        let suite = "LiveBlockCoverTests-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("\(suite).json")
+        defer {
+            preferences.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: file)
+        }
+        let store = RegionStore(storageURL: file, preferences: preferences)
+        let region = NormalizedRegion(x: 0.1, y: 0.2, width: 0.1, height: 0.1)
+        store.add(region)
+        let manager = ScreenCaptureManager(regionStore: store)
+        manager.detectionEnabled = true
+        manager.startCover(on: screen)
+        XCTAssertTrue(manager.isRunning)
+        XCTAssertTrue(manager.isCoverOnly)
+        XCTAssertFalse(manager.isStarting)
+        XCTAssertFalse(manager.detectionEnabled)
+        XCTAssertEqual(manager.framesPerSecond, 0)
+        XCTAssertEqual(manager.currentPatches.count, 1)
+        XCTAssertEqual(manager.currentPatches.first?.normalizedRect.minY ?? -1, 0.2, accuracy: 0.002)
+        manager.frontmostIsExcluded = true
+        XCTAssertTrue(manager.currentPatches.isEmpty)
+        manager.frontmostIsExcluded = false
+        XCTAssertEqual(manager.currentPatches.count, 1)
+        store.setEnabled(id: region.id, on: false)
+        manager.refreshCover()
+        XCTAssertTrue(manager.currentPatches.isEmpty)
+        XCTAssertEqual(store.current.count, 1)
+        await manager.stop()
+        XCTAssertFalse(manager.isRunning)
+        XCTAssertFalse(manager.isCoverOnly)
+    }
+
+    func testDisabledRegionRemainsSavedButLeavesPaintInput() throws {
+        let suite = "LiveBlockRegionEnabledTests-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("\(suite).json")
+        defer {
+            preferences.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: file)
+        }
+        let store = RegionStore(storageURL: file, preferences: preferences)
+        let first = NormalizedRegion(x: 0.1, y: 0.1, width: 0.2, height: 0.2)
+        let second = NormalizedRegion(x: 0.5, y: 0.5, width: 0.2, height: 0.2)
+        store.add(first); store.add(second)
+        preferences.set([first.id.uuidString.lowercased(), "invalid legacy ID"], forKey: RegionStore.disabledIdsKey)
+        XCTAssertEqual(store.enabled.map(\.id), [second.id])
+        XCTAssertEqual(store.current.count, 2)
+        let reopened = RegionStore(storageURL: file, preferences: preferences)
+        XCTAssertEqual(reopened.enabled.map(\.id), [second.id])
+        XCTAssertFalse(reopened.isEnabled(id: first.id))
+        reopened.setEnabled(id: first.id, on: true)
+        XCTAssertEqual(Set(store.enabled.map(\.id)), Set([first.id, second.id]))
+    }
+
 
     func testNormalizedRegionClampsValues() {
         let r = NormalizedRegion(x: -0.5, y: 1.2, width: 5, height: 5)

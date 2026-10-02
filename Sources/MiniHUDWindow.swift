@@ -25,7 +25,8 @@ final class MiniHUDWindow: NSPanel {
         self.isMovableByWindowBackground = true
 
         let host = NSHostingView(rootView: rootView)
-        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.autoresizingMask = [.width, .height]
         self.contentView = host
 
         // Default position: bottom-center of the main screen.

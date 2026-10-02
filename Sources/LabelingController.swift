@@ -2,6 +2,19 @@ import Foundation
 import AppKit
 import Combine
 
+enum LabelClass: String, Codable, CaseIterable, Identifiable, Sendable {
+    case ad, sponsorRemove = "sponsor_remove", teamKeep = "team_keep", numberKeep = "number_keep"
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .ad: "Ad"
+        case .sponsorRemove: "Sponsor · remove"
+        case .teamKeep: "Team · keep"
+        case .numberKeep: "Number · keep"
+        }
+    }
+}
+
 /// One labeled box on a screenshot. Coords normalized [0..1] with origin top-left.
 struct LabelBox: Codable, Identifiable, Hashable, Sendable {
     let id: UUID
@@ -9,13 +22,31 @@ struct LabelBox: Codable, Identifiable, Hashable, Sendable {
     var y: Double
     var width: Double
     var height: Double
+    var labelClass: LabelClass
 
-    init(id: UUID = UUID(), x: Double, y: Double, width: Double, height: Double) {
+    enum CodingKeys: String, CodingKey { case id, x, y, width, height; case labelClass = "class" }
+
+    init(id: UUID = UUID(), x: Double, y: Double, width: Double, height: Double, labelClass: LabelClass = .ad) {
         self.id = id
         self.x = max(0, min(1, x))
         self.y = max(0, min(1, y))
         self.width = max(0, min(1 - self.x, width))
         self.height = max(0, min(1 - self.y, height))
+        self.labelClass = labelClass
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        x = try values.decode(Double.self, forKey: .x)
+        y = try values.decode(Double.self, forKey: .y)
+        width = try values.decode(Double.self, forKey: .width)
+        height = try values.decode(Double.self, forKey: .height)
+        labelClass = try values.decodeIfPresent(LabelClass.self, forKey: .labelClass) ?? .ad
+        guard [x, y, width, height].allSatisfy({ $0.isFinite }), x >= 0, y >= 0,
+              width > 0, height > 0, x + width <= 1.000001, y + height <= 1.000001 else {
+            throw DecodingError.dataCorruptedError(forKey: .width, in: values, debugDescription: "Invalid label geometry")
+        }
     }
 
     func rect(in size: CGSize) -> CGRect {

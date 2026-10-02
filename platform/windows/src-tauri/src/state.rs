@@ -27,6 +27,8 @@ pub struct AppState {
     /// monitor).
     pub overlay: Arc<Mutex<Option<Arc<OverlayWindow>>>>,
     pub detection_enabled: Arc<AtomicBool>,
+    pub cover_only_active: AtomicBool,
+    pub cover_only_preferred: AtomicBool,
     pub detector: Arc<Mutex<Option<Detector>>>,
     pub training: Arc<Mutex<Option<TrainingJob>>>,
     pub app: AppHandle,
@@ -44,6 +46,8 @@ impl AppState {
             latest_frame: Arc::new(ArcSwapOption::from(None)),
             overlay: Arc::new(Mutex::new(None)),
             detection_enabled: Arc::new(AtomicBool::new(false)),
+            cover_only_active: AtomicBool::new(false),
+            cover_only_preferred: AtomicBool::new(false),
             detector: Arc::new(Mutex::new(None)),
             training: Arc::new(Mutex::new(None)),
             app,
@@ -55,5 +59,10 @@ impl AppState {
     pub fn refresh_region_snapshot(&self) {
         self.region_snapshot
             .store(Some(Arc::new(self.regions.current())));
+        if self.cover_only_active.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Err(error) = crate::actions::paint_over_regions_only(self) {
+                tracing::error!("refresh manual covers: {error}");
+            }
+        }
     }
 }

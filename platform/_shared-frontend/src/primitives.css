@@ -1,8 +1,6 @@
 /* LiveBlocker — primitives. Port of `primitives.jsx` from the design bundle.
    Vanilla CSS so the Tauri webview can use them without a framework. */
 
-@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700;12..96,800&family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap');
-
 * { box-sizing: border-box; }
 
 html, body {
@@ -232,3 +230,19 @@ button { font: inherit; color: inherit; cursor: pointer; }
   background: var(--lb-bg);
   overflow: hidden;
 }
+
+/* Shared interaction rules apply to every window, including keyboard use. */
+.lb-pill { border: 1px solid var(--lb-border); border-radius: 8px; background: var(--lb-surface); box-shadow: 0 1px 2px #00000008; line-height: 1.25; }
+.lb-pill:hover { transform: none; background: var(--lb-surface-2); }
+.lb-pill:active { transform: translateY(1px); }
+.lb-pill.lb-block { background: var(--lb-block); border-color: var(--lb-block); color: #fff; box-shadow: none; }
+.lb-pill.lb-train { background: var(--lb-surface); border-color: var(--lb-border); color: var(--lb-ink); box-shadow: none; }
+.lb-toggle { background: var(--lb-surface-2); border-color: var(--lb-border); box-shadow: none; }
+.lb-toggle .knob { background: var(--lb-ink-muted); box-shadow: none; }
+.lb-toggle[data-on="true"] { background: var(--lb-block-soft); }
+.lb-field { background: var(--lb-surface-2); border: 1px solid var(--lb-border); border-radius: 8px; box-shadow: none; }
+.lb-titlebar { background: var(--lb-surface); box-shadow: 0 1px 0 var(--lb-border); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--lb-block); outline-offset: 3px; }
+button:disabled { cursor: default; opacity: .55; transform: none; }
+select, input { color: var(--lb-ink); background: var(--lb-surface); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

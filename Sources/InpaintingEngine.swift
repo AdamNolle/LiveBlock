@@ -57,7 +57,7 @@ final class InpaintingEngine: @unchecked Sendable {
         static let opaqueBlack = CoverFill(r: 0, g: 0, b: 0, a: 1)
     }
 
-    /// DRM-SAFE paint-over: produce a flat, OPAQUE cover patch for each region
+    /// Capture-free paint-over: produce a flat, OPAQUE cover patch for each region
     /// WITHOUT reading the pixels underneath. This mirrors the Rust core's
     /// capture-free `paint_over_regions(..., Fill::opaque_black())`: when the
     /// content is protected (HDCP/DRM) the system blanks those pixels to black,
@@ -200,6 +200,8 @@ final class InpaintingEngine: @unchecked Sendable {
             return nil
         }
 
+        // Partial edge bands can leave transparent holes. Extend the reflected
+        // edge pixels to cover the entire requested region before blending.
         return context.createCGImage(composed, from: rect)
     }
 
@@ -227,11 +229,15 @@ final class InpaintingEngine: @unchecked Sendable {
             return cropped
                 .transformed(by: CGAffineTransform(scaleX: 1, y: -1))
                 .transformed(by: CGAffineTransform(translationX: 0, y: 2 * axisY))
+                .clampedToExtent()
+                .cropped(to: target)
         case .horizontal:
             let axisX: CGFloat = side == .near ? target.maxX : target.minX
             return cropped
                 .transformed(by: CGAffineTransform(scaleX: -1, y: 1))
                 .transformed(by: CGAffineTransform(translationX: 2 * axisX, y: 0))
+                .clampedToExtent()
+                .cropped(to: target)
         }
     }
 

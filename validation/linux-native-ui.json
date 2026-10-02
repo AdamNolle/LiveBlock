@@ -1,0 +1,62 @@
+{
+  "tested_at_utc": "2026-10-01T23:25:59.660411+00:00",
+  "package": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock-linux-arm64.deb",
+  "package_sha256": "0e4a929ce7eb0813a88b600a8d70ed538f163c3f08d9db42160dbfaf96b438d8",
+  "installed_executable_sha256": "30e4a3eb1cbb25e81c951e105dcc839121a9aa8b0a1a250eff9a010e75e16eb4",
+  "environment": {
+    "os": "Ubuntu 26.04 ARM64 Lima VM",
+    "display": "isolated TigerVNC X11 1280x800",
+    "window_manager": "Openbox",
+    "compositor": "xcompmgr -n",
+    "graphics": "software OpenGL",
+    "userdata": "temporary isolated XDG directories"
+  },
+  "native_ui_checks": {
+    "editor_transparency": true,
+    "toolbar_single_line": true,
+    "region_created_and_saved": true,
+    "opaque_black_cover_matches_selected_region": true,
+    "outside_region_screen_visible": true,
+    "click_through_covered_button_opens_editor": true,
+    "region_delete_clears_live_cover": true,
+    "region_added_while_active_updates_cover": true,
+    "escape_closes_editor": true,
+    "stop_hides_renderer": true,
+    "click_through_preserved_after_second_start": true,
+    "two_start_stop_cycles": true,
+    "cover_mode_disables_detection_and_screenshots": true,
+    "screenshots_created": 0
+  },
+  "missing_compositor_test": {
+    "tested": true,
+    "compositor_processes": 0,
+    "startup_warning": "Enable an X11 compositor before blocking; transparent overlays require alpha compositing",
+    "capture_start_attempted": true,
+    "capture_remained_stopped": true,
+    "render_window_not_shown": true,
+    "persistent_frontend_error_message_verified": false
+  },
+  "limits": [
+    "Wayland portal/compositor behavior not verified",
+    "Physical GPU and multi-monitor compositor behavior not verified",
+    "No protected-video or service-undetectability claim",
+    "Native Windows runtime not verified"
+  ],
+  "followups": [
+    "Control status polling can replace a transient command error; test and make failures persist",
+    "Region editor shortcut hint still uses its older wording"
+  ],
+  "source_sha256": {
+    "platform/linux/src-tauri/src/overlay/mod.rs": "a056132cbbdfc9710ee2063fd5618f14a02cc44415dcd430c10b147d69b37380",
+    "platform/linux/src-tauri/src/main.rs": "803a3425f1558794f7bdb8073fc8c19db43e5892b118e8ea499f833aaa743c5d",
+    "platform/linux/src-tauri/capabilities/events.json": "7429670fa1756edfa61bd0faaab8a67aaa5fdd173e2485ac8cfab6ffae0776df",
+    "platform/_shared-frontend/src/region-editor.html": "d943c609ca69e02de48231699e028a32dfbc60206d95dfdccd4501805261659c"
+  },
+  "cleanup": {
+    "test_browser_tab_closed": true,
+    "test_services_stopped": true,
+    "temporary_swap_removed": true,
+    "isolated_vm_stopped": true,
+    "training_job_preserved": true
+  }
+}

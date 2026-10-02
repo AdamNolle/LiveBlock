@@ -13,6 +13,7 @@
 //! and treat its grab as mandatory; on Wayland it is registered as the first
 //! shortcut and the receiver loop in `main.rs` handles it unconditionally.
 
+use x11rb::connection::Connection as _;
 use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::Sender;
 
@@ -98,7 +99,7 @@ async fn wayland_portal_loop(tx: Sender<HotkeyAction>) -> Result<()> {
     ];
 
     shortcuts
-        .bind_shortcuts(&session, &defs, None)
+        .bind_shortcuts(&session, &defs, &ashpd::WindowIdentifier::default())
         .await
         .context("bind_shortcuts")?;
 

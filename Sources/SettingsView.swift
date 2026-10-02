@@ -1,11 +1,19 @@
 import SwiftUI
 
-/// Settings window — port of the design's `ScreenMainSettings`:
-/// sidebar (220 pt) + content (flex). Each sidebar item swaps the right-pane
-/// view; the active item uses a pressed-inset neumorphic surface.
+/// Native settings navigation with persistent selection and adaptive materials.
 struct SettingsView: View {
     @ObservedObject var controller: AppController
-    @State private var section: Section = .blocking
+    @ObservedObject private var captureManager: ScreenCaptureManager
+    @AppStorage("settingsSection") private var sectionRaw = "blocking"
+    private var section: Section { Section(rawValue: sectionRaw) ?? .blocking }
+    private var sectionSelection: Binding<Section?> {
+        Binding(get: { section }, set: { if let value = $0 { sectionRaw = value.rawValue } })
+    }
+
+    init(controller: AppController) {
+        self.controller = controller
+        self.captureManager = controller.captureManager
+    }
     // Unified with VisionProcessor's default and the MLDetectorView slider
     // range (0.5...0.99) via AppController.defaultMinConfidence. Previously this
     // defaulted to 0.84 while VisionProcessor sat at 0.35 and nothing reconciled
@@ -45,82 +53,26 @@ struct SettingsView: View {
         // traffic lights — adding a `LavenderBar` here produced a duplicate
         // strip. We rely on the system chrome and put the Block/Train pills
         // into the sidebar header instead.
-        ZStack {
-            
-            HStack(alignment: .top, spacing: 0) {
-                sidebar
-                content
+        NavigationSplitView {
+            List(Section.allCases, selection: sectionSelection) { item in
+                Label(item.label, systemImage: item.icon).tag(item)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    // MARK: - Sidebar
-
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Wordmark(size: 16).padding(.bottom, 12)
-
-            VStack(spacing: 2) {
-                ForEach(Section.allCases) { s in
-                    sidebarRow(s)
+            .listStyle(.sidebar)
+            .navigationTitle("LiveBlock")
+            .navigationSplitViewColumnWidth(min: 180, ideal: 205, max: 250)
+            .safeAreaInset(edge: .bottom) {
+                HStack(spacing: 8) {
+                    StatusDot(color: controller.isRunning ? Theme.success : .secondary)
+                    Text(captureManager.isCoverOnly ? "Cover only active" : controller.isRunning ? "Capture active" : "Capture stopped")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
                 }
+                .padding(16)
             }
-            .padding(.top, 8)
-
-            Spacer(minLength: 0)
-
-            // Capture status block
-            VStack(alignment: .leading, spacing: 6) {
-                Text("CAPTURE")
-                    .font(Theme.ui(size: 10, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(Color.secondary)
-                HStack(spacing: 6) {
-                    StatusDot(color: Theme.success, pulse: controller.isRunning)
-                    Text(controller.isRunning ? "ScreenCaptureKit · 60 fps" : "Idle")
-                        .font(Theme.ui(size: 12))
-                        .foregroundStyle(Color.primary)
-                }
-                Text("\(controller.regionCount) region\(controller.regionCount == 1 ? "" : "s") · \(controller.screenshotCount) caps")
-                    .font(Theme.mono(size: 10))
-                    .foregroundStyle(Color.secondary)
-            }
-            .padding(12)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        } detail: {
+            content.navigationTitle(section.label)
         }
-        .padding(.horizontal, 14).padding(.vertical, 20)
-        .frame(width: 220, alignment: .topLeading)
-    }
-
-    @ViewBuilder
-    private func sidebarRow(_ s: Section) -> some View {
-        let active = section == s
-        Button {
-            withAnimation(Theme.snappy) { section = s }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: s.icon)
-                    .frame(width: 16)
-                    .foregroundStyle(active ? Theme.block : Color.secondary)
-                Text(s.label)
-                    .font(Theme.ui(size: 13, weight: active ? .semibold : .medium))
-                    .foregroundStyle(active ? Theme.block : Color.primary)
-                Spacer()
-            }
-            .padding(.horizontal, 12).padding(.vertical, 9)
-            .background {
-                if active {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color(.windowBackgroundColor))
-                        .overlay(
-                            InsetGlow(cornerRadius: 12)
-                                .allowsHitTesting(false)
-                        )
-                }
-            }
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Content
@@ -162,13 +114,13 @@ struct SettingsView: View {
                     Text("Blocking")
                         .font(Theme.display(size: 28, weight: .bold))
                         .foregroundStyle(Color.primary)
-                    Text("Replace marked regions with mirror-blend fill before each frame is composited to your display.")
+                    Text("Cover marked areas with a local overlay that blends pixels from nearby screen content.")
                         .font(Theme.ui(size: 13))
                         .foregroundStyle(Color.secondary)
                 }
                 Spacer()
                 HStack(spacing: 10) {
-                    Text(controller.isRunning ? "ACTIVE" : "PAUSED")
+                    Text(controller.isRunning ? "ACTIVE" : "STOPPED")
                         .font(Theme.ui(size: 12, weight: .semibold))
                         .tracking(0.6)
                         .foregroundStyle(controller.isRunning ? Theme.success : Theme.warn)
@@ -187,19 +139,22 @@ struct SettingsView: View {
                          color: Theme.block,
                          flex: 1)
                 statCard(label: "Active regions",
-                         value: "\(controller.regionCount)",
-                         suffix: controller.regionCount == 1 ? "region" : "regions",
+                         value: "\(controller.activeRegionCount)",
+                         suffix: controller.activeRegionCount == 1 ? "region" : "regions",
                          color: Theme.train, flex: 1)
                 statCard(label: "Live patches",
-                         value: "\(controller.captureManager.currentPatches.count)",
+                         value: "\(captureManager.currentPatches.count)",
                          suffix: "this frame",
                          color: Theme.detect, flex: 1)
             }
 
             // Real, used toggles only.
             VStack(spacing: 0) {
-                settingsRow(label: "Pause when game / fullscreen video is active",
-                            desc: "Skip blocking while the frontmost app is fullscreen",
+                settingsRow(label: "Cover only",
+                            desc: "Opaque manual covers without screen capture. Automatic detection and screenshots are off.",
+                            isOn: Binding(get: { controller.usesCoverOnly }, set: { controller.setCoverOnly($0) }))
+                settingsRow(label: "Pause capture blocking during fullscreen apps",
+                            desc: "Cover only remains available during fullscreen video",
                             isOn: Binding(
                                 get: { pauseOnFullscreen },
                                 set: { newValue in
@@ -244,7 +199,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Local only").font(Theme.ui(size: 12, weight: .semibold))
                         .foregroundStyle(Color.primary)
-                    Text("LiveBlock makes zero network calls. No frames, telemetry, or analytics ever leave your Mac.")
+                    Text("Live capture stays on your Mac. Training setup downloads packages and base weights; saved screenshots stay local.")
                         .font(Theme.ui(size: 11))
                         .foregroundStyle(Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)

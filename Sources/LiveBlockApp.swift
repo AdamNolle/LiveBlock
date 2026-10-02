@@ -325,6 +325,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        controller.showControlPanel()
+        return true
+    }
+
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         let show = NSMenuItem(title: "Show Control Panel",

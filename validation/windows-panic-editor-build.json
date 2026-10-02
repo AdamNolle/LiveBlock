@@ -1,0 +1,18 @@
+{
+  "verified_at_utc": "2026-10-02T00:29:22.554219+00:00",
+  "package": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock-windows-x64-portable.zip",
+  "package_sha256": "c7415fb585f3ad94f57b889c8d2833b823cade7875472df336f34af0ba129fe1",
+  "executable_sha256": "d9d13abe78248c16e554aa53f280a8df76e85977f5aaef8a80ffd31baab8fb65",
+  "cross_build_passed": true,
+  "release_feature": "custom-protocol",
+  "embedded_ui_asset_keys_verified": 17,
+  "packaged_file_hashes_verified": 11,
+  "archive_crc_verified": true,
+  "native_runtime_verified": false,
+  "fix": "Panic-disable now hides the fullscreen interactive editor as well as stopping capture and hiding the native cover.",
+  "source_sha256": {
+    "platform/windows/src-tauri/src/actions.rs": "0cb25957191cde8520677a02d89d30f724af03fa32ddae4e77b1a25d0bce71fe",
+    "platform/windows/src-tauri/Cargo.toml": "b31240310a10cae76acab7bc3bbcdcd4641ce97f42edd68c03cc10949b5ff207",
+    "tools/package_windows.py": "1346017d9bb7d41d18c83c99e12d3f602ad3a06b48b2f63cff38572fd21ea611"
+  }
+}

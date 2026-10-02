@@ -21,11 +21,12 @@ final class LabelingWindow: NSWindow, NSWindowDelegate {
         self.center()
         self.isReleasedWhenClosed = false
         self.collectionBehavior = [.fullScreenAllowsTiling]
-        self.sharingType = .none  // don't appear in our own SCStream
+        self.sharingType = .readOnly  // SCContentFilter excludes our application from its own stream
         self.delegate = self
 
         let host = NSHostingView(rootView: rootView)
-        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.autoresizingMask = [.width, .height]
         self.contentView = host
     }
 

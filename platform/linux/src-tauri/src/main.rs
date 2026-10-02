@@ -8,6 +8,8 @@
 
 mod capture;
 mod detection;
+#[path = "../../../_shared-backend/onnx_runtime.rs"]
+mod onnx_runtime;
 mod hotkeys;
 mod inpainting;
 mod labels;
@@ -23,7 +25,7 @@ mod tray;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use uuid::Uuid;
 
 use crate::detection::Detector;
@@ -34,7 +36,7 @@ use crate::session::detect_session;
 use crate::state::{AppState, CaptureHandle};
 
 #[tauri::command]
-fn get_session_info() -> serde_json::Value {
+fn get_session_info(app: AppHandle) -> serde_json::Value {
     let strategy = overlay::pick_strategy();
     serde_json::json!({
         "session": match detect_session() {
@@ -45,7 +47,7 @@ fn get_session_info() -> serde_json::Value {
         "compositor": format!("{:?}", session::detect_compositor()),
         "supports_layer_shell": session::supports_layer_shell(session::detect_compositor()),
         "overlay_strategy": format!("{:?}", strategy),
-        "overlay_fidelity": format!("{:?}", strategy.fidelity()),
+        "overlay_fidelity": format!("{:?}", overlay::fidelity(&app)),
     })
 }
 
@@ -53,32 +55,86 @@ fn get_session_info() -> serde_json::Value {
 
 #[tauri::command]
 fn start_capture(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if !state.overlay_ready.load(Ordering::SeqCst) { return Err("Overlay unavailable. On X11, enable an alpha compositor and restart LiveBlock.".into()); }
     // Idempotent: if already running, do nothing.
     if state.capture_running.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
+    state.cover_only_active.store(false, Ordering::SeqCst);
+    state.cover_only_preferred.store(false, Ordering::SeqCst);
+    if let Err(error) = overlay::align_window(&app, "render") {
+        state.capture_running.store(false, Ordering::SeqCst);
+        return Err(error.to_string());
+    }
+    try_load_default_detector(&app);
     let st = state.inner().clone();
-    let join = runtime::spawn(app, st.clone());
+    let generation = st.capture_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let join = runtime::spawn(app, st.clone(), generation);
     *st.capture_task.lock() = Some(CaptureHandle { join });
     Ok(())
 }
 
 #[tauri::command]
 fn stop_capture(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    state.capture_running.store(false, Ordering::SeqCst);
-    // The loop polls `capture_running` and exits on the next frame; abort the
-    // task as a backstop so a blocked capture can't linger.
-    if let Some(handle) = state.capture_task.lock().take() {
-        handle.join.abort();
+    runtime::stop_capture(&app, &state);
+    Ok(())
+}
+
+/// Synchronize the selected method before a tray or global-shortcut start.
+#[tauri::command]
+fn set_cover_only_preferred(cover_only: bool, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if state.capture_running.load(Ordering::SeqCst) {
+        return Err("Stop blocking before changing its method.".into());
     }
-    state.current_patches.lock().clear();
-    let _ = app.emit("capture-state-changed", serde_json::json!({ "running": false }));
-    let _ = app.emit("patches-updated", Vec::<inpainting::PatchPayload>::new());
+    state.cover_only_preferred.store(cover_only, Ordering::SeqCst);
     Ok(())
 }
 
 #[tauri::command]
+fn capture_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    serde_json::json!({"running": state.capture_running.load(Ordering::SeqCst), "coverOnly": state.cover_only_active.load(Ordering::SeqCst), "detectionEnabled": state.detection_enabled.load(Ordering::SeqCst), "trainingRunning": state.training_job.lock().as_ref().is_some_and(|job| job.is_running()), "detectorReady": state.detector.lock().is_some(), "overlayMode": format!("{:?}", overlay::fidelity(&app))})
+}
+
+fn refresh_cover(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    if !state.cover_only_active.load(Ordering::SeqCst) { return Ok(()); }
+    let regions = state.region_store.current();
+    let patches: Vec<inpainting::PatchPayload> = liveblock_core::paint_over_regions(regions.iter(), liveblock_core::Fill::opaque_black())
+        .into_iter().enumerate().map(|(i, patch)| inpainting::PatchPayload {
+            id: format!("cover-{i}"), x: patch.rect.x as f64, y: patch.rect.y as f64,
+            width: patch.rect.width as f64, height: patch.rect.height as f64,
+            png_data_url: String::new(), fill: Some(patch.fill.into()),
+        }).collect();
+    *state.current_patches.lock() = patches.clone();
+    app.emit("patches-updated", patches).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn start_paint_over(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if !state.overlay_ready.load(Ordering::SeqCst) { return Err("Overlay unavailable. On X11, enable an alpha compositor and restart LiveBlock.".into()); }
+    stop_capture(app.clone(), state.clone())?;
+    overlay::align_window(&app, "render").map_err(|e| e.to_string())?;
+    let window = app.get_webview_window("render").ok_or("Overlay window missing")?;
+    state.detection_enabled.store(false, Ordering::SeqCst);
+    state.cover_only_active.store(true, Ordering::SeqCst);
+    state.cover_only_preferred.store(true, Ordering::SeqCst);
+    if let Err(error) = refresh_cover(&app, &state).and_then(|_| window.show().map_err(|e| e.to_string())) {
+        let _ = stop_capture(app, state);
+        return Err(error);
+    }
+    state.capture_running.store(true, Ordering::SeqCst);
+    let _ = app.emit("capture-state-changed", true);
+    Ok(())
+}
+
+#[tauri::command]
+fn current_patches(state: State<'_, Arc<AppState>>) -> Vec<inpainting::PatchPayload> {
+    state.current_patches.lock().clone()
+}
+
+#[tauri::command]
 fn set_detection_enabled(enabled: bool, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if enabled && state.cover_only_active.load(Ordering::SeqCst) { return Err("Automatic detection needs screen capture. Stop Cover only first.".into()); }
+    if enabled && state.detector.lock().is_none() { return Err("No detector loaded. Install a trained model and restart capture.".into()); }
     state.detection_enabled.store(enabled, Ordering::SeqCst);
     Ok(())
 }
@@ -169,6 +225,7 @@ fn add_region(
         .add(region.clone())
         .map_err(|e| e.to_string())?;
     let _ = app.emit("regions-updated", state.region_store.current());
+    refresh_cover(&app, &state)?;
     Ok(region)
 }
 
@@ -184,6 +241,7 @@ fn replace_region(
         .replace_id(id, region)
         .map_err(|e| e.to_string())?;
     let _ = app.emit("regions-updated", state.region_store.current());
+    refresh_cover(&app, &state)?;
     Ok(())
 }
 
@@ -195,6 +253,7 @@ fn delete_region(
 ) -> Result<(), String> {
     state.region_store.remove(id).map_err(|e| e.to_string())?;
     let _ = app.emit("regions-updated", state.region_store.current());
+    refresh_cover(&app, &state)?;
     Ok(())
 }
 
@@ -202,6 +261,7 @@ fn delete_region(
 fn clear_regions(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.region_store.clear().map_err(|e| e.to_string())?;
     let _ = app.emit("regions-updated", state.region_store.current());
+    refresh_cover(&app, &state)?;
     Ok(())
 }
 
@@ -211,60 +271,14 @@ fn clear_regions(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), 
 fn capture_screenshot_for_labeling(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<PathBuf>, String> {
-    // Persist the most recent inpaint-source frame? We don't retain raw frames
-    // (the hot loop holds at most the current `FrameView`), so the labeling
-    // capture takes a fresh single-shot grab off the active capture source.
-    //
-    // To avoid blocking the UI thread on a portal round-trip, we do a one-shot
-    // synchronous X11 grab when on X11 (cheap), and on Wayland we surface the
-    // current cached patches' source is unavailable -> return None so the
-    // frontend prompts the user to enable capture first. The full Wayland
-    // single-shot uses the same portal session as `start_capture`; wiring it to
-    // reuse the live `CaptureSource` is the follow-up symmetric with Windows.
-    let _ = state; // reserved for future live-frame reuse
-    match single_shot_screenshot() {
-        Ok(Some(path)) => Ok(Some(path)),
-        Ok(None) => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-/// Best-effort single screenshot for the labeling pipeline. Returns the saved
-/// PNG path, or None if no synchronous capture path is available right now.
-fn single_shot_screenshot() -> Result<Option<PathBuf>, String> {
-    use crate::capture::{CaptureSource, FrameView};
-
-    // Only attempt the synchronous X11 path here; the Wayland portal path is
-    // async and shares the live session (see note in the command above).
-    if detect_session() != session::SessionType::X11 {
+    let Some(frame) = state.latest_frame.load_full() else {
         return Ok(None);
-    }
+    };
     paths::ensure_directories().map_err(|e| e.to_string())?;
-
-    // Grab one frame on a short-lived blocking runtime.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-    let frame: Option<FrameView> = rt.block_on(async {
-        let mut cap = crate::capture::x11::X11Capture::new().ok()?;
-        let f = cap.next_frame().await.ok()?;
-        cap.stop();
-        if f.width == 0 || f.height == 0 || f.pixels.is_empty() {
-            None
-        } else {
-            Some(f)
-        }
-    });
-    let Some(frame) = frame else { return Ok(None) };
-
-    // Encode BGRA → PNG and write under the screenshots dir.
     let stem = paths::new_screenshot_stem();
     let path = paths::screenshots_dir().join(format!("{stem}.png"));
     let mut rgba = Vec::with_capacity(frame.pixels.len());
-    for c in frame.pixels.chunks_exact(4) {
-        rgba.extend_from_slice(&[c[2], c[1], c[0], 255]);
-    }
+    for c in frame.pixels.chunks_exact(4) { rgba.extend_from_slice(&[c[2], c[1], c[0], 255]); }
     let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(frame.width, frame.height, rgba)
         .ok_or_else(|| "invalid frame buffer".to_string())?;
     img.save(&path).map_err(|e| e.to_string())?;
@@ -299,35 +313,19 @@ fn list_screenshots() -> Vec<ScreenshotEntry> {
     out
 }
 
-/// Labeling screenshot payload. Shape MUST match the Windows port (shared
-/// frontend `ipc.ts`): `{ width, height, png_data_url }`.
-#[derive(serde::Serialize)]
-struct ScreenshotData {
-    width: u32,
-    height: u32,
-    /// data:image/png;base64,...
-    png_data_url: String,
-}
-
 #[tauri::command]
-fn load_screenshot(path: PathBuf) -> Result<ScreenshotData, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
-    Ok(ScreenshotData {
-        width: img.width(),
-        height: img.height(),
-        png_data_url: format!("data:image/png;base64,{}", STANDARD.encode(&bytes)),
-    })
+fn load_screenshot(path: PathBuf) -> Result<Vec<u8>, String> {
+    std::fs::read(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn save_label(path: PathBuf, doc: LabelDocument) -> Result<(), String> {
-    doc.save(&path).map_err(|e| e.to_string())
+    doc.save(&paths::label_path_for(&path)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
+    let path = paths::label_path_for(&path);
     if !path.exists() {
         return Ok(None);
     }
@@ -344,66 +342,17 @@ fn discard_screenshot(path: PathBuf) -> Result<(), String> {
 // ---------- Training pipeline ----------
 
 #[tauri::command]
-fn start_training(
-    app: AppHandle,
-    _epochs: u32,
-    _batch: u32,
-    _imgsz: u32,
-) -> Result<(), String> {
-    // Dispatch the shared `tools/auto.sh` training driver and stream its log to
-    // the frontend via `training-log` / `training-finished` events (same vocab
-    // as macOS / Windows). The repo root is two levels above the data dir's
-    // sibling; we resolve it relative to the running binary's source tree.
-    let repo_root = training_repo_root();
-    let data_yaml = paths::exports_dir().join("dataset.yaml");
-    let rx = training::start_training(repo_root, data_yaml).map_err(|e| e.to_string())?;
-
-    // Pump training events to the frontend on a background thread.
-    let app = app.clone();
-    std::thread::spawn(move || {
-        for evt in rx.iter() {
-            match evt {
-                training::TrainEvent::Stdout(line) | training::TrainEvent::Stderr(line) => {
-                    let _ = app.emit("training-log", line);
-                }
-                training::TrainEvent::Finished { exit_code } => {
-                    let _ = app.emit(
-                        "training-finished",
-                        serde_json::json!({ "exitCode": exit_code }),
-                    );
-                    break;
-                }
-            }
-        }
-    });
+fn start_training(app: AppHandle, epochs: u32, batch: u32, imgsz: u32, dataset: Option<String>,
+    state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let mut active = state.training_job.lock();
+    if active.as_ref().is_some_and(|job| job.is_running()) { return Err("Training is already running".into()); }
+    *active = Some(training::TrainingJob::start(app, epochs, batch, imgsz, dataset).map_err(|e| e.to_string())?);
     Ok(())
 }
 
-/// Resolve the repo root that owns `tools/auto.sh`. The binary lives at
-/// `platform/linux/src-tauri/target/.../liveblock-linux`, so the repo root is a
-/// few parents up; we also honor an explicit override env var.
-fn training_repo_root() -> PathBuf {
-    if let Some(p) = std::env::var_os("LIVEBLOCK_REPO_ROOT") {
-        return PathBuf::from(p);
-    }
-    // Walk up from the current exe looking for a `tools/auto.sh`.
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(|p| p.to_path_buf());
-        while let Some(d) = dir {
-            if d.join("tools").join("auto.sh").exists() {
-                return d;
-            }
-            dir = d.parent().map(|p| p.to_path_buf());
-        }
-    }
-    PathBuf::from(".")
-}
-
 #[tauri::command]
-fn cancel_training() -> Result<(), String> {
-    // The training child is owned by the `training` module's spawned threads;
-    // cancellation is cooperative via the auto.sh process group. A hard kill
-    // switch is the follow-up; for now stopping is driven from the script side.
+fn cancel_training(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if let Some(job) = state.training_job.lock().as_ref() { job.cancel(); }
     Ok(())
 }
 
@@ -411,10 +360,12 @@ fn cancel_training() -> Result<(), String> {
 
 #[tauri::command]
 fn show_window(app: AppHandle, label: &str) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window(label) {
-        let _ = w.show();
-        let _ = w.set_focus();
+    if label == "editor" {
+        return overlay::show_editor(&app).map_err(|error| error.to_string());
     }
+    let w = app.get_webview_window(label).ok_or_else(|| format!("Unknown window: {label}"))?;
+    w.show().map_err(|e| e.to_string())?;
+    w.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -447,20 +398,12 @@ fn spawn_hotkey_receiver(app: AppHandle, state: Arc<AppState>) {
             for action in rx.iter() {
                 match action {
                     HotkeyAction::PanicDisable => {
-                        // Hard stop: kill capture + clear all overlay output
-                        // immediately. This must always work.
-                        state.capture_running.store(false, Ordering::SeqCst);
-                        state.detection_enabled.store(false, Ordering::SeqCst);
-                        if let Some(handle) = state.capture_task.lock().take() {
-                            handle.join.abort();
+                        let active = app.state::<Arc<AppState>>();
+                        active.detection_enabled.store(false, Ordering::SeqCst);
+                        let _ = stop_capture(app.clone(), active);
+                        if let Some(editor) = app.get_webview_window("editor") {
+                            let _ = editor.hide();
                         }
-                        state.current_patches.lock().clear();
-                        let _ = app.emit(
-                            "capture-state-changed",
-                            serde_json::json!({ "running": false }),
-                        );
-                        let _ = app
-                            .emit("patches-updated", Vec::<inpainting::PatchPayload>::new());
                         let _ = app.emit("panic-disabled", ());
                     }
                     HotkeyAction::ToggleCapture => {
@@ -472,9 +415,9 @@ fn spawn_hotkey_receiver(app: AppHandle, state: Arc<AppState>) {
                             let visible = w.is_visible().unwrap_or(false);
                             if visible {
                                 let _ = w.hide();
-                            } else {
-                                let _ = w.show();
-                                let _ = w.set_focus();
+                            } else if let Err(error) = overlay::show_editor(&app) {
+                                tracing::warn!("region editor: {error}");
+                                let _ = app.emit("operation-failed", error.to_string());
                             }
                         }
                     }
@@ -491,18 +434,27 @@ fn spawn_hotkey_receiver(app: AppHandle, state: Arc<AppState>) {
 /// degrades to user-drawn regions only. NOTE: with the SAFE-STUB empty
 /// allowlist in `runtime.rs`, even a loaded COCO model auto-erases NOTHING.
 fn try_load_default_detector(app: &AppHandle) {
-    let candidate: PathBuf = match app
+    let bundled: PathBuf = match app
         .path()
         .resolve("yolov8n.onnx", tauri::path::BaseDirectory::Resource)
     {
         Ok(p) => p,
         Err(_) => return,
     };
+    let runtime = paths::data_root().join("models/yolov8n.onnx");
+    let candidate = if runtime.exists() { runtime } else if bundled.exists() { bundled }
+        else { app.path().resolve("resources/yolov8n.onnx", tauri::path::BaseDirectory::Resource)
+            .unwrap_or(bundled) };
     if !candidate.exists() {
         tracing::warn!(
             "detector model not found at {} — drop yolov8n.onnx into resources/",
             candidate.display()
         );
+        return;
+    }
+    let resource_dir = app.path().resource_dir().unwrap_or_default();
+    if let Err(error) = onnx_runtime::initialize(&resource_dir) {
+        tracing::error!("Detector unavailable: {error:#}");
         return;
     }
     match Detector::load(&candidate) {
@@ -550,8 +502,9 @@ fn main() {
 
             // Overlay: configure the click-through strategy for this session.
             let strategy = overlay::pick_strategy();
-            if let Err(e) = overlay::install_click_through(strategy) {
-                tracing::warn!("overlay install failed: {e:#}");
+            match overlay::install_click_through(&handle, strategy) {
+                Ok(()) => app_state.overlay_ready.store(true, Ordering::SeqCst),
+                Err(e) => tracing::warn!("overlay install failed: {e:#}"),
             }
             if strategy == overlay::OverlayStrategy::WaylandGnomeMode {
                 overlay::wayland_gnome::announce(&handle);
@@ -562,6 +515,27 @@ fn main() {
                 tracing::warn!("tray install failed: {e:#}");
             }
             spawn_hotkey_receiver(handle.clone(), app_state.clone());
+
+            // Dispatch tray and hotkey events in Rust, even with a hidden control window.
+            let toggle_app = handle.clone();
+            handle.listen("tray-toggle-capture", move |_| {
+                let active = toggle_app.state::<Arc<AppState>>();
+                if active.capture_running.load(Ordering::SeqCst) {
+                    let _ = stop_capture(toggle_app.clone(), active);
+                } else if let Err(error) = if active.cover_only_preferred.load(Ordering::SeqCst) {
+                    start_paint_over(toggle_app.clone(), active)
+                } else { start_capture(toggle_app.clone(), active) } {
+                    tracing::error!("capture toggle: {error}");
+                }
+            });
+            let screenshot_app = handle.clone();
+            handle.listen("hotkey-capture-for-labeling", move |_| {
+                if matches!(capture_screenshot_for_labeling(screenshot_app.state::<Arc<AppState>>()), Ok(Some(_))) {
+                    if let Some(w) = screenshot_app.get_webview_window("labeling") {
+                        let _ = w.show(); let _ = w.set_focus();
+                    }
+                }
+            });
 
             // Load the bundled detector if present (non-fatal if absent).
             try_load_default_detector(&handle);
@@ -577,8 +551,12 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_session_info,
             start_capture,
+            start_paint_over,
+            set_cover_only_preferred,
+            current_patches,
             stop_capture,
             set_detection_enabled,
+            capture_status,
             list_monitors,
             list_regions,
             add_region,

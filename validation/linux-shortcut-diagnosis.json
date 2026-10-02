@@ -1,0 +1,34 @@
+{
+  "tested_at_utc": "2026-10-02T00:26:44.673110+00:00",
+  "installed_executable_sha256": "7150441757f8c6aa84783c6633409e678e22ce9221d6a073cdb47bc72574299e",
+  "environment": "Ubuntu 26.04 ARM64, isolated TigerVNC X11, Openbox, xcompmgr -n, temporary XDG data",
+  "keyboard_probe": "xev on the isolated test display; input sent only through CUA/noVNC UI",
+  "original_forwarding_failure": {
+    "control_received": false,
+    "shift_received": true,
+    "alt_received": true,
+    "period_state": "0x9 (Shift + Alt)",
+    "diagnosis": "Direct browser shortcut injection omitted Control. The missing modifier prevented the app hotkey from matching."
+  },
+  "correct_input": "noVNC Ctrl/Alt toggle buttons plus Shift+B, Shift+L, or Shift+period through CUA",
+  "native_checks": {
+    "ctrl_shift_b_opens_editor": true,
+    "ctrl_shift_l_restarts_manual_cover_after_panic": true,
+    "panic_with_cover_and_editor_active": true,
+    "panic_unmaps_both_native_windows": true,
+    "panic_recovers_desktop_after_compositor_loss": true
+  },
+  "compositor_loss_regression": {
+    "reproduced": true,
+    "action": "Stopped the isolated xcompmgr process while a manual cover was active",
+    "observed": "Entire renderer area became opaque black",
+    "automatic_recovery_in_old_release": false,
+    "manual_panic_recovery": true,
+    "fix_verification_pending": false,
+    "fix_verification_report": "linux-compositor-loss-ui.json"
+  },
+  "scope_limits": [
+    "Wayland shortcuts and native Windows runtime remain unverified"
+  ],
+  "source_at_diagnosis": "Current source has since gained compositor-loss handling; executable hash identifies the tested pre-fix artifact."
+}

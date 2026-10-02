@@ -3,35 +3,24 @@
 //! runs as a tokio task spawned by `start_capture` and torn down by
 //! `stop_capture`.
 //!
-//! The loop routes detections through the SHARED CORE rather than reimplementing
-//! any policy:
-//!   - `liveblock_tracker::Tracker::update` associates detections into stable
-//!     tracks (constant-velocity), so a flickering box doesn't thrash.
-//!   - each newly-seen track is classified ONCE. Until the real sponsor/team/
-//!     number models are wired we use a SAFE STUB: an EMPTY class allowlist, so
-//!     no generic COCO class is ever auto-removed (this fixes the confirmed
-//!     "erases people/cars" bug). User-drawn regions still inpaint as before.
-//!   - `liveblock_core::decide_verdict` turns signals into a sticky verdict.
-//!   - `liveblock_core::build_remove_mask_from_tracks` paints ONLY confirmed
-//!     Remove tracks and carves OUT every Keep box.
-//!   - the DRM-safe path: any region whose pixels are a flat HDCP black-out
-//!     (`region_is_protected_black`) is covered with an opaque paint-over patch
-//!     (`paint_over_regions`) instead of being mirror-blended (which would smear
-//!     black). We NEVER capture-then-inpaint protected pixels.
+//! Explicit model classes become sticky remove/protect verdicts only after
+//! fresh detection observations. Opaque covering handles capture-black regions;
+//! it does not restore protected video pixels or bypass content protection.
 
 use crate::capture::{open_capture, FrameView};
 use crate::detection::DetBox;
 use crate::inpainting::PatchPayload;
 use crate::state::AppState;
 use liveblock_core::{
-    build_remove_mask_from_tracks, decide_verdict, paint_over_regions, region_is_protected_black,
-    ClassifySignals, Fill, Frame, NormRect, PixelFormat, PolicyThresholds,
+    paint_over_regions, region_is_protected_black,
+    Fill, Frame, NormRect, PixelFormat,
 };
 use liveblock_regions::NormalizedRegion;
-use liveblock_tracker::{Observation, TrackBox, Verdict};
+use liveblock_tracker::{Observation, TrackBox, Verdict, Tracker};
+use liveblock_detection::ModelClassPolicy;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Run a detection pass every Nth captured frame (≈ keeps a 60 Hz capture's
 /// inference cost at ~15 Hz). The tracker coasts boxes on the in-between frames.
@@ -41,64 +30,58 @@ const DETECT_EVERY: u64 = 4;
 /// channels read as an HDCP black-out.
 const DRM_LUMA_THRESHOLD: u8 = 8;
 
-/// SAFE-STUB classifier allowlist. EMPTY by design: with the generic COCO
-/// detector there is NO class we are willing to auto-erase, so every track
-/// stays `Unsure` → no removals. When the real sponsor/team/number models land,
-/// this gate is replaced by actual `ClassifySignals` gathering. User regions are
-/// unaffected — they always paint/inpaint.
-fn class_is_removable(_class_id: u32) -> bool {
-    // Intentionally always false. DO NOT add COCO class ids here — that would
-    // resurrect the "erases people/cars" bug. Removal must come from the real
-    // sponsor classifier, gathered into ClassifySignals below.
-    false
-}
-
-/// Gather classifier signals for a track. STUB: until the real models exist we
-/// return all-zero signals for non-allowlisted classes, which `decide_verdict`
-/// resolves to Keep in SportsBroadcast mode — i.e. nothing is removed.
-fn gather_signals(class_id: u32) -> ClassifySignals {
-    if class_is_removable(class_id) {
-        // (Unreachable today: the allowlist is empty.) When wired, a confident
-        // sponsor would arrive as e.g. sponsor_prob ~0.9, keep_prob ~0.1.
-        ClassifySignals {
-            team_gallery_sim: 0.0,
-            is_protected_number: false,
-            sponsor_prob: 0.9,
-            keep_prob: 0.1,
-        }
-    } else {
-        // All zero → not a protected number, no sponsor signal → KEEP/Unsure.
-        ClassifySignals::default()
+/// Stop either blocking mode from IPC, hotkeys, or compositor-loss callbacks.
+pub fn stop_capture(app: &AppHandle, state: &AppState) {
+    state.capture_generation.fetch_add(1, Ordering::SeqCst);
+    state.capture_running.store(false, Ordering::SeqCst);
+    state.cover_only_active.store(false, Ordering::SeqCst);
+    if let Some(handle) = state.capture_task.lock().take() {
+        handle.join.abort();
     }
+    if let Some(window) = app.get_webview_window("render") {
+        let _ = window.hide();
+    }
+    state.latest_frame.store(None);
+    state.current_patches.lock().clear();
+    *state.tracker.lock() = liveblock_core::Tracker::default();
+    state.last_detections.lock().clear();
+    let _ = app.emit("capture-state-changed", false);
+    let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
 }
 
 /// Spawn the capture pipeline. Returns the Tauri async-runtime `JoinHandle` so
 /// the caller can store it in `AppState::capture_task` and abort on stop.
 /// Spawning via `tauri::async_runtime::spawn` (rather than bare `tokio::spawn`)
 /// means it works even when called from a synchronous Tauri command handler.
-pub fn spawn(app: AppHandle, state: Arc<AppState>) -> tauri::async_runtime::JoinHandle<()> {
+pub fn spawn(app: AppHandle, state: Arc<AppState>, generation: u64) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = run(app.clone(), state.clone()).await {
+        if let Err(e) = run(app.clone(), state.clone(), generation).await {
             tracing::error!("capture pipeline error: {e:#}");
         }
+        if state.capture_generation.load(Ordering::SeqCst) != generation { return; }
+        if let Some(w) = app.get_webview_window("render") { let _ = w.hide(); }
+        state.latest_frame.store(None);
         // Whatever the exit reason, make sure the flag and overlay are cleared.
         state.capture_running.store(false, Ordering::SeqCst);
-        let _ = app.emit("capture-state-changed", serde_json::json!({ "running": false }));
+        state.current_patches.lock().clear();
+        *state.tracker.lock() = Tracker::default();
+        let _ = app.emit("capture-state-changed", false);
         let _ = app.emit("patches-updated", Vec::<PatchPayload>::new());
     })
 }
 
-async fn run(app: AppHandle, state: Arc<AppState>) -> anyhow::Result<()> {
+async fn run(app: AppHandle, state: Arc<AppState>, generation: u64) -> anyhow::Result<()> {
     let mut capture = open_capture()
         .await
         .map_err(|e| anyhow::anyhow!("open capture: {e:#}"))?;
 
-    let _ = app.emit("capture-state-changed", serde_json::json!({ "running": true }));
+    if state.capture_generation.load(Ordering::SeqCst) != generation { capture.stop(); return Ok(()); }
+    if let Some(w) = app.get_webview_window("render") { w.show()?; }
+    let _ = app.emit("capture-state-changed", true);
 
-    let thresholds = PolicyThresholds::default();
-    let policy_mode = state.policy_mode;
     let min_hits = 3u32;
 
+    let mut previous_pixels: Option<Arc<[u8]>> = None;
     let mut frame_index: u64 = 0;
     // Most recent detections, reused on the frames we don't run inference.
     let mut last_dets: Vec<DetBox> = Vec::new();
@@ -106,7 +89,7 @@ async fn run(app: AppHandle, state: Arc<AppState>) -> anyhow::Result<()> {
     // frames so we keep covering them between inference passes.
     let mut auto_regions: Vec<NormalizedRegion> = Vec::new();
 
-    while state.capture_running.load(Ordering::SeqCst) {
+    while state.capture_running.load(Ordering::SeqCst) && state.capture_generation.load(Ordering::SeqCst) == generation {
         let view = match capture.next_frame().await {
             Ok(v) => v,
             Err(e) => {
@@ -118,6 +101,10 @@ async fn run(app: AppHandle, state: Arc<AppState>) -> anyhow::Result<()> {
             // Negotiation not finished yet; keep polling.
             continue;
         }
+        if state.capture_generation.load(Ordering::SeqCst) != generation { break; }
+        if previous_pixels.as_ref().is_some_and(|pixels| Arc::ptr_eq(pixels, &view.pixels)) { continue; }
+        previous_pixels = Some(view.pixels.clone());
+        state.latest_frame.store(Some(Arc::new(view.clone())));
         frame_index += 1;
         let (w, h) = (view.width, view.height);
 
@@ -127,10 +114,16 @@ async fn run(app: AppHandle, state: Arc<AppState>) -> anyhow::Result<()> {
         // the previously-derived `auto_regions` instead and just re-render. The
         // tracker's own predict step already coasts boxes forward, so a future
         // optimization can present `predicted_boxes` on coast frames.
-        let is_detection_tick =
-            state.detection_enabled.load(Ordering::Relaxed) && frame_index % DETECT_EVERY == 0;
+        let detection_enabled = state.detection_enabled.load(Ordering::Relaxed);
+        if !detection_enabled {
+            auto_regions.clear();
+            last_dets.clear();
+            *state.tracker.lock() = Tracker::default();
+        }
+        let is_detection_tick = detection_enabled && (frame_index % DETECT_EVERY == 0 || frame_index == 1);
 
         if is_detection_tick {
+            last_dets.clear();
             // --- 1. Detection ---------------------------------------------
             if let Some(det) = state.detector.lock().as_mut() {
                 match det.detect_bgra(&view.pixels, w, h) {
@@ -157,7 +150,7 @@ async fn run(app: AppHandle, state: Arc<AppState>) -> anyhow::Result<()> {
                 })
                 .collect();
 
-            // --- 3. Classify newly-seen tracks (SAFE-STUB → no removals) ---
+            // --- 3. Classify using checksum-bound model semantics ---
             let to_classify: Vec<(u64, u32)> = {
                 let mut tracker = state.tracker.lock();
                 tracker.update(&observations);
@@ -171,20 +164,31 @@ async fn run(app: AppHandle, state: Arc<AppState>) -> anyhow::Result<()> {
             if !to_classify.is_empty() {
                 let mut tracker = state.tracker.lock();
                 for (id, class_id) in to_classify {
-                    let signals = gather_signals(class_id);
-                    let verdict = decide_verdict(&signals, policy_mode, &thresholds);
+                    let policy = state.detector.lock().as_ref().map(|d| d.class_policy(class_id))
+                        .unwrap_or(ModelClassPolicy::Unknown);
+                    let verdict = match policy {
+                        ModelClassPolicy::Remove => Verdict::Remove,
+                        ModelClassPolicy::Keep => Verdict::Keep,
+                        ModelClassPolicy::Unknown => Verdict::Unsure,
+                    };
                     tracker.set_verdict(id, verdict);
                 }
             }
 
             // --- 4. Derive the auto-remove region list from confirmed tracks
-            auto_regions = derive_auto_regions(&state, w, h, min_hits);
+            auto_regions = derive_auto_regions(&state, min_hits);
         }
 
         // --- 5. Merge with user-drawn regions -----------------------------
         let mut all_regions: Vec<NormalizedRegion> = state.region_store.current();
         // Clone (don't move) so `auto_regions` persists onto the next coast frame.
         all_regions.extend(auto_regions.iter().cloned());
+        if all_regions.is_empty() {
+            let had_patches = !state.current_patches.lock().is_empty();
+            state.current_patches.lock().clear();
+            if had_patches { let _ = app.emit("patches-updated", Vec::<PatchPayload>::new()); }
+            continue;
+        }
 
         // --- 6. DRM split: protected (black) regions → paint-over cover;
         //         everything else → mirror-blend inpaint --------------------
@@ -210,6 +214,7 @@ async fn run(app: AppHandle, state: Arc<AppState>) -> anyhow::Result<()> {
             .render(&view.pixels, w, h, &inpaint_regions, &paint_patches)
             .unwrap_or_default();
 
+        if state.capture_generation.load(Ordering::SeqCst) != generation { break; }
         *state.current_patches.lock() = payloads.clone();
         let _ = app.emit("patches-updated", &payloads);
     }
@@ -218,15 +223,9 @@ async fn run(app: AppHandle, state: Arc<AppState>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Derive the auto-remove region list from the tracker's confirmed Remove
-/// tracks, mirroring `build_remove_mask_from_tracks`' rules (confirmed Remove
-/// painted, every Keep carved out). With the empty-allowlist stub there are
-/// never any Remove tracks, so this short-circuits to empty and skips the w*h
-/// mask allocation; it engages automatically once the real classifier ships.
+/// Cover confirmed removal tracks only when no protected track overlaps.
 fn derive_auto_regions(
     state: &Arc<AppState>,
-    w: u32,
-    h: u32,
     min_hits: u32,
 ) -> Vec<NormalizedRegion> {
     let tracker = state.tracker.lock();
@@ -237,10 +236,6 @@ fn derive_auto_regions(
     if !has_removable {
         return Vec::new();
     }
-    // Build the authoritative core mask (keeps that code path live + correct)
-    // then translate the same Remove-not-carved tracks into regions the
-    // inpainter/paint-over path acts on (it consumes regions, not a bitmask).
-    let _mask = build_remove_mask_from_tracks(tracker.tracks(), w, h, min_hits);
     let tracks = tracker.tracks();
     tracks
         .iter()

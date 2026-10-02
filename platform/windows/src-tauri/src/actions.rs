@@ -8,6 +8,8 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::path::PathBuf;
+use crate::{detection::Detector, paths, onnx_runtime};
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -49,6 +51,8 @@ pub fn start_capture(state: &AppState, monitor_id: Option<String>) -> anyhow::Re
 
     // Restart cleanly if already running.
     stop_capture(state);
+    state.cover_only_preferred.store(false, Ordering::SeqCst);
+    try_load_default_detector(&state.app);
 
     let target: HMONITOR = match monitor_id.and_then(|s| s.parse::<i64>().ok()) {
         Some(v) => HMONITOR(v as isize as *mut _),
@@ -105,12 +109,14 @@ pub fn start_capture(_state: &AppState, _monitor_id: Option<String>) -> anyhow::
 
 /// Stop capture: join the worker, close the session, clear + hide the overlay.
 pub fn stop_capture(state: &AppState) {
+    state.cover_only_active.store(false, Ordering::SeqCst);
     if let Some(worker) = state.pipeline.lock().take() {
         worker.stop();
     }
     if let Some(session) = state.capture.lock().take() {
         session.stop();
     }
+    state.latest_frame.store(None);
     if let Some(overlay) = state.overlay.lock().as_ref() {
         let _ = overlay.present(&[]);
         let _ = overlay.hide();
@@ -121,15 +127,15 @@ pub fn stop_capture(state: &AppState) {
 pub fn panic_disable(state: &AppState) {
     state.detection_enabled.store(false, Ordering::SeqCst);
     stop_capture(state);
+    if let Some(editor) = state.app.get_webview_window("editor") {
+        let _ = editor.hide();
+    }
     emit_capture_state(&state.app, false);
     tracing::info!("panic-disable engaged");
 }
 
-/// DRM-safe capture-free PaintOver: cover the user's regions with opaque-black
-/// patches on the native overlay WITHOUT starting any WGC capture at all. This
-/// is the path for fully content-protected video — nothing is captured, so HDCP
-/// has nothing to black out, and we never read a protected pixel. The overlay
-/// just draws flat covers over the marked regions.
+/// Draw ordinary opaque manual covers without starting WGC capture. Services
+/// may still restrict overlays; this does not promise undetectability or DRM recovery.
 ///
 /// Stops any running capture first (PaintOver and the capture+inpaint path are
 /// mutually exclusive), then shows the overlay on the primary monitor and
@@ -140,6 +146,7 @@ pub fn paint_over_regions_only(state: &AppState) -> anyhow::Result<()> {
 
     // No capturing while in PaintOver mode.
     stop_capture(state);
+    state.cover_only_preferred.store(true, Ordering::SeqCst);
     state.detection_enabled.store(false, Ordering::SeqCst);
 
     // Bind the overlay to the primary monitor (PaintOver isn't tied to a capture
@@ -180,7 +187,9 @@ pub fn paint_over_regions_only(state: &AppState) -> anyhow::Result<()> {
             .map(crate::overlay::CoverPatch::from)
             .collect();
     overlay.present(&patches)?;
-    tracing::info!("paint-over (capture-free DRM-safe) presenting {} regions", regions.len());
+    state.cover_only_active.store(true, Ordering::SeqCst);
+    emit_capture_state(&state.app, true);
+    tracing::info!("capture-free covers presenting {} regions", regions.len());
     Ok(())
 }
 
@@ -194,11 +203,13 @@ pub fn toggle_capture(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    let running = state.capture.lock().is_some();
+    let running = state.capture.lock().is_some() || state.cover_only_active.load(Ordering::SeqCst);
     if running {
         stop_capture(&state);
         emit_capture_state(app, false);
-    } else if let Err(e) = start_capture(&state, None) {
+    } else if let Err(e) = if state.cover_only_preferred.load(Ordering::SeqCst) {
+        paint_over_regions_only(&state)
+    } else { start_capture(&state, None) } {
         tracing::error!("toggle_capture: start failed: {e}");
     }
 }
@@ -225,7 +236,48 @@ pub fn capture_screenshot_action(app: &AppHandle) {
 /// Show a webview window by label (tray / hotkey).
 pub fn show_window_action(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
+        if label == "editor" {
+            if let Ok(Some(monitor)) = w.primary_monitor() {
+                let _ = w.set_position(*monitor.position());
+                let _ = w.set_size(*monitor.size());
+            }
+        }
         let _ = w.show();
         let _ = w.set_focus();
+    }
+}
+
+pub fn try_load_default_detector(app: &AppHandle) {
+    let bundled: PathBuf = match app
+        .path()
+        .resolve("yolov8n.onnx", tauri::path::BaseDirectory::Resource)
+    {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let runtime = paths::appdata_root().join("models/yolov8n.onnx");
+    let candidate = if runtime.exists() { runtime } else if bundled.exists() { bundled }
+        else { app.path().resolve("resources/yolov8n.onnx", tauri::path::BaseDirectory::Resource)
+            .unwrap_or(bundled) };
+    if !candidate.exists() {
+        tracing::warn!(
+            "detector model not found at {} — drop yolov8n.onnx into resources/",
+            candidate.display()
+        );
+        return;
+    }
+    let resource_dir = app.path().resource_dir().unwrap_or_default();
+    if let Err(error) = onnx_runtime::initialize(&resource_dir) {
+        tracing::error!("Detector unavailable: {error:#}");
+        return;
+    }
+    match Detector::load(&candidate) {
+        Ok(d) => {
+            if let Some(state) = app.try_state::<AppState>() {
+                *state.detector.lock() = Some(d);
+                tracing::info!("loaded detector from {}", candidate.display());
+            }
+        }
+        Err(e) => tracing::error!("detector load failed: {e}"),
     }
 }

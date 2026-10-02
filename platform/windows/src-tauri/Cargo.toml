@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "LiveBlock — Windows port (Rust + Tauri 2 + windows-rs)"
 
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [lib]
 name = "liveblock_windows_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

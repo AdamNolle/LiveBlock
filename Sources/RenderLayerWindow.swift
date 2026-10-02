@@ -38,7 +38,8 @@ final class RenderLayerWindow: NSPanel {
         self.isReleasedWhenClosed = false
 
         let host = NSHostingView(rootView: rootView)
-        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.autoresizingMask = [.width, .height]
         self.contentView = host
 
         align(to: targetScreen)

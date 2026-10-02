@@ -15,7 +15,7 @@ struct TrainingDashboardView: View {
                 header
                 preconditionCard
                 errorBanner
-                progressTrack
+                if training.selectedDataset == nil { progressTrack }
                 statsCard
                 trainingCard
                 logCard
@@ -230,7 +230,7 @@ struct TrainingDashboardView: View {
         }
         .padding(Theme.Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
 
         return Group {
             if let action = action {
@@ -255,7 +255,7 @@ struct TrainingDashboardView: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Training Dashboard").font(.title2).bold()
-                Text("Build your own ad detector from your labeled screenshots.")
+                Text("Train a local detector from labeled screenshots or a public dataset.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -291,7 +291,7 @@ struct TrainingDashboardView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(Theme.Spacing.m)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
     }
 
     private var trainingCard: some View {
@@ -305,15 +305,26 @@ struct TrainingDashboardView: View {
             HStack(spacing: Theme.Spacing.m) {
                 stepper("Epochs", value: $epochsField, range: 1...500, step: 5)
                 stepper("Batch", value: $batchField, range: 1...64, step: 1)
-                stepper("Img sz", value: $imgszField, range: 320...1280, step: 32)
+                stepper("Image size", value: $imgszField, range: 320...1280, step: 32)
             }
+            HStack {
+                Text(training.selectedDataset?.lastPathComponent ?? "Your labeled screenshots")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).help(training.selectedDataset?.path ?? "Export labels captured in LiveBlock")
+                Spacer()
+                if training.selectedDataset != nil {
+                    Button("Use screenshots") { training.selectedDataset = nil }
+                }
+                Button("Choose dataset…") { training.chooseDataset() }
+            }
+            .disabled(training.isBusy)
             actionRow
             if case .training(let p) = training.state {
                 progressRow(progress: p)
             }
         }
         .padding(Theme.Spacing.l)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.large))
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: Theme.Radius.large))
     }
 
     private func stepper(_ label: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int) -> some View {
@@ -322,7 +333,8 @@ struct TrainingDashboardView: View {
             Stepper(value: value, in: range, step: step) {
                 Text("\(value.wrappedValue)").monospacedDigit()
             }
-            .labelsHidden()
+            .accessibilityLabel(label)
+            .disabled(training.isBusy)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -331,7 +343,7 @@ struct TrainingDashboardView: View {
 
     private var trainNowDisabledReason: String? {
         if !training.venvInstalled { return "Install the training environment first." }
-        if labeling.labeledCount < 20 { return "Label at least 20 screenshots first (currently \(labeling.labeledCount))." }
+        if training.selectedDataset == nil && labeling.labeledCount < 20 { return "Label at least 20 screenshots or choose a YOLO dataset." }
         return nil
     }
 
@@ -356,7 +368,7 @@ struct TrainingDashboardView: View {
                     .frame(maxWidth: .infinity).padding(.vertical, 4)
                 }
                 .buttonStyle(.glassProminent).tint(Theme.train)
-                .disabled(labeling.labeledCount < 20 || !training.venvInstalled)
+                .disabled((training.selectedDataset == nil && labeling.labeledCount < 20) || !training.venvInstalled)
                 .help(trainNowDisabledReason ?? "Train a model on your labeled screenshots")
             }
             Button {
@@ -514,6 +526,6 @@ struct TrainingDashboardView: View {
             .foregroundStyle(.secondary)
         }
         .padding(Theme.Spacing.l)
-        .glassEffect(in: RoundedRectangle(cornerRadius: Theme.Radius.large))
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: Theme.Radius.large))
     }
 }

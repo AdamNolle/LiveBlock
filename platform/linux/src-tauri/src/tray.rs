@@ -55,6 +55,13 @@ pub fn install(app: &AppHandle) -> Result<()> {
 }
 
 fn show_focus(app: &AppHandle, label: &str) {
+    if label == "editor" {
+        if let Err(error) = crate::overlay::show_editor(app) {
+            tracing::warn!("region editor: {error}");
+            let _ = app.emit("operation-failed", error.to_string());
+        }
+        return;
+    }
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.show();
         let _ = w.set_focus();

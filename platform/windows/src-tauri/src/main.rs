@@ -10,6 +10,8 @@
 mod actions;
 mod capture;
 mod detection;
+#[path = "../../../_shared-backend/onnx_runtime.rs"]
+mod onnx_runtime;
 mod hotkeys;
 mod inpainting;
 mod labels;
@@ -31,7 +33,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::capture::enumerate_monitors;
-use crate::detection::Detector;
 use crate::labels::{LabelDocument, ScreenshotEntry};
 use crate::regions::{NormalizedRegion, RegionStore};
 use crate::state::AppState;
@@ -82,7 +83,7 @@ fn main() {
             hotkeys::spawn(handle.clone());
 
             // Try to load a default detector if the model is present.
-            try_load_default_detector(&handle);
+            actions::try_load_default_detector(&handle);
 
             Ok(())
         })
@@ -90,7 +91,10 @@ fn main() {
             start_capture,
             stop_capture,
             start_paint_over,
+            set_cover_only_preferred,
             set_detection_enabled,
+            capture_status,
+            current_patches,
             list_monitors,
             list_regions,
             add_region,
@@ -142,32 +146,6 @@ fn apply_window_styles(app: &AppHandle) {
 #[cfg(not(windows))]
 fn apply_window_styles(_: &AppHandle) {}
 
-fn try_load_default_detector(app: &AppHandle) {
-    let candidate: PathBuf = match app
-        .path()
-        .resolve("yolov8n.onnx", tauri::path::BaseDirectory::Resource)
-    {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    if !candidate.exists() {
-        tracing::warn!(
-            "detector model not found at {} — drop yolov8n.onnx into resources/",
-            candidate.display()
-        );
-        return;
-    }
-    match Detector::load(&candidate) {
-        Ok(d) => {
-            if let Some(state) = app.try_state::<AppState>() {
-                *state.detector.lock() = Some(d);
-                tracing::info!("loaded detector from {}", candidate.display());
-            }
-        }
-        Err(e) => tracing::error!("detector load failed: {e}"),
-    }
-}
-
 // ===== Monitor enumeration =====
 
 /// Frontend `MonitorInfo`: `{ id: string, name: string, is_primary: bool }`.
@@ -217,16 +195,35 @@ fn panic_disable(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// DRM-safe capture-free PaintOver: cover the user's regions with opaque black
-/// on the native overlay WITHOUT capturing any pixels (for fully content-
-/// protected video). See `actions::paint_over_regions_only`.
+/// Draw opaque manual covers without reading screen pixels.
 #[tauri::command]
 fn start_paint_over(state: State<'_, AppState>) -> Result<(), String> {
     actions::paint_over_regions_only(&state).map_err(|e| e.to_string())
 }
 
+/// Synchronize the selected method before a tray or global-shortcut start.
+#[tauri::command]
+fn set_cover_only_preferred(cover_only: bool, state: State<'_, AppState>) -> Result<(), String> {
+    if state.capture.lock().is_some() || state.cover_only_active.load(Ordering::SeqCst) {
+        return Err("Stop blocking before changing its method.".into());
+    }
+    state.cover_only_preferred.store(cover_only, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn capture_status(state: State<'_, AppState>) -> serde_json::Value {
+    serde_json::json!({"running": state.capture.lock().is_some() || state.cover_only_active.load(Ordering::SeqCst), "coverOnly": state.cover_only_active.load(Ordering::SeqCst), "detectionEnabled": state.detection_enabled.load(Ordering::SeqCst), "trainingRunning": state.training.lock().as_ref().is_some_and(|job| job.is_running()), "detectorReady": state.detector.lock().is_some(), "overlayMode": "Native"})
+}
+
+// Windows presents patches through its native DirectComposition overlay.
+#[tauri::command]
+fn current_patches() -> Vec<serde_json::Value> { Vec::new() }
+
 #[tauri::command]
 fn set_detection_enabled(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
+    if enabled && state.cover_only_active.load(Ordering::SeqCst) { return Err("Automatic detection needs screen capture. Stop Cover only first.".into()); }
+    if enabled && state.detector.lock().is_none() { return Err("No detector loaded. Install a trained model and restart capture.".into()); }
     state.detection_enabled.store(enabled, Ordering::Relaxed);
     Ok(())
 }
@@ -330,11 +327,12 @@ fn load_screenshot(path: PathBuf) -> Result<Vec<u8>, String> {
 
 #[tauri::command]
 fn save_label(path: PathBuf, doc: LabelDocument) -> Result<(), String> {
-    doc.save(&path).map_err(|e| e.to_string())
+    doc.save(&paths::label_path_for(&path)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn load_label(path: PathBuf) -> Result<Option<LabelDocument>, String> {
+    let path = paths::label_path_for(&path);
     if !path.exists() {
         return Ok(None);
     }
@@ -355,17 +353,20 @@ fn start_training(
     epochs: u32,
     batch: u32,
     imgsz: u32,
+    dataset: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let job = training::TrainingJob::start(state.app.clone(), epochs, batch, imgsz)
+    let mut active = state.training.lock();
+    if active.as_ref().is_some_and(|job| job.is_running()) { return Err("Training is already running".into()); }
+    let job = training::TrainingJob::start(state.app.clone(), epochs, batch, imgsz, dataset)
         .map_err(|e| e.to_string())?;
-    *state.training.lock() = Some(job);
+    *active = Some(job);
     Ok(())
 }
 
 #[tauri::command]
 fn cancel_training(state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(job) = state.training.lock().take() {
+    if let Some(job) = state.training.lock().as_ref() {
         job.cancel();
     }
     Ok(())
@@ -378,6 +379,12 @@ fn show_window(label: String, app: AppHandle) -> Result<(), String> {
     let w = app
         .get_webview_window(&label)
         .ok_or_else(|| format!("no window {label}"))?;
+    if label == "editor" {
+        if let Some(monitor) = w.primary_monitor().map_err(|e| e.to_string())? {
+            w.set_position(*monitor.position()).map_err(|e| e.to_string())?;
+            w.set_size(*monitor.size()).map_err(|e| e.to_string())?;
+        }
+    }
     w.show().map_err(|e| e.to_string())?;
     let _ = w.set_focus();
     Ok(())

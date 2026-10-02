@@ -45,8 +45,11 @@ final class RegionStore: @unchecked Sendable {
     private var regions: [NormalizedRegion] = []
     private let handle: RegionStoreHandle
     private let storageURL: URL
+    private let preferences: UserDefaults
+    static let disabledIdsKey = "disabledRegionIds"
 
-    init(storageURL: URL? = nil) {
+    init(storageURL: URL? = nil, preferences: UserDefaults = .standard) {
+        self.preferences = preferences
         if let storageURL {
             self.storageURL = storageURL
         } else {
@@ -90,6 +93,25 @@ final class RegionStore: @unchecked Sendable {
     var current: [NormalizedRegion] {
         lock.lock(); defer { lock.unlock() }
         return regions
+    }
+
+    /// Keep disabled regions saved for editing, but exclude them from painting.
+    var enabled: [NormalizedRegion] {
+        let disabled = disabledRegionIDs
+        return current.filter { !disabled.contains($0.id) }
+    }
+
+    private var disabledRegionIDs: Set<UUID> {
+        let ids = preferences.stringArray(forKey: Self.disabledIdsKey) ?? []
+        return Set(ids.compactMap { UUID(uuidString: $0) })
+    }
+
+    func isEnabled(id: UUID) -> Bool { !disabledRegionIDs.contains(id) }
+
+    func setEnabled(id: UUID, on: Bool) {
+        var disabled = disabledRegionIDs
+        if on { disabled.remove(id) } else { disabled.insert(id) }
+        preferences.set(disabled.map(\.uuidString).sorted(), forKey: Self.disabledIdsKey)
     }
 
     func add(_ region: NormalizedRegion) {

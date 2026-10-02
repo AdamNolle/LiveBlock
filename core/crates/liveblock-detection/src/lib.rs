@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 mod gallery;
 mod iab;
 mod number_gate;
+mod model;
+pub use model::{yolo_input_size, letterbox_bgra, decode_yolov8, ModelClasses, ModelClassPolicy};
 
 pub use gallery::{cosine_similarity, GalleryMatcher};
 pub use iab::{iab_slot_match, iab_slot_match_tol, DEFAULT_ASPECT_TOLERANCE};

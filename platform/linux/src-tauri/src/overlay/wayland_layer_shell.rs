@@ -203,3 +203,10 @@ impl Dispatch<WlRegion, ()> for State {
     ) {
     }
 }
+
+// Registry updates are handled through GlobalListContents by wayland-client.
+impl Dispatch<wayland_client::protocol::wl_registry::WlRegistry, wayland_client::globals::GlobalListContents> for State {
+    fn event(_: &mut Self, _: &wayland_client::protocol::wl_registry::WlRegistry,
+        _: <wayland_client::protocol::wl_registry::WlRegistry as Proxy>::Event,
+        _: &wayland_client::globals::GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
+}

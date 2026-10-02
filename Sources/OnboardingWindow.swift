@@ -15,10 +15,11 @@ final class OnboardingWindow: NSWindow, NSWindowDelegate {
         self.isReleasedWhenClosed = false
         self.center()
         self.collectionBehavior = [.fullScreenAllowsTiling]
-        self.sharingType = .none
+        self.sharingType = .readOnly
 
         let host = NSHostingView(rootView: rootView)
-        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.autoresizingMask = [.width, .height]
         self.contentView = host
         self.delegate = self
     }

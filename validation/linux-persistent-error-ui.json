@@ -1,0 +1,68 @@
+{
+  "tested_at_utc": "2026-10-02T00:14:16.358835+00:00",
+  "package": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock-linux-arm64.deb",
+  "package_sha256": "628eaa39f4390457b78a670bcbb1dff9fbe861ba7c586bb91b3124a7df510ee2",
+  "installed_executable_sha256": "7150441757f8c6aa84783c6633409e678e22ce9221d6a073cdb47bc72574299e",
+  "environment": {
+    "os": "Ubuntu 26.04 ARM64 Lima VM",
+    "display": "TigerVNC X11 1280x800",
+    "window_manager": "Openbox",
+    "compositor": "xcompmgr -n (positive); absent (negative)",
+    "graphics": "software OpenGL",
+    "userdata": "private temporary isolated XDG directories"
+  },
+  "checks": {
+    "missing_compositor_start_refused": true,
+    "missing_compositor_draw_editor_refused": true,
+    "failure_notice_survives_status_refreshes": true,
+    "failure_notice_can_be_dismissed": true,
+    "retry_action_displays_failure_again": true,
+    "editor_transparency": true,
+    "toolbar_single_line_and_updated_shortcut_hint": true,
+    "draw_region_saved": true,
+    "black_cover_matches_saved_rectangle": true,
+    "outside_cover_visible": true,
+    "covered_button_click_opens_editor": true,
+    "stop_clears_cover": true,
+    "cover_mode_disables_detection_and_screenshots": true,
+    "screenshots_created": 0,
+    "singular_region_status": true
+  },
+  "saved_test_region": {
+    "x": 0.365625,
+    "y": 0.425,
+    "width": 0.11328125,
+    "height": 0.045
+  },
+  "unverified": [
+    "Emergency shortcut did not activate via the noVNC browser; native keyboard path needs further diagnosis.",
+    "Editor global-hotkey compositor failure event not verified via noVNC.",
+    "Wayland portal/compositor behavior",
+    "Physical GPU and multiple monitors",
+    "Native Windows runtime"
+  ],
+  "historical_broader_ui_report": "linux-native-ui.json",
+  "source_sha256": {
+    "platform/_shared-frontend/src/control.ts": "dc73cd8cf4f82868eed55fc0e8a9852607a68438cf9032a4998aa29199d6f1ff",
+    "platform/_shared-frontend/src/control-panel.html": "e8387bbbd5934d0f352f39ee05b76704f5dfb98ef32d90823de0852b25ee1ce2",
+    "platform/_shared-frontend/src/ipc.ts": "a8f5e47570f430fde4d9ceac6ed8f8616c97a7faabc14ca8a29b39a48b3d4569",
+    "platform/_shared-frontend/src/region-editor.html": "d764530e13578872fc0e5d2277995550f6f4ae7ad7297f40b6764b27db57c9d7",
+    "platform/linux/src-tauri/src/main.rs": "3dab9a571037496e4e54d4edad6b5a81120f46ef1cc23e290be1c76f2a9adf63",
+    "platform/linux/src-tauri/src/overlay/mod.rs": "ae79f16765cf7bb9591b96fe8c04595084c0cd3dbfe3d7205f021daf975357b0",
+    "platform/linux/src-tauri/src/tray.rs": "fac536bc758f0179e622f247e7dc2e9ab621794618aa2935269d4704c16bb4f3",
+    "platform/linux/src-tauri/build.rs": "07242f08334397829be29d1f631bea91c04b330e258fefd099b663d2170b6381",
+    "platform/windows/src-tauri/build.rs": "07242f08334397829be29d1f631bea91c04b330e258fefd099b663d2170b6381",
+    "platform/windows/src-tauri/Cargo.toml": "b31240310a10cae76acab7bc3bbcdcd4641ce97f42edd68c03cc10949b5ff207",
+    "tools/package_windows.py": "1346017d9bb7d41d18c83c99e12d3f602ad3a06b48b2f63cff38572fd21ea611"
+  },
+  "cleanup": {
+    "services_stopped": true,
+    "disposable_vnc_password_removed": true,
+    "active_test_tab_closed": true,
+    "browser_visibility_restored": true,
+    "failed_connection_tab_cleanup": "Browser URL policy rejected operations on generated error page; unmarked temporary tab left for automatic turn cleanup.",
+    "training_job_preserved": true,
+    "temporary_swap_removed": true,
+    "isolated_vm_stopped": true
+  }
+}

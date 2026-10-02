@@ -24,8 +24,12 @@ if your ORT build includes the NMS contrib op and you've disabled the Rust NMS.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import hashlib
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 # Local helper for cross-platform install targets.
@@ -91,6 +95,13 @@ def export(pt_path: Path, *, opset: int, simplify: bool, nms: bool, half: bool, 
         else:
             sys.exit(f"Export reported success but {out_path} doesn't exist.")
     print(f"OK Exported: {out_path}")
+    names = model.names
+    ordered_names = [names[i] for i in range(len(names))] if isinstance(names, dict) else list(names)
+    out_path.with_suffix(".classes.json").write_text(json.dumps({
+        "schema_version": 1,
+        "names": ordered_names,
+        "model_sha256": hashlib.sha256(out_path.read_bytes()).hexdigest(),
+    }, indent=2) + "\n", encoding="utf-8")
     return out_path
 
 
@@ -99,19 +110,38 @@ def _install_one(src: Path, target: Path) -> None:
         print(f"OK Already at {target}")
         return
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        backup = target.with_suffix(".onnx.bak")
-        if backup.exists():
-            backup.unlink()
-        print(f"-> Backing up existing model -> {backup}")
-        shutil.move(str(target), str(backup))
-    print(f"-> Copying {src} -> {target}")
-    shutil.copy2(src, target)
+    metadata = src.with_suffix(".classes.json")
+    target_metadata = target.with_suffix(".classes.json")
+    with tempfile.TemporaryDirectory(prefix=".liveblock-model-", dir=target.parent) as temp:
+        staged = Path(temp) / target.name
+        staged_metadata = Path(temp) / target_metadata.name
+        shutil.copy2(src, staged)
+        if metadata.exists():
+            shutil.copy2(metadata, staged_metadata)
+        if target.exists():
+            staged_backup = Path(temp) / "previous.onnx"
+            shutil.copy2(target, staged_backup)
+            os.replace(staged_backup, target.with_suffix(".onnx.bak"))
+        if target_metadata.exists():
+            staged_backup = Path(temp) / "previous.classes.json"
+            shutil.copy2(target_metadata, staged_backup)
+            os.replace(staged_backup, target_metadata.with_suffix(".json.bak"))
+        # During the two replacements a checksum mismatch fails closed; no
+        # detector can load partial weights or treat stale labels as removals.
+        os.replace(staged, target)
+        if metadata.exists():
+            os.replace(staged_metadata, target_metadata)
+        else:
+            target_metadata.unlink(missing_ok=True)
 
 
 def install_into_repo(onnx: Path) -> None:
     """Install to BOTH the in-repo resources dir and the per-user runtime dir."""
     _install_one(onnx, repo_resources_onnx_target())
+    # One trained export supplies both desktop ports, including when training
+    # on macOS. Previously Mac exports were staged only in models/.
+    for platform in ("windows", "linux"):
+        _install_one(onnx, REPO_ROOT / "platform" / platform / "src-tauri" / "resources" / "yolov8n.onnx")
     _install_one(onnx, runtime_onnx_target())
     print("OK Installed. Windows/Linux: rebuild the Tauri app or relaunch to pick it up.")
 

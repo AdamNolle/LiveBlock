@@ -2,8 +2,7 @@
 
 Rust + Tauri 2 + ashpd (xdg-desktop-portal) + x11rb + wgpu (Vulkan) port of
 the macOS LiveBlock app. The hot path (capture → detection → inpainting →
-overlay) is native Rust; the UI is a Tauri webview that matches the macOS
-Liquid Glass aesthetic.
+overlay) is native Rust; the adaptive desktop UI is shared with the Windows port.
 
 ## Status
 
@@ -11,47 +10,69 @@ Liquid Glass aesthetic.
 now implemented and routed through the shared core:
 
 ```
-capture → detector (ort) → Tracker::update → decide_verdict (SAFE empty-allowlist
-stub) → build_remove_mask_from_tracks → DRM split → inpaint / paint_over → emit
+capture → checksum-bound detector → tracked explicit removal classes
+→ protect-overlap filter → inpaint / opaque cover → render + emit
 ```
 
-- **Capture:** the PipeWire DMA-BUF/shm frame loop (`capture/wayland.rs`) and
+- **Capture:** the mapped PipeWire frame loop (`capture/wayland.rs`) and
   the X11 XShm path (`capture/x11.rs`) are implemented for real (format
   negotiation, stride-honoring copy, YUY2/NV12→BGRA conversion; SysV
   `shmget`/`shmat` + `XShmAttach`/`XShmGetImage`).
 - **Runtime loop:** `runtime.rs` spawns the capture→detect→track→mask→paint
   task on `start_capture` and emits `capture-state-changed` / `patches-updated`
   / `regions-updated`.
-- **DRM:** `region_is_protected_black` routes HDCP black-outs to the capture-free
-  `paint_over_regions` opaque cover instead of smearing them through the blend.
-- **Overlay:** wlr-layer-shell (`LayerExact`), X11 override-redirect
-  (`LayerExact`), and GNOME (`FloatingDegraded`) are implemented.
+- **Protected pixels:** black captured regions receive an opaque cover. This
+  does not recover protected video or prevent a service's capture restrictions.
+- **Cover only:** the control panel can draw opaque manual regions without
+  opening PipeWire, the screenshot portal or XShm capture. It disables automatic
+  detection and screenshots. The same compositor placement limits still apply.
+- **Overlay:** the actual patch renderer is a Tauri window. X11 requires an
+  active alpha compositor and aligns the renderer with the virtual desktop.
+  Blocking stays unavailable when the compositor is missing. If the compositor
+  stops during use, LiveBlock stops blocking and hides both overlays. Restart
+  the compositor and LiveBlock before resuming. All Wayland
+  compositors currently use a floating fallback;
+  native layer-shell helpers are not wired to the patch renderer.
 - **Hotkeys/tray:** ashpd GlobalShortcuts + XGrabKey are installed and the
   receiver loop is wired; an app-indicator tray is registered.
 
-Code paths that touch live Wayland/X11/PipeWire are marked
-`VERIFY-ON-LINUX(linux-port)` — they are coded to the documented crate APIs but
-cannot be exercised on the Windows dev box. The CPU mirror-blend inpaint is the
-only correctness-complete inpaint path; the wgpu/WGSL compute path is written
-but gated behind on-hardware validation (we no longer falsely claim a live GPU
-inpaint — see `inpainting.rs`).
+Linux compilation has been checked on Ubuntu 26.04 ARM64. Five PipeWire
+buffer-decoding regressions cover offsets, wrapped chunks, padding,
+truncated/corrupt data and separate NV12 planes. The actual XShm capture path
+also passes RGB stripe checks on isolated 24-bit and 16-bit Xvfb displays;
+four decoder regressions cover padding, byte order, RGB565, 10-bit channels
+and malformed buffers. An installed release also passes an isolated X11
+Openbox/xcompmgr test for editor transparency, region placement, click-through
+after remapping, live region changes and stop. Blocking stays off without a
+compositor, including after compositor loss during an active cover. The loss,
+retry, restart and panic checks are recorded in
+[`linux-compositor-loss-ui.json`](../../validation/linux-compositor-loss-ui.json);
+The final selected-mode shortcut, panic and compositor-loss checks are in
+[`linux-mode-preference-ui.json`](../../validation/linux-mode-preference-ui.json);
+broader editor checks are in `../../validation/linux-native-ui.json`. These virtual-display
+checks do not validate Wayland portals, physical multi-monitor placement,
+capture self-exclusion or hardware GPU behavior. CPU mirror-blend
+is the active inpaint path; the GPU path still needs hardware validation.
+
+The locally built ARM64 Debian package uses glibc 2.43 from Ubuntu 26.04.
+It is not a portable binary for older distributions; build from source on the
+target distribution for that compatibility baseline.
 
 ### Classifier safety (important)
 
-The bundled detector is generic **COCO** YOLOv8n. To prevent the
-"erases people/cars" failure, the classifier gate in `runtime.rs` uses an
-**EMPTY allowlist**: no COCO class is ever auto-removed. Every track stays
-`Unsure`/`Keep`, so nothing is auto-erased until a real sponsor/team/number
-model is wired. **User-drawn regions still inpaint/paint as before.**
+The installed model is the public AdSERP search-ad starter described in
+[MODEL_CARD.md](../../MODEL_CARD.md). Automatic detection starts disabled.
+Only explicit removable class names authorize removal; unknown or mismatched
+metadata fails closed. Known protect labels suppress overlapping removals.
+Sports candidates are evaluated separately before installation. User-drawn
+regions remain available without a trained model.
 
 ## Distribution-server matrix
 
 | Compositor | Capture | Overlay (fidelity) | Notes |
 |---|---|---|---|
-| Sway / Hyprland / river / wlroots | Portal + PipeWire | wlr-layer-shell (`LayerExact`) | Full feature parity |
-| KDE Plasma (Wayland) | Portal + PipeWire | wlr-layer-shell (`LayerExact`) | KWin supports layer-shell since 5.27 |
-| GNOME / Mutter (Wayland) | Portal + PipeWire | **GNOME mode** (`FloatingDegraded`) | Movable always-on-top window — Mutter refuses wlr-layer-shell |
-| X11 (any) | XComposite + XShm | override-redirect + xfixes (`LayerExact`) | Best feature compatibility, going away |
+| Wayland | Portal + PipeWire | Tauri floating fallback (`FloatingDegraded`) | Selected-monitor alignment and compositor behavior require runtime validation |
+| X11 | XShm, falling back to GetImage | Tauri click-through renderer aligned to root desktop | Placement and self-exclusion require runtime validation |
 
 Picked at runtime from `XDG_SESSION_TYPE` and `XDG_CURRENT_DESKTOP`.
 
@@ -64,7 +85,7 @@ sudo apt install build-essential libwebkit2gtk-4.1-dev libgtk-3-dev \
     libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libwayland-dev \
     libxkbcommon-dev pkg-config wayland-protocols libxcb-shm0-dev \
     libxcb-composite0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-    libpipewire-0.3-dev libonnxruntime-dev libvulkan-dev
+    libpipewire-0.3-dev libvulkan-dev libayatana-appindicator3-dev librsvg2-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo install tauri-cli --version "^2.0"
 ```
@@ -94,14 +115,14 @@ the Windows port. Tauri picks it up via `frontendDist` in
 cd platform/_shared-frontend && npm install
 
 # Build + run the Linux app
-cd ../linux/src-tauri
+cd ../linux
 cargo tauri dev
 ```
 
 Release bundle:
 
 ```bash
-cargo tauri build         # produces .deb, .rpm, .AppImage in src-tauri/target/release/bundle/
+cargo tauri build         # bundles are under platform/linux/target/release/bundle/
 ```
 
 ## Hotkeys
@@ -146,18 +167,26 @@ Schema is byte-compatible with macOS + Windows so labels round-trip.
 cargo tauri build --features cuda
 ```
 
-The first run downloads `libonnxruntime.so` automatically (ort `load-dynamic`).
+Before packaging, install the matching CPU runtime from the repository root:
+
+```bash
+python3 tools/setup_onnx_runtime.py --platform linux --arch x64
+```
+
+Use `--arch aarch64` for ARM64. The installer verifies the official archive,
+preserves license notices and bundles ONNX Runtime 1.24.4. The app does not
+download missing runtime libraries; automatic detection becomes unavailable.
+Compatible GPU libraries may be supplied explicitly through `ORT_DYLIB_PATH`.
 
 ## Known limitations
 
-- **GNOME mode is not click-through.** Mutter does not implement
-  `wlr-layer-shell`, so the overlay is a normal always-on-top window. Move
-  it out of the way when not editing.
+- **Wayland uses a floating fallback.** Exact fullscreen placement is not
+  guaranteed. Capture refuses to start if click-through setup reports failure.
 - **DRM-protected windows on Wayland** may return black frames depending on
   the compositor's portal implementation.
 - **Anti-cheat tooling** in some games will treat any overlay as suspicious.
-- **The bundled detection model is generic YOLOv8n on COCO** — it doesn't
-  detect ads. Train your own with `tools/auto.sh` (root of repo).
+- **The bundled model covers search-ad layouts.** It is not proof of reliable
+  moving-sponsor detection. See the model card for measured deployment results.
 - **Flatpak distribution requires portal-only operation.** The X11 path
   won't work inside a Flatpak sandbox; document this in the Flathub listing.
 
@@ -174,12 +203,11 @@ flatpak run com.adamnolle.LiveBlock
 
 ## Top 3 things to verify on real Linux
 
-1. **PipeWire SPA pod negotiation** — BGRA8888 is preferred, but some
-   compositors only offer YUY2 / NV12. `src-tauri/src/capture/wayland.rs`
-   needs format-specific conversion paths.
-2. **Wayland layer-shell click-through with wgpu surface** — the empty
-   input region must be re-applied after every `wl_surface::commit` and
-   resize. KWin in particular re-asserts the input region on commit.
+1. **PipeWire negotiation and colorimetry** — mapped RGB and YUY2/NV12 paths
+   exist; negotiated YUV range/matrix and unmappable DMA-BUF behavior need a
+   live compositor check.
+2. **Overlay alignment and capture self-exclusion** — confirm click-through,
+   selected-monitor alignment and absence of feedback from the app's renderer.
 3. **ort EP shared-library discovery in Flatpak** — `libonnxruntime_providers_*.so`
    must be reachable inside the sandbox. The default `cpu` feature avoids
    this; CUDA/ROCm/OpenVINO need explicit `--filesystem` permissions.

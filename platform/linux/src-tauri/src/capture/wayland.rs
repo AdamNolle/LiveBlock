@@ -16,15 +16,15 @@
 //! live entirely on the worker thread. The async side only ever sees finished
 //! `FrameView`s through the channel — no PipeWire types cross the boundary.
 //!
-//! VERIFY-ON-LINUX(linux-port): the pipewire-rs SPA pod construction and the
-//! buffer plane layout are coded to the documented 0.8 API but cannot be
-//! exercised on this Windows dev box. The negotiation list, stride handling and
-//! YUY2/NV12 → BGRA conversion are the parts most worth re-checking against a
-//! live compositor.
+//! The adapter compiles on Linux and chunk layout/conversion has regression
+//! coverage. Portal negotiation and compositor colorimetry still require a
+//! live Wayland session; a headless compile does not establish those behaviors.
 
+use super::pixels::{self, Plane, SourceFourcc};
 use super::{CaptureSource, FrameView};
 use anyhow::{anyhow, Context, Result};
-use ashpd::desktop::screencast::{CursorMode, PersistMode, Screencast, SourceType};
+use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
+use ashpd::{desktop::PersistMode, WindowIdentifier};
 use crossbeam_channel::{Receiver, Sender};
 use std::sync::Arc;
 
@@ -42,6 +42,7 @@ pub struct WaylandCapture {
     _stop_tx: Sender<()>,
     /// Worker thread join handle (joined on `stop`).
     worker: Option<std::thread::JoinHandle<()>>,
+    portal_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     /// Last good frame — returned if the channel momentarily has nothing (so
     /// the detection loop sees steady frames rather than 0x0 gaps).
     last: Option<FrameView>,
@@ -69,7 +70,7 @@ impl WaylandCapture {
             .context("select_sources")?;
 
         let response = proxy
-            .start(&session, None)
+            .start(&session, &WindowIdentifier::default())
             .await
             .context("start")?
             .response()
@@ -91,19 +92,16 @@ impl WaylandCapture {
             .await
             .context("open_pipe_wire_remote")?;
 
-        // Hand the owned fd to the PipeWire worker thread. The portal session is
-        // held alive by `proxy`/`session` being moved into the worker closure's
-        // outer scope via the leaked guard below.
         let (tx, rx) = crossbeam_channel::bounded::<FrameMsg>(2);
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
-
-        // Keep the portal session alive for the lifetime of the stream. ashpd
-        // releases the session on drop, which would tear down the PipeWire node,
-        // so we leak it intentionally (process-lifetime). It is reclaimed when
-        // the app exits. Holding it in the struct would force `Self: !Send`
-        // because the proxy isn't `Send` across the worker boundary cleanly.
-        std::mem::forget(session);
-        std::mem::forget(proxy);
+        let (portal_shutdown, shutdown) = tokio::sync::oneshot::channel::<()>();
+        // Retain the grant while capture exists, then close the portal session
+        // even when the async capture task is aborted instead of stopped.
+        tokio::spawn(async move {
+            let _ = shutdown.await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.close()).await;
+            drop(proxy);
+        });
 
         let worker = std::thread::Builder::new()
             .name("pipewire-capture".into())
@@ -119,6 +117,7 @@ impl WaylandCapture {
             rx,
             _stop_tx: stop_tx,
             worker: Some(worker),
+            portal_shutdown: Some(portal_shutdown),
             last: None,
         })
     }
@@ -137,7 +136,7 @@ impl CaptureSource for WaylandCapture {
                 Ok(f) => latest = Some(f),
                 Err(crossbeam_channel::TryRecvError::Empty) => break,
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    if latest.is_none() && self.last.is_none() {
+                    if latest.is_none() {
                         return Err(anyhow!("pipewire worker disconnected"));
                     }
                     break;
@@ -179,9 +178,21 @@ impl CaptureSource for WaylandCapture {
         // Dropping the stop channel sender signals the worker; joining ensures
         // the PipeWire main loop is fully torn down before we return.
         let _ = self._stop_tx.try_send(());
+        if let Some(shutdown) = self.portal_shutdown.take() {
+            let _ = shutdown.send(());
+        }
         if let Some(h) = self.worker.take() {
             // The worker watches the stop channel inside its main-loop timer.
             let _ = h.join();
+        }
+    }
+}
+
+impl Drop for WaylandCapture {
+    fn drop(&mut self) {
+        let _ = self._stop_tx.try_send(());
+        if let Some(shutdown) = self.portal_shutdown.take() {
+            let _ = shutdown.send(());
         }
     }
 }
@@ -216,7 +227,10 @@ fn run_pipewire_loop(
     // we use to check for shutdown cooperatively.
     let main_for_timer = mainloop.clone();
     let timer = mainloop.loop_().add_timer(move |_| {
-        if stop_rx.try_recv().is_ok() {
+        if matches!(
+            stop_rx.try_recv(),
+            Ok(()) | Err(crossbeam_channel::TryRecvError::Disconnected)
+        ) {
             main_for_timer.quit();
         }
     });
@@ -284,7 +298,7 @@ fn run_pipewire_loop(
             if datas.is_empty() {
                 return;
             }
-            if let Some(frame) = decode_buffer(&mut datas[0], vf) {
+            if let Some(frame) = decode_buffer(datas, vf) {
                 // Drop the frame if the consumer is behind (bounded channel) —
                 // we want the freshest frame, never a backlog.
                 let _ = tx_for_process.try_send(frame);
@@ -330,16 +344,6 @@ struct VideoFormat {
     width: u32,
     height: u32,
     fourcc: SourceFourcc,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SourceFourcc {
-    Bgrx,
-    Bgra,
-    Rgbx,
-    Rgba,
-    Yuy2,
-    Nv12,
 }
 
 /// The video formats we advertise to the compositor, most-preferred first.
@@ -393,10 +397,7 @@ fn build_format_params() -> pipewire::spa::pod::Object {
                     spa::utils::ChoiceFlags::empty(),
                     spa::utils::ChoiceEnum::Enum {
                         default: spa::utils::Id(formats[0].as_raw()),
-                        alternatives: formats
-                            .iter()
-                            .map(|f| spa::utils::Id(f.as_raw()))
-                            .collect(),
+                        alternatives: formats.iter().map(|f| spa::utils::Id(f.as_raw())).collect(),
                     },
                 ))),
             },
@@ -472,147 +473,31 @@ fn map_spa_format(f: pipewire::spa::param::video::VideoFormat) -> Option<SourceF
     })
 }
 
-/// Copy/convert one PipeWire buffer plane into a packed BGRA `FrameView`,
-/// honoring the source row stride (PipeWire planes are frequently padded).
-fn decode_buffer(
-    data: &mut pipewire::buffer::Data,
-    vf: VideoFormat,
-) -> Option<FrameView> {
-    let w = vf.width as usize;
-    let h = vf.height as usize;
-    if w == 0 || h == 0 {
-        return None;
+/// Decode each valid SPA chunk, including independently padded NV12 planes.
+fn decode_buffer(datas: &mut [pipewire::spa::buffer::Data], vf: VideoFormat) -> Option<FrameView> {
+    let count = if vf.fourcc == SourceFourcc::Nv12 && datas.len() >= 2 {
+        2
+    } else {
+        1
+    };
+    let mut planes = Vec::with_capacity(count);
+    for data in datas.iter_mut().take(count) {
+        let chunk = data.chunk();
+        let (offset, size, stride, corrupted) = (
+            chunk.offset(),
+            chunk.size(),
+            chunk.stride(),
+            chunk
+                .flags()
+                .contains(pipewire::spa::buffer::ChunkFlags::CORRUPTED),
+        );
+        planes.push(Plane::new(data.data()?, offset, size, stride, corrupted)?);
     }
-    // Read the chunk stride into a plain value first so the immutable borrow of
-    // `data` ends before we take the mutable `data.data()` slice.
-    let stride = data.chunk().stride().max(0) as usize;
-    let src = data.data()?;
-    if src.is_empty() {
-        return None;
-    }
-
-    let mut out = vec![0u8; w * h * 4];
-
-    // `src` is `&mut [u8]`; the conversion helpers take `&[u8]` (reborrowed).
-    let src: &[u8] = src;
-    match vf.fourcc {
-        SourceFourcc::Bgrx | SourceFourcc::Bgra => {
-            let row_stride = if stride >= w * 4 { stride } else { w * 4 };
-            copy_packed_4(src, &mut out, w, h, row_stride, false, true);
-        }
-        SourceFourcc::Rgbx | SourceFourcc::Rgba => {
-            let row_stride = if stride >= w * 4 { stride } else { w * 4 };
-            // RGBA → BGRA: swap R/B per pixel.
-            copy_packed_4(src, &mut out, w, h, row_stride, true, true);
-        }
-        SourceFourcc::Yuy2 => {
-            let row_stride = if stride >= w * 2 { stride } else { w * 2 };
-            yuy2_to_bgra(src, &mut out, w, h, row_stride);
-        }
-        SourceFourcc::Nv12 => {
-            // NV12: Y plane (w*h) then interleaved CbCr plane (w*h/2). Stride
-            // applies to the Y plane; chroma stride matches by convention.
-            let y_stride = if stride >= w { stride } else { w };
-            nv12_to_bgra(src, &mut out, w, h, y_stride);
-        }
-    }
-
+    let decoded = pixels::decode(vf.fourcc, vf.width, vf.height, &planes)?;
     Some(FrameView {
-        pixels: Arc::from(out.into_boxed_slice()),
+        pixels: Arc::from(decoded.into_boxed_slice()),
         width: vf.width,
         height: vf.height,
-        stride: (w * 4) as u32,
+        stride: vf.width.checked_mul(4)?,
     })
-}
-
-/// Copy a 4-byte-per-pixel source into a packed BGRA destination. `swap_rb`
-/// swaps channels 0/2 (RGBA→BGRA). `force_opaque` writes alpha=255 (for the
-/// x-variants whose 4th byte is undefined).
-fn copy_packed_4(
-    src: &[u8],
-    dst: &mut [u8],
-    w: usize,
-    h: usize,
-    src_stride: usize,
-    swap_rb: bool,
-    force_opaque: bool,
-) {
-    for y in 0..h {
-        let s_row = y * src_stride;
-        let d_row = y * w * 4;
-        if s_row + w * 4 > src.len() {
-            break;
-        }
-        for x in 0..w {
-            let s = s_row + x * 4;
-            let d = d_row + x * 4;
-            let (b, g, r) = if swap_rb {
-                (src[s + 2], src[s + 1], src[s])
-            } else {
-                (src[s], src[s + 1], src[s + 2])
-            };
-            dst[d] = b;
-            dst[d + 1] = g;
-            dst[d + 2] = r;
-            dst[d + 3] = if force_opaque { 255 } else { src[s + 3] };
-        }
-    }
-}
-
-/// YUY2 (a.k.a. YUYV): 4 bytes encode 2 pixels = Y0 U Y1 V. BT.601 limited.
-fn yuy2_to_bgra(src: &[u8], dst: &mut [u8], w: usize, h: usize, src_stride: usize) {
-    for y in 0..h {
-        let s_row = y * src_stride;
-        let d_row = y * w * 4;
-        if s_row + (w / 2) * 4 > src.len() {
-            break;
-        }
-        let mut x = 0;
-        while x + 1 < w {
-            let s = s_row + (x / 2) * 4;
-            let y0 = src[s] as f32;
-            let u = src[s + 1] as f32 - 128.0;
-            let y1 = src[s + 2] as f32;
-            let v = src[s + 3] as f32 - 128.0;
-            write_yuv_bgra(dst, d_row + x * 4, y0, u, v);
-            write_yuv_bgra(dst, d_row + (x + 1) * 4, y1, u, v);
-            x += 2;
-        }
-    }
-}
-
-/// NV12: full-res Y plane, then half-res interleaved CbCr plane. BT.601.
-fn nv12_to_bgra(src: &[u8], dst: &mut [u8], w: usize, h: usize, y_stride: usize) {
-    let y_plane_len = y_stride * h;
-    let c_stride = y_stride; // CbCr interleaved → same byte stride as Y
-    for y in 0..h {
-        let y_row = y * y_stride;
-        let c_row = y_plane_len + (y / 2) * c_stride;
-        let d_row = y * w * 4;
-        if c_row + (w & !1) > src.len() {
-            break;
-        }
-        for x in 0..w {
-            let yv = src[y_row + x] as f32;
-            let ci = c_row + (x & !1);
-            let u = src[ci] as f32 - 128.0;
-            let v = src[ci + 1] as f32 - 128.0;
-            write_yuv_bgra(dst, d_row + x * 4, yv, u, v);
-        }
-    }
-}
-
-#[inline]
-fn write_yuv_bgra(dst: &mut [u8], off: usize, yv: f32, u: f32, v: f32) {
-    if off + 4 > dst.len() {
-        return;
-    }
-    // BT.601 full-range-ish; good enough for ad detection + cover.
-    let r = (yv + 1.402 * v).clamp(0.0, 255.0) as u8;
-    let g = (yv - 0.344136 * u - 0.714136 * v).clamp(0.0, 255.0) as u8;
-    let b = (yv + 1.772 * u).clamp(0.0, 255.0) as u8;
-    dst[off] = b;
-    dst[off + 1] = g;
-    dst[off + 2] = r;
-    dst[off + 3] = 255;
 }

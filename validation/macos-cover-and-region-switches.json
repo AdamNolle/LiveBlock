@@ -1,0 +1,45 @@
+{
+  "date": "2026-10-01",
+  "app_path": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock.app",
+  "executable_sha256": "bc3bd3800c59e4470e9d1eac474776519de031ed77aad96d77683d1819bbe7bc",
+  "mac_tests": {
+    "passed": 15,
+    "failed": 0
+  },
+  "cover_only": {
+    "observed_cover_counts": [
+      1,
+      0,
+      1
+    ],
+    "saved_region_count_during_disable": 1,
+    "capture_button_disabled": true,
+    "mode_description": "Opaque covers through startCover; no SCStream created by that path"
+  },
+  "screen_capture": {
+    "observed_patch_counts": [
+      1,
+      0,
+      1
+    ],
+    "steady_fps_observed": [
+      47,
+      49
+    ],
+    "saved_region_count_during_disable": 1,
+    "permission_grant_survived_signed_rebuild": true
+  },
+  "startup_recovery": {
+    "starting_banner_observed": true,
+    "timeout_error_observed": true,
+    "retry_action_available": true
+  },
+  "settings_navigation": "Manage Regions opens Region library; region name remains on one line at normal window size",
+  "stop_all": "Idle",
+  "test_region_removed": "D25CD934-B6DD-4527-B37D-9BB163FBDF6C",
+  "remaining_region_count": 0,
+  "screenshots_saved": 0,
+  "cover_preference_restored": true,
+  "limits": "One-display manual-region test. No DRM recovery or undetectability guarantee; no native Windows or Linux compositor runtime test.",
+  "cover_preference_after_test": false
+}

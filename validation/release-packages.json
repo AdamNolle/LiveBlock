@@ -1,0 +1,84 @@
+{
+  "date": "2026-10-01",
+  "artifacts": {
+    "macos_signed": {
+      "path": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock-signed.zip",
+      "sha256": "91ceccbdcac999e7f59c3018d4018f2bd715fcdd9a5f408797ae89f1ee19c445",
+      "bytes": 11232045
+    },
+    "windows_x64_portable": {
+      "path": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock-windows-x64-portable.zip",
+      "sha256": "598619181ed3238c17e00b240522ffc6facefb7ccc2c0346ad68ac6f049f3e45",
+      "bytes": 19265265
+    },
+    "linux_arm64_deb": {
+      "path": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock-linux-arm64.deb",
+      "sha256": "0eacf064b178e20b8c208ad4a494d13b46a1b6ee9d7ba03856adcb6c8c3226fe",
+      "bytes": 24283908
+    }
+  },
+  "macos": {
+    "architectures": [
+      "arm64",
+      "x86_64"
+    ],
+    "developer_id_signed": true,
+    "notarized": false,
+    "tests_passed": 17,
+    "native_manual_cover_and_capture_report": "macos-cover-and-region-switches.json",
+    "native_runtime_verified_architectures": [
+      "arm64"
+    ],
+    "release_refresh": "App confidence calculation corrected; bundled CoreML NMS re-exported at IoU 0.45 and compiled release model evaluated on 573 holdout images.",
+    "current_executable_sha256": "05a8d1ed60c10a744beb557c8e0d6f101e33baf6924b5b25db4f6ab1b1ce9783",
+    "confidence_fix_report": "macos-confidence-fix.json",
+    "current_compiled_model_holdout": "adserp-v1-nms45/macos-release-evaluation.json"
+  },
+  "windows": {
+    "architecture": "x86_64",
+    "cross_built": true,
+    "code_signed": false,
+    "native_runtime_verified": false,
+    "frontend_staleness_guard_passed": true,
+    "dependencies": [
+      "WebView2 Runtime",
+      "Microsoft Visual C++ x64 v14 runtime"
+    ],
+    "current_executable_sha256": "ef6f78573e8cd05839bf3782019f63f38cd10767b6419856c5b64df827b44334",
+    "event_editor_fix_report": "windows-event-ui-build.json",
+    "packaged_file_hashes_verified": 11,
+    "embedded_ui_asset_keys_verified": 17,
+    "embedded_ui_release_report": "windows-embedded-ui-release.json",
+    "release_feature": "custom-protocol",
+    "panic_editor_fix_report": "windows-panic-editor-build.json",
+    "mode_preference_fix_report": "windows-mode-preference-build.json"
+  },
+  "linux": {
+    "architecture": "arm64",
+    "build_host": "Ubuntu 26.04 ARM64 VM",
+    "glibc_required": "2.43",
+    "native_compilation_verified": true,
+    "native_compositor_runtime_verified": true,
+    "pixel_decoder_regressions_passed": 5,
+    "native_startup_smoke_test_passed": true,
+    "native_startup_report": "linux-mode-preference-ui.json",
+    "x11_capture_report": "linux-x11-capture.json",
+    "x11_pixel_decoder_regressions_passed": 4,
+    "documentation_refresh_only": false,
+    "packaged_model_card_sha256": "e68a3ceba33978178541014a7bc4fa6d4d54a13a80b36d42e6bd67c6aec27755",
+    "native_compositor_runtime_scope": "Isolated X11 Openbox/xcompmgr software-rendered display",
+    "current_executable_sha256": "64df24b6eb0d2ac44ba4a0e5e8ecb031c194710adad5db3d73a5777da3cad8dc",
+    "native_ui_report": "linux-mode-preference-ui.json",
+    "historical_startup_report": "linux-native-startup.json",
+    "historical_startup_executable_sha256": "9a87b00820c026a99d601dc60615522ec796a8b92f5be75dc8d78257d765eaf4",
+    "historical_broader_ui_report": "linux-native-ui.json",
+    "historical_persistent_error_report": "linux-persistent-error-ui.json",
+    "compositor_loss_fix_report": "linux-compositor-loss-ui.json",
+    "mode_preference_fix_report": "linux-mode-preference-ui.json"
+  },
+  "installed_model": "AdSERP starter; CoreML re-exported with NMS IoU 0.45. Combined-v2 rejected; combined-v3-small training separately.",
+  "notarization_blocker": "No saved LiveBlock notarytool profile; local Apple credential setup required. See NOTARIZATION.md.",
+  "notarization_last_checked_utc": "2026-10-02T01:20:26.054754+00:00",
+  "notarization_profile_present": false,
+  "notarization_last_error": "notarytool history LiveBlock exit 69: No Keychain password item found"
+}

@@ -1,0 +1,13 @@
+[package]
+name = "liveblock-validate-x11-capture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+libc = "0.2"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+tracing = "0.1"
+x11rb = { version = "0.13", features = ["composite", "shm"] }

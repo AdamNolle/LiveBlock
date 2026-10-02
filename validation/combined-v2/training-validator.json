@@ -1,0 +1,10 @@
+{
+  "checkpoint": "/Users/adamnolle/Desktop/Code/LiveBlock/tools/runs/combined-v2/weights/best.pt",
+  "dataset": "/Users/adamnolle/Desktop/Code/LiveBlock/tools/datasets/combined/yolo/data.yaml",
+  "split": "test",
+  "precision": 0.793922572621494,
+  "recall": 0.6951274896959684,
+  "mAP50": 0.765938087507425,
+  "mAP50_95": 0.5693039003342623,
+  "scope": "Only classes and visual domains represented in the labeled dataset."
+}

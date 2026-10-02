@@ -8,4 +8,6 @@ description = "YOLO post-processing utilities (NMS, score filter, coord conversi
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
 thiserror = { workspace = true }

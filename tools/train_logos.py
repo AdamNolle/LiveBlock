@@ -16,6 +16,7 @@ With `--install`, drops it into Sources/yolov8n.mlpackage (with a .bak).
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -59,9 +60,11 @@ def train(args) -> Path:
         device=device,
         project=str(REPO_ROOT / "tools" / "runs"),
         name=args.run_name,
-        exist_ok=True,
+        exist_ok=False,
         patience=args.patience,
         plots=True,
+        **({"fliplr": 0.0, "mosaic": 0.0, "hsv_h": 0.0, "hsv_s": 0.0,
+            "hsv_v": 0.0, "translate": 0.05, "scale": 0.15} if args.screen_ads else {}),
     )
 
     save_dir = Path(results.save_dir) if hasattr(results, "save_dir") else None
@@ -75,6 +78,26 @@ def train(args) -> Path:
         sys.exit(f"No checkpoint found in {save_dir / 'weights'}.")
     print(f"✓ Best checkpoint: {best}")
     return best
+
+
+def evaluate(best: Path, args) -> dict:
+    """Record independent holdout results when the dataset provides a test split."""
+    import yaml
+    from ultralytics import YOLO
+    data = yaml.safe_load(Path(args.data).read_text())
+    split = "test" if data.get("test") else "val"
+    metrics = YOLO(str(best)).val(data=str(Path(args.data).resolve()), split=split,
+                                 imgsz=args.imgsz, batch=args.batch,
+                                 device=detect_device(args.device), plots=True,
+                                 project=str(best.parent.parent), name="evaluation")
+    report = {"checkpoint": str(best), "dataset": str(Path(args.data).resolve()),
+              "split": split, "precision": float(metrics.box.mp),
+              "recall": float(metrics.box.mr), "mAP50": float(metrics.box.map50),
+              "mAP50_95": float(metrics.box.map),
+              "scope": "Only classes and visual domains represented in the labeled dataset."}
+    (best.parent.parent / "evaluation.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    return report
 
 
 def main() -> int:
@@ -93,11 +116,17 @@ def main() -> int:
                         help="Early-stopping patience (0 disables)")
     parser.add_argument("--install", action="store_true",
                         help="After export, install into Sources/yolov8n.mlpackage")
+    parser.add_argument("--screen-ads", action="store_true", help="Keep screenshot text upright and disable mosaic/color augmentation")
+    parser.add_argument("--min-precision", type=float, default=0.9, help="Minimum measured precision before --install")
+    parser.add_argument("--min-recall", type=float, default=0.8, help="Minimum measured recall before --install")
     parser.add_argument("--no-int8", dest="int8", action="store_false", default=True)
     parser.add_argument("--no-nms", dest="nms", action="store_false", default=True)
     args = parser.parse_args()
 
     best_pt = train(args)
+    report = evaluate(best_pt, args)
+    if args.install and (report["precision"] < args.min_precision or report["recall"] < args.min_recall):
+        sys.exit("Candidate failed installation thresholds; checkpoint and evaluation were retained.")
 
     # Hand off to the exporter(s). One training run feeds every platform:
     #   - macOS: CoreML .mlpackage (for Vision/CoreML) + ONNX (portability)
@@ -113,14 +142,12 @@ def main() -> int:
         )
 
         mlpackage = export_coreml(best_pt, int8=args.int8, nms=args.nms)
-        if args.install:
-            install_coreml(mlpackage)
-
         # ORT's NMS op isn't always available; the Rust detector does its own NMS.
         from export_onnx import export as export_onnx, install_into_repo as install_onnx  # type: ignore
 
         onnx = export_onnx(best_pt, opset=12, simplify=True, nms=False, half=False, dynamic=False)
         if args.install:
+            install_coreml(mlpackage)
             install_onnx(onnx)
     else:
         print()

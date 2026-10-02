@@ -1,0 +1,6 @@
+{
+  "path": "tools/runs/combined-v2-nms45/weights/best.mlpackage",
+  "pipeline_iou_thresholds": [
+    0.45
+  ]
+}

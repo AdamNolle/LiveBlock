@@ -11,7 +11,7 @@ echo "→ apt install build deps…"
 sudo apt update
 sudo apt install -y \
     build-essential pkg-config curl \
-    libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+    libwebkit2gtk-4.1-dev libgtk-3-dev libgtk-layer-shell-dev libsoup-3.0-dev \
     libjavascriptcoregtk-4.1-dev \
     libwayland-dev libxkbcommon-dev wayland-protocols \
     libxcb-shm0-dev libxcb-composite0-dev libxcb-shape0-dev libxcb-xfixes0-dev \

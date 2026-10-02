@@ -1,0 +1,103 @@
+{
+  "deployment": "macOS Vision/CoreML",
+  "prediction_best_label_iou_bins": {
+    "edges": [
+      0,
+      0.2,
+      0.4,
+      0.6,
+      0.8,
+      1
+    ],
+    "counts": [
+      541,
+      157,
+      268,
+      583,
+      643
+    ]
+  },
+  "hardest_frames": [
+    {
+      "image": "exposure-12866_000076",
+      "labels": 85,
+      "predictions": 21,
+      "tp": 12,
+      "fp": 9,
+      "fn": 73
+    },
+    {
+      "image": "exposure-12866_000040",
+      "labels": 57,
+      "predictions": 65,
+      "tp": 33,
+      "fp": 32,
+      "fn": 24
+    },
+    {
+      "image": "exposure-12866_000032",
+      "labels": 54,
+      "predictions": 60,
+      "tp": 30,
+      "fp": 30,
+      "fn": 24
+    },
+    {
+      "image": "exposure-12093_100018",
+      "labels": 41,
+      "predictions": 33,
+      "tp": 14,
+      "fp": 19,
+      "fn": 27
+    },
+    {
+      "image": "exposure-12866_000013",
+      "labels": 52,
+      "predictions": 67,
+      "tp": 37,
+      "fp": 30,
+      "fn": 15
+    },
+    {
+      "image": "exposure-12375_000028",
+      "labels": 42,
+      "predictions": 39,
+      "tp": 19,
+      "fp": 20,
+      "fn": 23
+    },
+    {
+      "image": "exposure-12866_001106",
+      "labels": 55,
+      "predictions": 56,
+      "tp": 34,
+      "fp": 22,
+      "fn": 21
+    },
+    {
+      "image": "exposure-12866_000028",
+      "labels": 41,
+      "predictions": 37,
+      "tp": 18,
+      "fp": 19,
+      "fn": 23
+    },
+    {
+      "image": "exposure-12093_100022",
+      "labels": 50,
+      "predictions": 33,
+      "tp": 22,
+      "fp": 11,
+      "fn": 28
+    },
+    {
+      "image": "exposure-12093_100026",
+      "labels": 43,
+      "predictions": 40,
+      "tp": 23,
+      "fp": 17,
+      "fn": 20
+    }
+  ],
+  "interpretation": "Many predictions have poor overlap and crowded frames have many misses. This does not distinguish annotation omissions from true false positives without manual review."
+}

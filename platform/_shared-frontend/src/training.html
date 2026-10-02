@@ -2,14 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="utf-8"/>
-    <title>LiveBlocker — Training</title>
+    <title>LiveBlock — Training</title>
     <link rel="stylesheet" href="./tokens.css"/>
     <link rel="stylesheet" href="./primitives.css"/>
     <style>
       .layout { display: flex; flex-direction: column; height: 100vh; }
       .head {
         padding: 14px 20px;
-        background: linear-gradient(180deg,#cdcce8,#b9b8d8);
+        background: var(--lb-surface);
         border-bottom: 1px solid rgba(0,0,0,0.07);
       }
       .body { flex: 1; padding: 20px; overflow: auto; display: flex; flex-direction: column; gap: 16px; }
@@ -42,14 +42,23 @@
         </div>
 
         <div class="train-card lb-raised">
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+            <label>Epochs <input id="epochs" type="number" min="1" max="1000" value="50" style="width:65px"></label>
+            <label>Batch <input id="batch" type="number" min="1" max="128" value="8" style="width:55px"></label>
+            <label>Image size <input id="imgsz" type="number" min="320" max="2048" step="32" value="640" style="width:75px"></label>
+          </div>
+          <label style="display:block;font-size:12px;margin-bottom:16px">Dataset configuration · optional
+            <input id="dataset" type="text" placeholder="Leave empty to use your labeled screenshots" style="display:block;width:100%;margin-top:6px;padding:8px;border:1px solid var(--lb-border);border-radius:8px">
+          </label>
           <div class="stage">
             <div>
               <div class="lb-uppercase">Training</div>
-              <div style="font:600 14px var(--lb-font-ui);margin-top:2px">Idle</div>
+              <div style="font:600 14px var(--lb-font-ui);margin-top:2px" id="trainingState">Idle</div>
             </div>
             <div class="actions">
-              <button class="lb-pill lb-train" id="trainBtn">▶ Train Now</button>
-              <button class="lb-pill" id="labelBtn">✎ Label more</button>
+              <button class="lb-pill lb-train" id="trainBtn">Train detector</button>
+              <button class="lb-pill" id="labelBtn">Label more</button>
+              <button class="lb-pill" id="cancelBtn" disabled>Cancel</button>
             </div>
           </div>
         </div>
@@ -57,17 +66,6 @@
         <div class="log lb-inset"><pre id="logTail">Logs will appear here while training runs.</pre></div>
       </div>
     </div>
-    <script type="module">
-      import { wordmark } from "./primitives.ts";
-      import { lb } from "./ipc.ts";
-
-      document.getElementById("brand").appendChild(wordmark(14));
-
-      document.getElementById("labelBtn").addEventListener("click", () => lb.showWindow("labeling"));
-      document.getElementById("trainBtn").addEventListener("click", () => {
-        const tail = document.getElementById("logTail");
-        tail.textContent += "\nTraining queue is platform-side — check the README for the auto.sh / auto.ps1 invocation.";
-      });
-    </script>
+    <script type="module" src="./training.ts"></script>
   </body>
 </html>

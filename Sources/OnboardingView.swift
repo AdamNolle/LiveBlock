@@ -37,12 +37,12 @@ struct OnboardingView: View {
             Spacer().frame(height: 18)
             LiveBlockerLogo(size: 120, cornerRadius: 28)
                 .padding(.bottom, 8)
-            Text("Block what your\nscreen shouldn't show.")
+            Text("A calmer screen.\nOne region at a time.")
                 .font(Theme.display(size: 32, weight: .bold))
                 .foregroundStyle(Color.primary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(2)
-            Text("LiveBlock reads display frames with ScreenCaptureKit and replaces marked regions with edge-extrapolated fill — before they hit your eyes.")
+            Text("Mark the areas you want to hide. LiveBlock covers them with a local, click-through overlay while you keep using your apps.")
                 .font(Theme.ui(size: 13))
                 .foregroundStyle(Color.secondary)
                 .multilineTextAlignment(.center)
@@ -71,13 +71,13 @@ struct OnboardingView: View {
                           system: "cpu", color: Theme.success)
             permissionRow(kind: .accessibility,
                           name: "Accessibility (optional)",
-                          detail: "Lets blocks snap to UI elements",
+                          detail: "Enables keyboard shortcuts across apps",
                           system: "shield", color: Theme.detect)
 
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "lock.shield")
                     .foregroundStyle(Theme.detect)
-                Text("Frames are processed in a sandboxed Metal pipeline and discarded after compositing. No screenshots, no telemetry of pixel content, ever.")
+                Text("Frames stay on your Mac. Screenshots are saved locally only when you choose Capture for labeling. Protected video cannot be read by the detector.")
                     .font(Theme.ui(size: 11))
                     .foregroundStyle(Color.secondary)
             }

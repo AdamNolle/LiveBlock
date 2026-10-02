@@ -8,6 +8,7 @@ struct LabelingView: View {
     @State private var dragStart: CGPoint? = nil
     @State private var currentDragRect: CGRect? = nil
     @State private var hoveredBoxID: UUID? = nil
+    @State private var labelClass: LabelClass = .ad
 
     var body: some View {
         ZStack {
@@ -52,6 +53,12 @@ struct LabelingView: View {
                 }
             }
             Spacer()
+
+            Picker("Draw", selection: $labelClass) {
+                ForEach(LabelClass.allCases) { item in Text(item.title).tag(item) }
+            }
+            .frame(width: 170)
+            .help("Class for newly drawn boxes. Keep labels protect content from removal.")
 
             if !labeling.currentSuggestions.isEmpty {
                 Button {
@@ -225,6 +232,12 @@ struct LabelingView: View {
                                         style: StrokeStyle(lineWidth: 2))
                                 .background(Color.green.opacity(isHovered ? 0.18 : 0.08))
                                 .contentShape(Rectangle())
+                                .overlay(alignment: .bottomLeading) {
+                                    Text(box.labelClass.title)
+                                        .font(.caption2.weight(.semibold))
+                                        .padding(3)
+                                        .background(.regularMaterial)
+                                }
                             Button {
                                 labeling.removeBox(id: box.id)
                             } label: {
@@ -402,7 +415,7 @@ struct LabelingView: View {
                 let localY = (r.minY - layout.origin.y) / layout.size.height
                 let localW = r.width / layout.size.width
                 let localH = r.height / layout.size.height
-                let box = LabelBox(x: localX, y: localY, width: localW, height: localH)
+                let box = LabelBox(x: localX, y: localY, width: localW, height: localH, labelClass: labelClass)
                 labeling.addBox(box)
             }
     }

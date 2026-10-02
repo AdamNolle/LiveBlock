@@ -14,7 +14,7 @@ use tauri::{
 pub fn install(app: &AppHandle) -> Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Control Panel", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle-capture", "Toggle Capture", true, None::<&str>)?;
-    let paintover = MenuItem::with_id(app, "paint-over", "Cover Regions (DRM-safe, no capture)", true, None::<&str>)?;
+    let paintover = MenuItem::with_id(app, "paint-over", "Cover Regions (no capture)", true, None::<&str>)?;
     let panic = MenuItem::with_id(app, "panic-disable", "Panic Disable (stop covering)", true, None::<&str>)?;
     let editor = MenuItem::with_id(app, "open-editor", "Open Region Editor", true, None::<&str>)?;
     let labeling = MenuItem::with_id(app, "open-labeling", "Open Labeling", true, None::<&str>)?;

@@ -26,13 +26,14 @@ use parking_lot::Mutex;
 use std::time::Duration;
 
 use liveblock_core::{
-    build_remove_mask_from_tracks, paint_over_regions, region_is_protected_black, Fill, Frame,
+    paint_over_regions, region_is_protected_black, Fill, Frame,
     NormRect, OverlayMode, PixelFormat, Track, Verdict,
 };
 use liveblock_tracker::{Observation, TrackBox, Tracker, TrackerConfig};
 
 use crate::capture::{FrameTick, FrameView};
-use crate::detection::{class_is_auto_removable, Detector};
+use crate::detection::Detector;
+use liveblock_detection::ModelClassPolicy;
 use crate::overlay::{CoverPatch, OverlayWindow};
 use crate::regions::NormalizedRegion;
 
@@ -96,6 +97,7 @@ fn worker_loop(ctx: PipelineContext, ticks: Receiver<FrameTick>, running: Arc<At
         ..TrackerConfig::default()
     });
     let mut worker_tick: u64 = 0;
+    let mut last_frame_index = None;
     // Last normalized detections, reused on non-detect ticks (Tracker still
     // predicts between detections via its learned velocity).
     let mut last_obs: Vec<Observation> = Vec::new();
@@ -113,6 +115,8 @@ fn worker_loop(ctx: PipelineContext, ticks: Receiver<FrameTick>, running: Arc<At
         let Some(frame_view) = ctx.latest.load_full() else {
             continue;
         };
+        if last_frame_index == Some(frame_view.index) { continue; }
+        last_frame_index = Some(frame_view.index);
         worker_tick = worker_tick.wrapping_add(1);
 
         let width = frame_view.width;
@@ -122,9 +126,15 @@ fn worker_loop(ctx: PipelineContext, ticks: Receiver<FrameTick>, running: Arc<At
         }
 
         // ---- 1. Detection (every Nth tick), gated by the enable flag. ----
-        let run_detect = ctx.detection_enabled.load(Ordering::Relaxed)
+        let detection_enabled = ctx.detection_enabled.load(Ordering::Relaxed);
+        if !detection_enabled {
+            tracker = Tracker::with_config(TrackerConfig { min_hits: MIN_HITS, ..TrackerConfig::default() });
+            last_obs.clear();
+        }
+        let run_detect = detection_enabled
             && (worker_tick.is_multiple_of(DETECT_EVERY) || worker_tick == 1);
         if run_detect {
+            last_obs.clear();
             if let Some(det) = ctx.detector.lock().as_mut() {
                 match det.detect(&frame_view.bytes, width, height) {
                     Ok(boxes) => {
@@ -151,43 +161,26 @@ fn worker_loop(ctx: PipelineContext, ticks: Receiver<FrameTick>, running: Arc<At
             }
         }
 
-        // ---- 2. Tracker update + SAFE classifier stub. ----
-        // Feed observations only on detect ticks; on intermediate ticks pass an
-        // empty slice so tracks coast on their learned velocity (predicted_boxes
-        // keep masks glued to moving content between detections).
-        let obs_this_tick: &[Observation] = if run_detect { &last_obs } else { &[] };
-        let matched = tracker.update(obs_this_tick);
-        let _ = matched;
-
-        // SAFE STUB: classify any track still `Unsure`. With an EMPTY sponsor
-        // allowlist, no COCO class is auto-removable, so every track stays
-        // `Unsure` -> build_remove_mask_from_tracks paints NOTHING from the
-        // generic model. This is the fix for the "erases people/cars" bug.
-        //
-        // TODO(windows-port): replace with real ClassifySignals gathered per
-        // track (team gallery sim / number gate / sponsor prob) fed to
-        // liveblock_core::decide_verdict once a logo model is bundled.
-        let pending: Vec<(u64, u32)> = tracker
-            .tracks()
-            .iter()
-            .filter(|t| t.needs_classification())
-            .map(|t| (t.id, t.class_id))
-            .collect();
-        for (id, class_id) in pending {
-            if class_is_auto_removable(class_id) {
-                // Currently unreachable (allowlist is empty) but keeps the wiring
-                // honest for when the real classifier lands.
-                tracker.set_verdict(id, Verdict::Remove);
+        // Classification uses this model's names, never COCO numeric IDs.
+        // Only inference ticks count as confirmation hits; repeated cached frames
+        // must not make a one-off false positive look stable.
+        if run_detect {
+            tracker.update(&last_obs);
+            let pending: Vec<(u64, u32)> = tracker.tracks().iter()
+                .filter(|t| t.needs_classification()).map(|t| (t.id, t.class_id)).collect();
+            let detector = ctx.detector.lock();
+            for (id, class_id) in pending {
+                let policy = detector.as_ref().map(|d| d.class_policy(class_id))
+                    .unwrap_or(ModelClassPolicy::Unknown);
+                tracker.set_verdict(id, match policy {
+                    ModelClassPolicy::Remove => Verdict::Remove,
+                    ModelClassPolicy::Keep => Verdict::Keep,
+                    ModelClassPolicy::Unknown => Verdict::Unsure,
+                });
             }
-            // else: leave it Unsure — never auto-erase unclassified content.
         }
 
-        // ---- 3. Build the detection remove-mask from tracks (carves Keep). ----
-        // (Kept available for an inpaint backend that consumes a pixel mask; the
-        // native cover path below derives rects from confirmed Remove tracks.)
         let tracks_snapshot: Vec<Track> = tracker.tracks().to_vec();
-        let _detection_mask =
-            build_remove_mask_from_tracks(&tracks_snapshot, width, height, MIN_HITS);
 
         // ---- 4. Assemble cover patches. ----
         let mut patches: Vec<CoverPatch> = Vec::new();
@@ -227,7 +220,8 @@ fn worker_loop(ctx: PipelineContext, ticks: Receiver<FrameTick>, running: Arc<At
         // 4b. Confirmed Remove tracks (from the model). With the empty allowlist
         //     this is currently always empty; included so the wiring is complete.
         for t in &tracks_snapshot {
-            if t.verdict == Verdict::Remove && t.hits >= MIN_HITS {
+            if detection_enabled && t.verdict == Verdict::Remove && t.hits >= MIN_HITS
+                && !tracks_snapshot.iter().any(|k| k.verdict == Verdict::Keep && k.bbox.iou(&t.bbox) > 0.0) {
                 let rect = NormRect {
                     x: t.bbox.x,
                     y: t.bbox.y,

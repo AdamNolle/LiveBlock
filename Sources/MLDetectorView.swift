@@ -12,7 +12,7 @@ struct MLDetectorView: View {
                     Text("ML detector")
                         .font(Theme.display(size: 26, weight: .bold))
                         .foregroundStyle(Color.primary)
-                    Text("On-device YOLOv8n · 80 COCO classes · ~12 MB. Train your own ad detector on the Training Dashboard.")
+                    Text("On-device detection. Only ad and sponsor labels can trigger removal; keep labels protect overlapping content. Accuracy depends on the training data.")
                         .font(Theme.ui(size: 12))
                         .foregroundStyle(Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -28,6 +28,12 @@ struct MLDetectorView: View {
                 preview
                 detectionsPanel
             }
+            Toggle("Automatically cover detected ads", isOn: Binding(
+                get: { controller.detectionEnabled },
+                set: { controller.setDetectionEnabled($0) }
+            ))
+            .disabled(controller.usesCoverOnly)
+            .help("Use explicit ad and sponsor classes from the installed model. Drawn regions work independently.")
         }
     }
 

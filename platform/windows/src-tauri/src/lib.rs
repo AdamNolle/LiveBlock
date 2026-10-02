@@ -25,3 +25,6 @@ pub mod state;
 pub mod training;
 #[cfg(windows)]
 pub mod tray;
+
+#[path = "../../../_shared-backend/onnx_runtime.rs"]
+pub mod onnx_runtime;

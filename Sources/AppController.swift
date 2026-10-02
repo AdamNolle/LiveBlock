@@ -31,7 +31,7 @@ final class AppController: ObservableObject {
     let trainingController: TrainingController
 
     @Published private(set) var isRunning: Bool = false
-    @Published private(set) var detectionEnabled: Bool = true
+    @Published private(set) var detectionEnabled: Bool = false
     @Published private(set) var regionCount: Int = 0
     @Published private(set) var isEditorOpen: Bool = false
     @Published private(set) var screenshotCount: Int = 0
@@ -60,6 +60,8 @@ final class AppController: ObservableObject {
     @Published private(set) var pauseReason: PauseReason = .stopped
 
     @AppStorage("pauseOnFullscreen") private var pauseOnFullscreenStored: Bool = true
+    @AppStorage("coverOnly") private var coverOnlyStored: Bool = false
+    var usesCoverOnly: Bool { coverOnlyStored }
 
     /// One canonical default for the auto-block confidence threshold. The UI
     /// (SettingsView/MLDetectorView) and the capture pipeline both read this so
@@ -196,14 +198,16 @@ final class AppController: ObservableObject {
             $screenRecordingGranted,
             $frontmostName
         )
+        .combineLatest(captureManager.$isCoverOnly)
         .receive(on: RunLoop.main)
-        .map { tuple, pauseOnFullscreen, screenGranted, frontmostName -> PauseReason in
+        .map { inputs, coverOnly -> PauseReason in
+            let (tuple, pauseOnFullscreen, screenGranted, frontmostName) = inputs
             let (running, startErr, frontFullscreen, frontExcluded) = tuple
-            if !screenGranted { return .permissionDenied }
+            if !screenGranted && !coverOnly { return .permissionDenied }
             if let err = startErr, !err.isEmpty { return .startError(err) }
             if !running { return .stopped }
             if frontExcluded { return .excludedApp(frontmostName ?? "this app") }
-            if pauseOnFullscreen && frontFullscreen {
+            if pauseOnFullscreen && frontFullscreen && !coverOnly {
                 return .fullscreenApp(frontmostName ?? "this app")
             }
             return .none
@@ -235,7 +239,10 @@ final class AppController: ObservableObject {
         frontmostBundleID = app.bundleIdentifier
         frontmostName = app.localizedName
         captureManager.frontmostIsExcluded = perAppRules.isExcluded(app.bundleIdentifier ?? "")
-        captureManager.frontmostIsFullscreen = Self.isFrontmostAppFullscreen(app)
+        // Our region editor and render layer span a display. They must not
+        // trigger the fullscreen-video pause or leave it latched after editing.
+        captureManager.frontmostIsFullscreen = app.processIdentifier != ProcessInfo.processInfo.processIdentifier
+            && Self.isFrontmostAppFullscreen(app)
     }
 
     /// Heuristic: walk Quartz Window Services for windows owned by `app`'s
@@ -271,7 +278,7 @@ final class AppController: ObservableObject {
     // MARK: - Actions
 
     func toggleCapture() {
-        if isRunning {
+        if isRunning || captureManager.isStarting {
             Task { await captureManager.stop() }
         } else {
             guard let screen = currentScreen() else { return }
@@ -279,12 +286,28 @@ final class AppController: ObservableObject {
             // BEFORE the first frame lands, so patches composite over the right
             // display on multi-monitor setups.
             alignOverlayWindows(to: screen)
-            Task { await captureManager.start(on: screen) }
+            if usesCoverOnly { captureManager.startCover(on: screen) }
+            else { Task { await captureManager.start(on: screen) } }
         }
     }
 
     func setDetectionEnabled(_ enabled: Bool) {
-        captureManager.detectionEnabled = enabled
+        captureManager.detectionEnabled = enabled && !usesCoverOnly
+    }
+
+    func setCoverOnly(_ enabled: Bool) {
+        coverOnlyStored = enabled
+        objectWillChange.send()
+        guard captureManager.isRunning || captureManager.isStarting,
+              let screen = captureScreen() else { return }
+        alignOverlayWindows(to: screen)
+        if enabled { captureManager.startCover(on: screen) }
+        else {
+            Task {
+                await captureManager.stop()
+                await captureManager.start(on: screen)
+            }
+        }
     }
 
     func openEditor() {
@@ -357,6 +380,7 @@ final class AppController: ObservableObject {
 
     func refreshRegionCount() {
         regionCount = regionStore.current.count
+        captureManager.refreshCover()
     }
 
     // MARK: - Region enabled-state (per-region kill switch)
@@ -365,17 +389,15 @@ final class AppController: ObservableObject {
     // whether each one feeds the inpaint pipeline. UserDefaults-backed so
     // the state survives relaunch.
 
-    private static let disabledIdsKey = "disabledRegionIds"
+    var activeRegionCount: Int { regionStore.enabled.count }
 
     func regionEnabled(id: UUID) -> Bool {
-        let disabled = UserDefaults.standard.stringArray(forKey: Self.disabledIdsKey) ?? []
-        return !disabled.contains(id.uuidString)
+        regionStore.isEnabled(id: id)
     }
 
     func setRegionEnabled(id: UUID, on: Bool) {
-        var disabled = Set(UserDefaults.standard.stringArray(forKey: Self.disabledIdsKey) ?? [])
-        if on { disabled.remove(id.uuidString) } else { disabled.insert(id.uuidString) }
-        UserDefaults.standard.set(Array(disabled), forKey: Self.disabledIdsKey)
+        regionStore.setEnabled(id: id, on: on)
+        captureManager.refreshCover()
         // Trigger UI refresh
         objectWillChange.send()
     }
@@ -383,7 +405,7 @@ final class AppController: ObservableObject {
     func quit() {
         Task { @MainActor in
             stopAutoCapture()
-            if isRunning { await captureManager.stop() }
+            if captureManager.isRunning || captureManager.isStarting { await captureManager.stop() }
             NSApp.terminate(nil)
         }
     }
@@ -395,7 +417,7 @@ final class AppController: ObservableObject {
     func panicDisable() {
         Task { @MainActor in
             stopAutoCapture()
-            if isRunning { await captureManager.stop() }
+            if captureManager.isRunning || captureManager.isStarting { await captureManager.stop() }
             renderLayer?.orderOut(nil)
             if isEditorOpen { closeEditor() }
             showControlPanel()
@@ -409,6 +431,7 @@ final class AppController: ObservableObject {
     /// running — visual users shouldn't have to first toggle capture before
     /// being able to grab a screenshot.
     func captureScreenshotForLabeling() {
+        guard !usesCoverOnly else { return }
         Task { @MainActor in
             if !isRunning {
                 guard let screen = currentScreen() else {
@@ -546,7 +569,8 @@ final class AppController: ObservableObject {
                 await captureManager.stop()
                 if let screen = currentScreen() {
                     alignOverlayWindows(to: screen)
-                    await captureManager.start(on: screen)
+                    if usesCoverOnly { captureManager.startCover(on: screen) }
+                    else { await captureManager.start(on: screen) }
                 }
             }
             return
@@ -555,6 +579,7 @@ final class AppController: ObservableObject {
         // size/origin) — just re-align the overlay + editor onto it.
         if let screen = captureScreen() {
             alignOverlayWindows(to: screen)
+            if captureManager.isCoverOnly { captureManager.startCover(on: screen) }
         }
     }
 

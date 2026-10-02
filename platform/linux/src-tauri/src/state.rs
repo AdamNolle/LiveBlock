@@ -15,7 +15,7 @@ use crate::regions::SharedRegionStore;
 use liveblock_core::PolicyMode;
 use liveblock_tracker::{Tracker, TrackerConfig};
 use parking_lot::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 /// Handle to the spawned capture→detect→track→paint task. Dropping/aborting it
@@ -27,8 +27,15 @@ pub struct CaptureHandle {
 }
 
 pub struct AppState {
+    pub training_job: Mutex<Option<crate::training::TrainingJob>>,
     pub region_store: SharedRegionStore,
+    pub overlay_ready: AtomicBool,
+    pub layer_shell_active: AtomicBool,
     pub capture_running: AtomicBool,
+    pub cover_only_active: AtomicBool,
+    pub cover_only_preferred: AtomicBool,
+    pub capture_generation: AtomicU64,
+    pub latest_frame: arc_swap::ArcSwapOption<crate::capture::FrameView>,
     pub detection_enabled: AtomicBool,
     pub current_patches: Mutex<Vec<crate::inpainting::PatchPayload>>,
     pub last_detections: Mutex<Vec<String>>,
@@ -52,16 +59,22 @@ impl AppState {
     pub fn new(region_store: SharedRegionStore) -> Arc<Self> {
         Arc::new(Self {
             region_store,
+            training_job: Mutex::new(None),
+            overlay_ready: AtomicBool::new(false),
+            layer_shell_active: AtomicBool::new(false),
             capture_running: AtomicBool::new(false),
+            cover_only_active: AtomicBool::new(false),
+            cover_only_preferred: AtomicBool::new(false),
+            capture_generation: AtomicU64::new(0),
+            latest_frame: arc_swap::ArcSwapOption::from(None),
             detection_enabled: AtomicBool::new(false),
             current_patches: Mutex::new(Vec::new()),
             last_detections: Mutex::new(Vec::new()),
             detector: Arc::new(Mutex::new(None)),
             inpainter: Arc::new(Mutex::new(Inpainter::new())),
             tracker: Arc::new(Mutex::new(Tracker::with_config(TrackerConfig::default()))),
-            // SportsBroadcast: default to KEEP on uncertainty. This is the safe
-            // default and, combined with the EMPTY classifier allowlist below,
-            // guarantees the generic COCO detector erases nothing on its own.
+            // Keep identity on uncertainty; only explicit removable model labels
+            // can authorize automatic covers.
             policy_mode: PolicyMode::SportsBroadcast,
             capture_task: Mutex::new(None),
         })

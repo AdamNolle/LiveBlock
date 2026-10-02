@@ -115,3 +115,16 @@ desktop.ini
 # Logs
 *.log
 *.tlog
+
+# Downloaded pretraining checkpoint
+/yolov8n.pt
+tools/runtime-downloads/
+**/src-tauri/resources/onnxruntime*.dll
+**/src-tauri/resources/libonnxruntime*.so*
+**/src-tauri/resources/onnxruntime-LICENSE
+**/src-tauri/resources/onnxruntime-ThirdPartyNotices.txt
+**/src-tauri/resources/onnxruntime-build.json
+
+# Local agent metadata and reproducible downloaded training weights
+.serena/
+tools/pretrained/*.pt

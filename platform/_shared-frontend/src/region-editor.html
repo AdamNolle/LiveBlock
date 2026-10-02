@@ -1,23 +1,26 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="lb-region-editor">
   <head>
     <meta charset="utf-8"/>
-    <title>LiveBlocker — Region Editor</title>
+    <title>LiveBlock — Region Editor</title>
     <link rel="stylesheet" href="./tokens.css"/>
     <link rel="stylesheet" href="./primitives.css"/>
     <style>
-      body { background: linear-gradient(135deg,#1f1830 0%,#432a5a 100%); }
+    html.lb-region-editor { background: transparent; }
+    html.lb-region-editor body { background: rgba(20,20,30,0.15); }
       .stage { position:absolute; inset:0; }
       .toolbar {
-        position:absolute; bottom: 24px; left:50%; transform:translateX(-50%);
+        position:relative;
         display:flex; align-items:center; gap:8px;
         padding: 10px;
-        border-radius: 28px;
+        border-radius: 16px;
         background: var(--lb-bg);
-        box-shadow:
-          8px 8px 18px rgba(0,0,0,0.35),
-          -3px -3px 8px var(--lb-shadow-light);
+        border:1px solid var(--lb-border);
+        box-shadow:0 4px 16px rgba(0,0,0,0.18);
       }
+      .editor-controls { position:absolute; left:50%; transform:translateX(-50%); bottom:24px; display:flex; flex-direction:column; align-items:center; max-width:calc(100% - 32px); }
+    #markBtn { white-space:nowrap; }
+    [hidden] { display: none !important; }
       .seg {
         display:flex; gap:2px; padding:3px; border-radius:999px;
         background: var(--lb-bg);
@@ -42,44 +45,29 @@
           -3px -3px 6px var(--lb-shadow-light);
       }
       .hint { margin-top:10px; text-align:center; color: rgba(255,255,255,0.65); font: 500 11px var(--lb-font-ui); letter-spacing: 0.04em; }
+      .region-box { position:absolute; border:2px solid var(--lb-block); background:color-mix(in srgb, var(--lb-block) 15%, transparent); box-sizing:border-box; pointer-events:none; }
     </style>
   </head>
   <body>
     <div class="stage"></div>
-    <div style="position:absolute;left:50%;transform:translateX(-50%);bottom:24px;display:flex;flex-direction:column;align-items:center">
+    <div class="editor-controls">
       <div class="toolbar">
         <span id="logo"></span>
         <div class="div"></div>
-        <div class="seg" id="sizeSeg">
+        <div class="seg" id="sizeSeg" hidden>
           <button class="opt" data-id="sm">S</button>
           <button class="opt active" data-id="md">M</button>
           <button class="opt" data-id="lg">L</button>
           <button class="opt" data-id="fs">⤢</button>
         </div>
         <div class="div"></div>
-        <button class="lb-pill lb-block" id="markBtn">▭ Drag to mark</button>
+        <span class="lb-pill" id="markBtn">Drag to mark · Delete removes the last region</span>
         <div class="div"></div>
-        <button class="cancel" id="cancelBtn">×</button>
+        <button class="cancel" id="cancelBtn" aria-label="Close region editor">×</button>
       </div>
-      <div class="hint">CLICK & DRAG ANY REGION  ·  Ctrl+Shift+B HIDES THIS TOOL</div>
+      <div class="hint">DRAG TO MARK · ESC TO CLOSE · DELETE TO REMOVE</div>
     </div>
 
-    <script type="module">
-      import { logo } from "./primitives.ts";
-      import { lb } from "./ipc.ts";
-
-      document.getElementById("logo").appendChild(logo({ size: 32, radius: 8 }));
-      document.getElementById("cancelBtn").addEventListener("click", () => lb.hideWindow("editor"));
-      document.querySelectorAll("#sizeSeg .opt").forEach(b => {
-        b.addEventListener("click", () => {
-          document.querySelectorAll("#sizeSeg .opt").forEach(o => o.classList.remove("active"));
-          b.classList.add("active");
-        });
-      });
-      document.getElementById("markBtn").addEventListener("click", () => {
-        // TODO(windows-port / linux-port): wire drag-to-mark gesture once
-        // backend `add_region` is connected to a real coordinate flow.
-      });
-    </script>
+    <script type="module" src="./editor.ts"></script>
   </body>
 </html>

@@ -1,0 +1,10 @@
+{
+  "images": 573,
+  "confidence_threshold": 0.5,
+  "matching_iou": 0.5,
+  "tp": 941,
+  "fp": 3,
+  "fn": 8,
+  "precision": 0.996822033898305,
+  "recall": 0.9915700737618546
+}

@@ -8,12 +8,11 @@
 //! `XShmAttach`, then each frame `XShmGetImage` fills the segment directly and
 //! we read it back as BGRX → BGRA.
 //!
-//! VERIFY-ON-LINUX(linux-port): the SysV shm syscalls go through `libc` and
-//! cannot be exercised on this Windows dev box. The x11rb round-trip and the
-//! BGRX→BGRA conversion are the parts worth re-checking against a live X
-//! server (notably the server-side `ZPixmap` byte order on big-endian, which
-//! we assume little-endian here as is universal on desktop Linux).
+//! The isolated native integration harness exercises real SysV shared memory
+//! and XShm. Pixel conversion honors the server's depth, masks, byte order and
+//! row padding. Desktop overlay self-exclusion still needs compositor testing.
 
+use super::x11_pixels::X11PixelFormat;
 use super::{CaptureSource, FrameView};
 use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
@@ -51,10 +50,7 @@ impl ShmSegment {
         if addr == (-1isize as *mut libc::c_void) {
             // Clean up the id we just created before bailing.
             unsafe { libc::shmctl(shmid, libc::IPC_RMID, std::ptr::null_mut()) };
-            return Err(anyhow!(
-                "shmat failed: {}",
-                std::io::Error::last_os_error()
-            ));
+            return Err(anyhow!("shmat failed: {}", std::io::Error::last_os_error()));
         }
         Ok(Self { shmid, addr, len })
     }
@@ -81,6 +77,7 @@ pub struct X11Capture {
     root: u32,
     width: u16,
     height: u16,
+    pixel_format: X11PixelFormat,
     /// X server's id for the attached shm segment.
     shm_seg: u32,
     /// The shared-memory backing store. `None` if shm setup failed (we then
@@ -89,6 +86,12 @@ pub struct X11Capture {
 }
 
 impl X11Capture {
+    /// Runtime diagnostic used by the isolated X11 integration harness.
+    #[allow(dead_code)]
+    pub fn uses_shared_memory(&self) -> bool {
+        self.segment.is_some()
+    }
+
     pub fn new() -> Result<Self> {
         let (conn, screen_num) = x11rb::connect(None).context("X11 connect")?;
         let setup = conn.setup();
@@ -96,6 +99,23 @@ impl X11Capture {
         let root = screen.root;
         let width = screen.width_in_pixels;
         let height = screen.height_in_pixels;
+        let format = setup
+            .pixmap_formats
+            .iter()
+            .find(|f| f.depth == screen.root_depth)
+            .context("No pixel format for X11 root depth")?;
+        let visual = screen
+            .allowed_depths
+            .iter()
+            .flat_map(|d| &d.visuals)
+            .find(|v| v.visual_id == screen.root_visual)
+            .context("No X11 root visual")?;
+        let pixel_format = X11PixelFormat {
+            bits_per_pixel: format.bits_per_pixel,
+            scanline_pad: format.scanline_pad,
+            little_endian: setup.image_byte_order == x11rb::protocol::xproto::ImageOrder::LSB_FIRST,
+            masks: [visual.red_mask, visual.green_mask, visual.blue_mask],
+        };
 
         // Redirect rendering of all top-level windows to off-screen storage so
         // we can read the composited result without tearing.
@@ -106,7 +126,9 @@ impl X11Capture {
 
         // Allocate a SysV shm segment sized for one BGRA frame and attach it to
         // the X server. If anything here fails we degrade to non-shm GetImage.
-        let len = width as usize * height as usize * 4;
+        let len = pixel_format
+            .buffer_len(width as u32, height as u32)
+            .map_err(|e| anyhow!(e))?;
         let (shm_seg, segment) = match Self::setup_shm(&conn, len) {
             Ok(pair) => (pair.0, Some(pair.1)),
             Err(e) => {
@@ -120,6 +142,7 @@ impl X11Capture {
             root,
             width,
             height,
+            pixel_format,
             shm_seg,
             segment,
         })
@@ -136,23 +159,6 @@ impl X11Capture {
             .check()
             .context("XShmAttach")?;
         Ok((shm_seg, segment))
-    }
-
-    /// Convert a server BGRX/BGRA buffer (little-endian ZPixmap, depth 24/32)
-    /// into packed opaque BGRA.
-    fn finalize_bgra(src: &[u8], w: u32, h: u32) -> Vec<u8> {
-        let count = (w as usize) * (h as usize);
-        let mut out = vec![0u8; count * 4];
-        let n = count.min(src.len() / 4);
-        for i in 0..n {
-            let s = i * 4;
-            // ZPixmap little-endian: bytes are B, G, R, X.
-            out[s] = src[s];
-            out[s + 1] = src[s + 1];
-            out[s + 2] = src[s + 2];
-            out[s + 3] = 255; // force opaque; X often leaves the 4th byte as pad
-        }
-        out
     }
 }
 
@@ -180,7 +186,8 @@ impl CaptureSource for X11Capture {
         // completion event to avoid full-frame polling.)
         let bgra = if let Some(seg) = &self.segment {
             // Fast path: server DMAs the image into our shared segment.
-            self.conn
+            let reply = self
+                .conn
                 .shm_get_image(
                     self.root,
                     0,
@@ -195,7 +202,12 @@ impl CaptureSource for X11Capture {
                 .context("shm_get_image request")?
                 .reply()
                 .context("XShmGetImage")?;
-            Self::finalize_bgra(seg.as_slice(), w, h)
+            if reply.size as usize != seg.len {
+                return Err(anyhow!("Unexpected XShm pixel buffer size"));
+            }
+            self.pixel_format
+                .decode(seg.as_slice(), w, h)
+                .map_err(|e| anyhow!(e))?
         } else {
             // Fallback path: a regular GetImage round-trip (slower, copies the
             // pixels back over the socket).
@@ -213,7 +225,9 @@ impl CaptureSource for X11Capture {
                 .context("get_image request")?
                 .reply()
                 .context("GetImage")?;
-            Self::finalize_bgra(&reply.data, w, h)
+            self.pixel_format
+                .decode(&reply.data, w, h)
+                .map_err(|e| anyhow!(e))?
         };
 
         Ok(FrameView {

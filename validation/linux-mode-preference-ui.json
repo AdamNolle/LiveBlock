@@ -1,0 +1,44 @@
+{
+  "verified_at_utc": "2026-10-02T01:14:57.201447+00:00",
+  "package": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock-linux-arm64.deb",
+  "package_sha256": "0eacf064b178e20b8c208ad4a494d13b46a1b6ee9d7ba03856adcb6c8c3226fe",
+  "installed_executable_sha256": "64df24b6eb0d2ac44ba4a0e5e8ecb031c194710adad5db3d73a5777da3cad8dc",
+  "environment": "Ubuntu 26.04 ARM64, private TigerVNC X11 display, Openbox, xcompmgr -n, software rendering, temporary XDG data",
+  "native_checks": {
+    "select_cover_only_before_first_start": true,
+    "ctrl_shift_l_honors_selected_cover_only_mode": true,
+    "opaque_cover_precisely_placed": true,
+    "automatic_detection_and_screenshot_controls_disabled_in_cover_only": true,
+    "ctrl_shift_b_opens_editor": true,
+    "panic_unmaps_both_active_windows": true,
+    "global_restart_after_panic_preserves_cover_only_mode": true,
+    "compositor_loss_unmaps_both_active_windows": true,
+    "compositor_loss_stops_blocking_and_shows_persistent_notice": true,
+    "lower_controls_reachable_by_scrolling_with_notice": true
+  },
+  "compositor_loss_log_utc": "2026-10-02T01:12:45.852436Z",
+  "verification": "CUA/noVNC GUI observations plus read-only native xwininfo Map State. Ctrl/Alt modifiers forwarded through noVNC UI controls. Cover-only status reflects the backend coverOnly state.",
+  "typescript_check_passed": true,
+  "source_sha256": {
+    "platform/linux/src-tauri/src/main.rs": "b8e08831efadc0cdb06232a3b7e4af4ced134ee3793fe5851d7af06d214167ed",
+    "platform/linux/src-tauri/src/overlay/mod.rs": "ea12075ecaf9143c616e0bf0fd09a9a449e669d98a20d252768ca06a901583bf",
+    "platform/linux/src-tauri/src/runtime.rs": "1f96ed7d9ad14373ec0b74dc9d941eebf69bd4dc697ad38d66098e32dd31fd8c",
+    "platform/_shared-frontend/src/control.ts": "510479a320bd699a8895582d83412d1b311b637e91678648f3e2e761abeeca65",
+    "platform/_shared-frontend/src/ipc.ts": "8b47040f37066d60ca54807669636fae7c22e4d4e46d333791b5a93a0a9e19ec"
+  },
+  "cleanup": {
+    "fixture_app_and_display_stopped": true,
+    "temporary_password_removed": true,
+    "temporary_browser_tab_closed": true,
+    "temporary_swap_removed": true,
+    "vm_stopped": true
+  },
+  "related_reports": {
+    "compositor_loss_retry_and_restart_checks_on_prior_artifact": "linux-compositor-loss-ui.json",
+    "keyboard_forwarding_probe_on_prior_artifact": "linux-shortcut-diagnosis.json"
+  },
+  "scope_limits": [
+    "Native Windows, Wayland portals, hardware GPU, physical multi-monitor and capture self-exclusion remain unverified.",
+    "This is a virtual-display X11 regression, not proof of DRM-undetectability or perfect ad removal."
+  ]
+}

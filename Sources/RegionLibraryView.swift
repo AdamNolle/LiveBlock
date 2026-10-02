@@ -27,7 +27,7 @@ struct RegionLibraryView: View {
                 }
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(.thinMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.pill))
-                .frame(width: 240)
+                .frame(width: 190)
                 Button("Draw region", systemImage: "plus") {
                     controller.toggleEditor()
                 }
@@ -37,13 +37,11 @@ struct RegionLibraryView: View {
 
             // Table head
             HStack(spacing: 12) {
-                Text("").frame(width: 20)
                 Text("REGION").frame(maxWidth: .infinity, alignment: .leading)
-                Text("APP / CONTEXT").frame(width: 160, alignment: .leading)
-                Text("SIZE").frame(width: 90, alignment: .leading)
-                Text("BLOCKS").frame(width: 70, alignment: .leading)
-                Text("ACTIVE").frame(width: 70, alignment: .leading)
-                Text("").frame(width: 40)
+                Text("SIZE").frame(width: 74, alignment: .leading)
+                Text("BLOCKS").frame(width: 56, alignment: .leading)
+                Text("ACTIVE").frame(width: 44, alignment: .leading)
+                Text("").frame(width: 28)
             }
             .font(Theme.ui(size: 10, weight: .semibold))
             .tracking(0.6)
@@ -57,10 +55,10 @@ struct RegionLibraryView: View {
                         Image(systemName: "rectangle.dashed")
                             .font(.system(size: 32))
                             .foregroundStyle(Color.secondary.opacity(0.6))
-                        Text("No regions yet")
+                        Text(search.isEmpty ? "No regions yet" : "No matching regions")
                             .font(Theme.ui(size: 13, weight: .semibold))
                             .foregroundStyle(Color.secondary)
-                        Text("Click \u{201C}Draw region\u{201D} above to create your first one.")
+                        Text(search.isEmpty ? "Click \u{201C}Draw region\u{201D} above to create your first one." : "Try a different name or position.")
                             .font(Theme.ui(size: 11))
                             .foregroundStyle(Color.secondary.opacity(0.6))
                         Button("Draw region", systemImage: "plus") {
@@ -79,7 +77,7 @@ struct RegionLibraryView: View {
                 }
             }
             .padding(6)
-            .glassEffect(in: RoundedRectangle(cornerRadius: 20))
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
             .frame(maxWidth: .infinity, alignment: .top)
         }
     }
@@ -120,11 +118,10 @@ struct RegionLibraryView: View {
     private func regionRow(_ r: NormalizedRegion, displayName: String) -> some View {
         let isOn = controller.regionEnabled(id: r.id)
         return HStack(spacing: 12) {
-            Image(systemName: "line.3.horizontal").foregroundStyle(Color.secondary.opacity(0.6)).frame(width: 20)
             // preview swatch — proportional thumbnail of the region's normalized rect.
             HStack(spacing: 10) {
                 ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: 6).fill(Color(red: 0.10, green: 0.07, blue: 0.19))
+                    RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.12))
                         .frame(width: 36, height: 24)
                     RoundedRectangle(cornerRadius: 2)
                         .stroke(Theme.block, style: StrokeStyle(lineWidth: 1, dash: [3]))
@@ -132,37 +129,34 @@ struct RegionLibraryView: View {
                         .offset(x: 36 * r.x, y: 24 * r.y)
                 }
                 .frame(width: 36, height: 24)
-                Text(displayName)
-                    .font(Theme.ui(size: 12, weight: .medium))
-                    .foregroundStyle(Color.primary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(displayName)
+                        .font(Theme.ui(size: 12, weight: .medium))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                    Text(isOn ? "Active" : "Disabled")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(isOn ? Theme.success : Color.secondary.opacity(0.4))
-                    .frame(width: 10, height: 10)
-                Text(isOn ? "Active" : "Disabled")
-                    .font(Theme.ui(size: 11))
-                    .foregroundStyle(Color.primary)
-            }.frame(width: 160, alignment: .leading)
 
             Text(String(format: "%.0f%%\u{00D7}%.0f%%", r.width * 100, r.height * 100))
                 .font(Theme.mono(size: 11))
                 .foregroundStyle(Color.secondary)
-                .frame(width: 90, alignment: .leading)
+                .frame(width: 74, alignment: .leading)
 
             Text("\(controller.captureManager.blocksByRegion[r.id, default: 0])")
                 .font(Theme.mono(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.block)
-                .frame(width: 70, alignment: .leading)
+                .frame(width: 56, alignment: .leading)
 
             Toggle("", isOn: Binding(
                 get: { controller.regionEnabled(id: r.id) },
                 set: { controller.setRegionEnabled(id: r.id, on: $0) }
             ))
             .labelsHidden()
-            .frame(width: 70, alignment: .leading)
+            .frame(width: 44, alignment: .leading)
             .help(isOn ? "Disable this region (keeps it in the list)" : "Re-enable this region")
 
             Button {
@@ -175,7 +169,7 @@ struct RegionLibraryView: View {
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
-            .frame(width: 40, alignment: .trailing)
+            .frame(width: 28, alignment: .trailing)
             .help("Delete this region permanently")
         }
         .padding(.horizontal, 16).padding(.vertical, 10)

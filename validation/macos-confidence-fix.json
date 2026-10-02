@@ -1,0 +1,24 @@
+{
+  "date": "2026-10-01",
+  "executable_sha256": "05a8d1ed60c10a744beb557c8e0d6f101e33baf6924b5b25db4f6ab1b1ce9783",
+  "source_sha256": {
+    "Sources/VisionProcessor.swift": "9d8b6b4c61827e56b6e8200eda716d359df2db3a03db2607db1e2d1fec3c546f",
+    "tools/validate_coreml.swift": "c073ce5c4d1026e85c2f5979f14efd6d651e27b713a696de2dfcb4d04c55bf83",
+    "tools/export_to_coreml.py": "bc0cd7534a07d829991239d2babe0399cd01d84d6853256da6eb80600aebc7cb",
+    "Tests/LiveBlockTests/DetectionPolicyTests.swift": "023d27e822986e6a9adf3c3f48c7ad9e88aa68feaee859a054a82877df9c4c50"
+  },
+  "confidence_fix": "Threshold and displayed detection score use Vision object confidence \u00d7 conditional classification confidence.",
+  "native_tests_passed": 17,
+  "compiled_release_model_holdout": "adserp-v1-nms45/macos-release-evaluation.json",
+  "live_capture": {
+    "started": true,
+    "observed_fps": 22,
+    "regions": 0,
+    "automatic_detection_enabled": false,
+    "screenshots_saved": 0,
+    "stopped_to_ready": true,
+    "scope": "Start/Stop and permission smoke check; not a live ad-removal check."
+  },
+  "developer_id_signed_universal": true,
+  "notarized": false
+}

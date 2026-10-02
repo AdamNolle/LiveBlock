@@ -11,7 +11,7 @@ final class ControlPanelWindow: NSPanel, NSWindowDelegate {
     init(rootView: AnyView) {
         let initial = Self.defaultFrame()
         super.init(contentRect: initial,
-                   styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow, .hudWindow],
+                   styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
                    backing: .buffered,
                    defer: false)
 
@@ -31,11 +31,12 @@ final class ControlPanelWindow: NSPanel, NSWindowDelegate {
         // macOS 26; canJoinAllSpaces is what we want here.
         self.collectionBehavior = [.canJoinAllSpaces, .stationary]
 
-        // Don't appear in our own ScreenCaptureKit output.
-        self.sharingType = .none
+        // The capture filter excludes all windows owned by this app.
+        self.sharingType = .readOnly
 
         let host = NSHostingView(rootView: rootView)
-        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.autoresizingMask = [.width, .height]
         self.contentView = host
         self.minSize = NSSize(width: 360, height: 360)
         self.setContentSize(initial.size)
@@ -60,15 +61,15 @@ final class ControlPanelWindow: NSPanel, NSWindowDelegate {
     }
 
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
+    override var canBecomeMain: Bool { true }
 
     /// Anchor the panel to the top-right of the active display, sized to
     /// fit naturally on small screens (12" MacBook ≈ 1280pt wide) while
-    /// keeping the 400×480 default on anything bigger.
+    /// keeping the 400×400 default on anything bigger.
     private static func defaultFrame() -> NSRect {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let preferredW: CGFloat = 400
-        let preferredH: CGFloat = 480
+        let preferredH: CGFloat = 400
         // Cap to 80% of the screen so the panel can't fall off a 1280×800 lid.
         let w = max(360, min(preferredW, screen.width * 0.80))
         let h = max(360, min(preferredH, screen.height * 0.80))

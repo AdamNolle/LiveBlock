@@ -210,11 +210,11 @@ LiveBlock/
 | Component            | Status                                                |
 |----------------------|-------------------------------------------------------|
 | macOS app            | Capture, region editor, labeling, training dashboard, ML detector tuning. Native macOS 26 Liquid Glass UI. Linked against the Rust core via swift-bridge. |
-| Rust core            | Five crates (regions, labels, detection, bridge, core). 33 unit tests. JSON byte-compatible across all platforms. |
-| Windows port         | Real D3D11 + DirectML pipeline. Depends on shared core types. Compiles on Windows. |
-| Linux port           | Wayland + X11 dispatch with capture skeleton, ported YOLOv8 head decoder + CPU mirror-blend inpainter. Compiles on Linux; GPU inpainter still TODO. |
-| Bundled detector     | Generic YOLOv8n (COCO classes). Train your own with `tools/auto.sh`. |
-| Code signing         | Stable self-signed identity via `tools/setup_codesign_identity.sh`. Developer ID + notarization is a separate task. |
+| Rust core | Shared region, label, detection and tracking code with validated model metadata and regression coverage. |
+| Windows port | Windows x64 portable package cross-built with D3D11/DirectML and CPU fallback. Native Windows runtime testing remains pending. |
+| Linux port | Ubuntu 26.04 ARM64 package built and tested on an isolated X11 compositor for manual covers and editor interactions. Wayland uses a floating fallback; portal and physical GPU checks remain pending. |
+| Bundled detector | Trained AdSERP search-ad starter, with measured CoreML and ONNX holdout results in `MODEL_CARD.md`. The broader sports candidate is training separately and is not installed. |
+| Code signing | Universal macOS release signed with Developer ID and hardened runtime. Apple notarization requires a saved notarytool credential profile; see `NOTARIZATION.md`. Windows release is unsigned. |
 
 ## Roadmap
 

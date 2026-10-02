@@ -20,8 +20,10 @@ into the Windows/Linux Tauri resources + the per-user runtime models dir.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -44,7 +46,10 @@ def export(pt_path: Path, *, int8: bool, nms: bool) -> Path:
     model = YOLO(str(pt_path))
 
     print(f"-> Exporting to CoreML (int8={int8}, nms={nms}) ...")
-    output = model.export(format="coreml", int8=int8, nms=nms)
+    # Match the ports' shared suppression threshold. Ultralytics' export
+    # default is 0.70, which retains substantially more overlapping covers
+    # than the Windows/Linux deployment decoder (0.45).
+    output = model.export(format="coreml", int8=int8, nms=nms, iou=0.45)
 
     # ultralytics returns either a path string or a Path to the .mlpackage.
     out_path = Path(output) if not isinstance(output, Path) else output
@@ -64,19 +69,24 @@ def install_into_repo(mlpackage: Path) -> None:
         print(f"OK Already at {TARGET_PATH}")
         return
 
-    if TARGET_PATH.exists():
-        backup = TARGET_PATH.with_suffix(".mlpackage.bak")
-        if backup.exists():
-            shutil.rmtree(backup)
-        print(f"-> Backing up existing model -> {backup}")
-        shutil.move(str(TARGET_PATH), str(backup))
-
     TARGET_PATH.parent.mkdir(parents=True, exist_ok=True)
-    print(f"-> Copying {mlpackage} -> {TARGET_PATH}")
-    if mlpackage.is_dir():
-        shutil.copytree(mlpackage, TARGET_PATH)
-    else:
-        shutil.copy2(mlpackage, TARGET_PATH)
+    # Finish the full package copy before moving the working model aside.
+    # Keep staging outside Sources so Xcode cannot pick up a partial package.
+    with tempfile.TemporaryDirectory(prefix=".liveblock-model-", dir=TARGET_PATH.parent.parent) as temp:
+        staged = Path(temp) / TARGET_PATH.name
+        shutil.copytree(mlpackage, staged)
+        backup = TARGET_PATH.with_suffix(".mlpackage.bak")
+        had_target = TARGET_PATH.exists()
+        if had_target:
+            if backup.exists():
+                shutil.rmtree(backup)
+            os.replace(TARGET_PATH, backup)
+        try:
+            os.replace(staged, TARGET_PATH)
+        except OSError:
+            if had_target:
+                os.replace(backup, TARGET_PATH)
+            raise
     print(f"OK Installed. Now: ./run.sh --clean")
 
 

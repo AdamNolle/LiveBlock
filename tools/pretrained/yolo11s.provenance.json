@@ -1,0 +1,7 @@
+{
+  "source": "Ultralytics official assets repository",
+  "path": "tools/pretrained/yolo11s.pt",
+  "sha256": "85a76fe86dd8afe384648546b56a7a78580c7cb7b404fc595f97969322d502d5",
+  "license": "AGPL-3.0",
+  "role": "COCO pretrained initialization; not an installed sponsor model"
+}

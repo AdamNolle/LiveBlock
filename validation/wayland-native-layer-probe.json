@@ -1,0 +1,50 @@
+{
+  "verified_at_utc": "2026-10-02T01:30:02.064421+00:00",
+  "environment": "Ubuntu 26.04 ARM64, Sway 1.11 headless compositor, pixman renderer, one 1280x800 output at scale 1, GTK3, gtk-layer-shell 0.10.0",
+  "probe": "tools/validate_wayland_overlay/probe.py",
+  "probe_sha256": "ac18d1e9aa24e70fc70390a9b22459abeb714599c58edf2cbeb3115467f042d8",
+  "application_integration_verified": false,
+  "layer_shell_surface_verified": true,
+  "native_checks": {
+    "anchors_span_output": true,
+    "overlay_draws_above_fullscreen_window": true,
+    "outside_cover_transparent": true,
+    "precise_rectangle": {
+      "x": 120,
+      "y": 150,
+      "width": 200,
+      "height": 80
+    },
+    "initial_click_through": true,
+    "hide_unmaps_cover": true,
+    "show_restores_cover": true,
+    "click_through_after_remap": true,
+    "underlying_button_click_count": 2
+  },
+  "native_log": [
+    "layer-mapped width=200 height=200",
+    "layer-window=True",
+    "covered-target-click=1",
+    "layer-unmapped",
+    "hide-cover-request",
+    "layer-mapped width=1280 height=800",
+    "show-cover-request",
+    "covered-target-click=2"
+  ],
+  "failure_found_and_fixed_in_probe": "Initial input shape alone passed the first map but intercepted input after hide/show. Reapplying the empty input region in the GTK map callback fixed the remap check.",
+  "verification": "Only CUA/noVNC UI actions; fixture program emits native click, map and unmap observations. Sway get_outputs read-only query confirms 1280x800 geometry.",
+  "production_constraint": "GTK layer-shell must initialize before realization. The installed Tauri API has no documented pre-realization layer-shell hook. Its hidden renderer realization state has not yet been observed; verify that before choosing the integration path.",
+  "scope_limits": [
+    "This probe is not the shipped LiveBlock renderer. The current application still uses a floating Wayland fallback.",
+    "Portal capture, compositor loss, multiple outputs, fractional scale and hardware GPU remain unverified."
+  ],
+  "cleanup": {
+    "fixture_stopped": true,
+    "temporary_authentication_removed": true,
+    "viewer_closed": true,
+    "vm_stopped": true,
+    "graceful_vm_stop": false,
+    "force_stop_after_graceful_stop_failed": true
+  },
+  "next_implementation_check": "Observe the actual hidden Tauri renderer realization state on Wayland. Initialize that GTK window only if still unrealized; otherwise own a separate native GTK renderer and editor from creation. Reapply the empty input region on each map."
+}

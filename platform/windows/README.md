@@ -8,9 +8,16 @@ Linux port.
 
 ## Status
 
-**Skeleton.** Compiles a runnable bundle with real Windows API calls; a
-few hot-path bits (D3D11 compute inpaint, full WGC frame loop) are
-flagged with `// TODO(windows-port):`.
+**Release cross-build verified; native runtime pending.** The WGC frame worker,
+native DirectComposition overlay, CPU inpainting and trained detector are wired.
+The x64 executable links on macOS with MinGW. Native Windows capture, placement,
+DirectML and hotkey behavior still need on-device verification; the GPU compute
+inpainter remains a scaffold.
+
+The control panel offers **Screen blend** and **Cover only · no capture**.
+Cover only draws opaque manual regions without starting WGC. It disables
+automatic detection and screenshots, and Stop or the hotkey hides the covers.
+Services may still restrict overlays; this is not a guarantee of undetectability.
 
 ## Prerequisites
 
@@ -21,6 +28,7 @@ flagged with `// TODO(windows-port):`.
   with the "Desktop development with C++" workload.
 - [Node.js 20+](https://nodejs.org/).
 - Tauri CLI: `cargo install tauri-cli --version "^2.0"`.
+- Microsoft Edge WebView2 Runtime and Microsoft Visual C++ x64 v14 runtime.
 
 ## Build & run
 
@@ -30,10 +38,16 @@ cd platform\_shared-frontend
 npm install
 
 # Build + run the Windows app
-cd ..\windows\src-tauri
+cd ..\windows
+python ..\..\tools\setup_onnx_runtime.py --platform windows --arch x86_64
 cargo tauri dev      # dev mode with hot reload
-cargo tauri build    # release MSI under src-tauri\target\release\bundle\
+cargo tauri build    # release MSI/NSIS under target\release\bundle\
 ```
+
+For a direct Cargo release build, first build the shared frontend, then use
+`cargo build --release --features custom-protocol`. This feature embeds the UI;
+without it the executable uses the development server. The portable packager
+rejects executables missing the current frontend assets.
 
 ## Hotkeys
 
@@ -65,7 +79,9 @@ data round-trips across platforms.
 - DRM-protected windows return black via Windows.Graphics.Capture.
 - Anti-cheat tooling may flag the always-on-top overlay.
 - Per-monitor DPI requires the manifest's `PerMonitorV2` declaration.
-- Bundled detector model is generic YOLOv8n on COCO classes — train your
-  own with `tools/auto.sh` for real ad detection.
+- The bundled detector is the public AdSERP search-ad starter described in
+  [MODEL_CARD.md](../../MODEL_CARD.md). Automatic detection starts disabled;
+  only checksum-bound explicit removal classes authorize automatic covers.
+  Search-ad results do not prove reliable moving-sponsor detection.
 
 See [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) for cross-platform context.

@@ -44,13 +44,13 @@ enum Theme {
     // MARK: - Fonts (Bricolage / Geist if bundled, else system fallback)
 
     static func display(size: CGFloat, weight: Font.Weight = .bold) -> Font {
-        Font.custom("Bricolage Grotesque", size: size).weight(weight)
+        Font.system(size: size, weight: weight, design: .rounded)
     }
     static func ui(size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        Font.custom("Geist", size: size).weight(weight)
+        Font.system(size: size, weight: weight)
     }
     static func mono(size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        Font.custom("Geist Mono", size: size).weight(weight)
+        Font.system(size: size, weight: weight, design: .monospaced)
     }
 }
 
@@ -145,8 +145,7 @@ struct Wordmark: View {
         let live = AttributedString("Live")
         var block = AttributedString("Block")
         block.foregroundColor = Theme.block
-        let er = AttributedString("er")
-        return live + block + er
+        return live + block
     }
 
     var body: some View {
@@ -167,6 +166,7 @@ struct StatusDot: View {
     var size: CGFloat = 8
     var pulse: Bool = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var animating = false
 
     var body: some View {
@@ -178,7 +178,7 @@ struct StatusDot: View {
             Circle()
                 .fill(color.opacity(0.20))
                 .frame(width: size * 2, height: size * 2)
-            if pulse {
+            if pulse && !reduceMotion {
                 Circle()
                     .stroke(color.opacity(0.4), lineWidth: 1)
                     .frame(width: size, height: size)
@@ -187,7 +187,7 @@ struct StatusDot: View {
             }
         }
         .onAppear {
-            guard pulse else { return }
+            guard pulse && !reduceMotion else { return }
             withAnimation(.easeOut(duration: 1.5).repeatForever(autoreverses: false)) {
                 animating = true
             }

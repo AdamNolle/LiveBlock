@@ -14,10 +14,11 @@ final class TrainingDashboardWindow: NSWindow, NSWindowDelegate {
         self.center()
         self.isReleasedWhenClosed = false
         self.collectionBehavior = [.fullScreenAllowsTiling]
-        self.sharingType = .none
+        self.sharingType = .readOnly
 
         let host = NSHostingView(rootView: rootView)
-        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.autoresizingMask = [.width, .height]
         self.contentView = host
     }
 }

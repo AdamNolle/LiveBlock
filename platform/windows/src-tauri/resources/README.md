@@ -1,19 +1,11 @@
-# LiveBlock — bundled resources
+# LiveBlock windows resources
 
-Drop the detector model here as `yolov8n.onnx` (COCO-pretrained Ultralytics
-export), or your trained logo/sponsor model exported to ONNX.
+`tools/export_onnx.py --install` places the trained `yolov8n.onnx` and its
+checksum-bound `yolov8n.classes.json` here. Unknown or mismatched class metadata
+cannot authorize automatic removal. User-drawn regions work without a model.
 
-At runtime the app resolves `yolov8n.onnx` from this resource directory
-(`tauri::path::BaseDirectory::Resource`). If it is absent, capture/overlay still
-work for **user-drawn regions**; only the model-driven detection path is
-disabled until a model is present.
-
-This placeholder file exists so the Tauri bundler's `resources/*` glob matches
-even before a model is added. It is safe to leave in place.
-
-## ONNX Runtime DLL
-
-The `ort` crate is built with `load-dynamic`, so it loads `onnxruntime.dll` at
-runtime (from `ORT_DYLIB_PATH`, or the executable directory / system path). Ship
-`onnxruntime.dll` (matching ONNX Runtime 1.24, the API level `ort` 2.0.0-rc.12
-targets) next to the app, or set `ORT_DYLIB_PATH`.
+Before bundling, run `python3 tools/setup_onnx_runtime.py --platform windows
+--arch x64`. This installs verified ONNX Runtime 1.24.4 CPU binaries and
+preserves their license notices. Use the architecture of each release.
+A compatible GPU runtime is optional via `ORT_DYLIB_PATH`.
+Missing runtime libraries disable automatic detection without crashing manual capture.

@@ -1,344 +1,104 @@
-# LiveBlock — Local Training Tools
+# LiveBlock training and release tools
 
-These scripts let you train a logo/ad detector on your own Mac and drop it into
-the LiveBlock app. Everything runs on Apple Silicon via PyTorch's `mps` backend
-(no Nvidia required).
+The desktop apps use local inference. Training runs as a foreground, cancellable
+job and retains its checkpoint and evaluation report. Automatic removal accepts
+only `ad` and `sponsor_remove`; `team_keep` and `number_keep` protect content.
+Generic COCO class IDs never authorize removal.
 
-## What you'll get vs. what's hard
+## Public starter dataset
 
-**Achievable today (these tools):**
-- A YOLOv8-based **brand-logo detector** trained on a public logo dataset. After
-  ~30 min – 3 hrs of training on an M-series Mac, the bundled model becomes
-  one that actually fires on logos in your training set.
-- A YOLOv8 **IAB ad-slot detector** if you assemble a dataset of standard ad
-  layouts (300×250, 728×90, 160×600, 970×250 banners cropped from real pages).
+The starter uses [AdSERP](https://zenodo.org/records/15236546), licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Attribution:
+Kayhan Latifzadeh, Jacek Gwizdka, Luis A. Leiva. 2025. *A Versatile Dataset of
+Mouse and Eye Movements on Search Engine Results Pages*. SIGIR 2025.
+DOI: 10.1145/3726302.3730325.
 
-**Not achievable with this tooling:**
-- "Block any ad on any site, even ones the model has never seen." That requires
-  a vision-language model (GroundingDINO + SigLIP zero-shot, or a SAM 2-style
-  ad/no-ad segmentation model) — multi-GB weights, multi-week training. See
-  [`ASSESSMENT.md`](../ASSESSMENT.md) §3 Path B / Path C.
-
-Pick the path that matches the time you have.
-
----
-
-## Hands-off training (set it and forget it)
-
-`tools/auto.sh` runs Path B unattended: backgrounded, sleep-prevented,
-auto-installs the trained model, rebuilds the app, and sends a macOS
-notification when it's done.
+Only screenshots, ad boundaries and query metadata are imported. The importer
+verifies all archive checksums, selects one page per query, creates viewport
+crops, keeps negative examples, and groups train/validation/test splits by query.
+It writes `ATTRIBUTION.md` and `provenance.json` beside `data.yaml`.
 
 ```bash
-# 1. Get a YOLO-format dataset (see "Get a dataset" below — ~3 min on Roboflow).
-
-# 2. Start training in the background (returns immediately).
-tools/auto.sh /path/to/data.yaml
-
-# Optional: shorter run for a first try
-tools/auto.sh /path/to/data.yaml --epochs 30 --batch 8
-
-# Check progress, anytime, from any terminal
-tools/auto.sh status     # one-line status
-tools/auto.sh log        # tail -f the live log
-tools/auto.sh stop       # cancel the job
-```
-
-After running `tools/auto.sh DATA`, **close the terminal**. The job continues
-under `caffeinate -i` (Mac stays awake even if idle). When training finishes
-you'll get a system notification and the bundled model will already be
-rebuilt — just `./run.sh` to use it.
-
-A few practical notes:
-- Keep your **lid open**. `caffeinate -i` prevents idle-sleep, not lid-sleep.
-- Use **AC power**. M-series GPUs draw real wattage during training.
-- If the notification says "build failed", run `tools/auto.sh log` to see why.
-  The trained `.pt` is preserved at `tools/runs/logo-finetune/weights/best.pt`.
-
-### Get a dataset (3 minutes)
-
-Easiest source: **Roboflow Universe** (free signup, thousands of public
-datasets). Walkthrough:
-
-1. Sign up at <https://universe.roboflow.com>.
-2. Search "logo detection" or "brand detection". Open a project that has
-   ≥1000 images and the brands you care about.
-3. Click **Download Dataset** → choose **YOLOv8** format → "show download code"
-   → copy the bash snippet they show you.
-4. Paste into your terminal — it `curl`s a zip and unzips it. You'll get a
-   folder containing `data.yaml`, `train/`, `valid/`.
-5. Pass that `data.yaml` path to `tools/auto.sh`.
-
-If you'd rather use HuggingFace, LogoDet-3K, or your own labelled images,
-see "Path B" below — same training script, you just bring the dataset.
-
----
-
-## One-time setup
-
-```bash
-cd tools
-./setup_env.sh                # creates tools/.venv with ultralytics + coremltools
-source .venv/bin/activate
-python -c 'import ultralytics, coremltools; print("ok")'
-```
-
-Requires Python 3.10–3.12. `brew install python@3.11` if missing.
-
----
-
-## Path A — Drop in a community pre-trained model (~5 min)
-
-The fastest way to a working logo detector. You skip training entirely.
-
-1. Find a community-trained YOLOv8 logo `.pt`. Good starting points:
-   - **HuggingFace** — search "yolov8 logo detection" on
-     [huggingface.co/models](https://huggingface.co/models).
-   - **Roboflow Universe** — public projects at
-     [universe.roboflow.com](https://universe.roboflow.com), filter to
-     "Logos" / "Brand Detection" — most projects let you download YOLOv8
-     weights directly.
-2. Save the file somewhere local (e.g. `~/Downloads/logos-yolov8n.pt`).
-3. Convert + install:
-   ```bash
-   tools/.venv/bin/python tools/export_to_coreml.py \
-       ~/Downloads/logos-yolov8n.pt --install
-   ```
-4. Rebuild:
-   ```bash
-   ./run.sh --clean
-   ```
-
-The app now uses the new model. Toggle Detection in the menu bar to see it
-fire. Check Console.app for "VisionProcessor: loaded yolov8n CoreML model."
-
----
-
-## Path B — Train on your own dataset (30 min – 3 hrs)
-
-Best for brand-specific detection where you know which logos you want blocked.
-
-### 1. Get a dataset in YOLO format
-
-You need `data.yaml` plus `train/images`, `train/labels`, `val/images`,
-`val/labels`. Each label `.txt` has rows `class_id cx cy w h` (normalized).
-
-Four sources, easiest first:
-
-**Path D — your own labeled screenshots** (now built in!). Use the in-app
-labeling pipeline: capture screenshots with ⌘⇧S while browsing, label them
-in the **Label** window (Control Panel → Label), then run:
-```bash
-tools/.venv/bin/python tools/export_labels.py
-```
-That writes a YOLO-format dataset to
-`~/Library/Application Support/LiveBlock/training/exports/<timestamp>/`
-ready to feed to `train_logos.py` or `tools/auto.sh`.
-
-**Roboflow Universe** (recommended for cold-starting — easy, free tier).
-[universe.roboflow.com](https://universe.roboflow.com) → search "logo
-detection" → pick a project → Download Dataset → choose the **YOLOv8**
-format. You'll get a folder with `data.yaml` ready to use.
-
-**LogoDet-3K** (3,000 brand classes, 158k images, ~6 GB).
-[github.com/Wangjing1551/LogoDet-3K-Dataset](https://github.com/Wangjing1551/LogoDet-3K-Dataset)
-→ follow their conversion script to YOLO format.
-
-**OpenLogo** (352 brand classes, 27k images).
-Academic dataset, search "OpenLogo dataset Hu Yu". Convert using the
-included Pascal-VOC → YOLO scripts on GitHub.
-
-Smaller datasets train faster but generalize less. **Start small** (1,000–5,000
-images, 5–30 brands) to confirm the pipeline before committing to a big run.
-
-### 2. Train
-
-```bash
+PYTHON=python3.12 tools/setup_env.sh
+tools/.venv/bin/python tools/prepare_adserp.py --download
 tools/.venv/bin/python tools/train_logos.py \
-    --data path/to/data.yaml \
-    --epochs 50 \
-    --imgsz 640 \
-    --device auto \
-    --install
+  --data tools/datasets/adserp/yolo/data.yaml \
+  --epochs 20 --batch 8 --imgsz 640 --screen-ads \
+  --run-name adserp-v1 --no-int8 --install
 ```
 
-`--device auto` picks `mps` on Apple Silicon, `cuda` on Nvidia, else `cpu`.
-`--install` automatically replaces the bundled model on success.
+The prepared starter contains 2,494 training, 571 validation and 573 test
+screenshots from 900 distinct queries. It covers search ads. It has no labeled
+sports sponsors, team emblems or jersey numbers, and establishes no accuracy
+for those domains. See [MODEL_CARD.md](../MODEL_CARD.md) for measured results.
 
-What you'll see while training:
-- Epoch progress with mAP@50, mAP@50-95, train loss, val loss.
-- `tools/runs/logo-finetune/` will contain checkpoints (`weights/best.pt`,
-  `weights/last.pt`) and PR/F1 plots.
-- An empty disk and a fan that sounds like a hovercraft. ~3–6 GB peak disk for
-  intermediate batches; ~16 GB RAM is comfortable.
+Windows setup uses `pwsh -File tools/setup_env.ps1`, then
+`tools/.venv/Scripts/python.exe` for these commands. Linux uses `setup_env.sh`.
+Ultralytics code is provided under its
+[AGPL-3.0 license](https://github.com/ultralytics/ultralytics/blob/main/LICENSE);
+dataset attribution and model/dependency licensing are separate.
 
-Realistic training times (M-series, batch=16, imgsz=640):
-| Dataset size | Epochs | M2 Pro | M1 Air |
-|---|---|---|---|
-| 1k images | 30 | ~10 min | ~25 min |
-| 5k images | 50 | ~30 min | ~75 min |
-| 30k images | 100 | ~3 hrs | ~8 hrs |
+## Personal labels and custom datasets
 
-If your Mac runs out of memory: reduce `--batch` (try 8 or 4), or `--imgsz`
-(try 416). If training is going nowhere after 10 epochs: confirm `data.yaml`
-points at the right folders and labels are non-empty.
-
-### 3. Rebuild the app
+Draw boxes in the Labeling window and select each box's intent. Explicitly mark
+screenshots without ads as negatives. The Training window can train these
+labels or an existing YOLO `data.yaml`.
 
 ```bash
-./run.sh --clean    # forces DerivedData to recompile the new .mlpackage
+tools/.venv/bin/python tools/train_from_labels.py --epochs 50 --batch 8
 ```
 
----
+Exports reject unknown classes, invalid coordinates and empty splits. A candidate
+must achieve at least 0.90 precision and 0.80 recall before `--install` succeeds.
+When a test split exists, evaluation uses it; otherwise the report clearly says
+`val`. These thresholds validate a dataset, not every screen or streaming service.
+The Mac app compiles and reloads the installed CoreML model. The other ports
+load a fresh model on capture start.
 
-## Path C — Build your own dataset
+## Verify deployment exports
 
-You'll need this if you want detection that's specific to YOUR ads (the ones
-that show up in your specific browsing). Real talk: this is a multi-week
-project. The training tools above don't help with the data side.
-
-A reasonable workflow:
-1. Capture screenshots over a week of normal browsing (50–500 images).
-2. Annotate with [Label Studio](https://labelstud.io) (free, OSS) or
-   [Roboflow Annotate](https://roboflow.com) (free tier).
-3. Export YOLOv8 format → run Path B above.
-
-Honestly, by the time you've labelled 500 images, you'll have a strong opinion
-about what "ad" means to you, and your model will reflect that. That's the
-point.
-
----
-
-## Troubleshooting
-
-**`No module named ultralytics`** — you forgot to activate the venv.
-`source tools/.venv/bin/activate`.
-
-**Training crashes with `MPS out of memory`** — drop `--batch` to 8 or 4.
-
-**Training runs but mAP@50 stays near 0** — your labels are wrong. Open
-`tools/runs/logo-finetune/labels.jpg` to see how ultralytics is interpreting
-your annotations. Check that label .txt rows are normalized 0–1 and that
-class IDs match `data.yaml`'s `names` list.
-
-**App still detects COCO classes after install** — DerivedData cached the old
-compiled model. Run `./run.sh --clean`.
-
-**`coremltools` import fails on Python 3.13+** — coremltools doesn't support
-3.13 yet. Use Python 3.11: `PYTHON=$(brew --prefix python@3.11)/bin/python3
-./setup_env.sh`.
-
----
-
-## What goes where
-
-```
-tools/
-  lb_paths.py              # cross-platform LiveBlock data-dir resolution (one source of truth)
-  setup_env.sh             # macOS/Linux: create venv + install deps
-  setup_env.ps1            # Windows: create venv + install deps (no coremltools)
-  requirements.txt         # macOS deps (ultralytics + coremltools + friends)
-  requirements-win.txt     # Windows/Linux deps (ONNX instead of coremltools; timm for gallery)
-  train_logos.py           # ultralytics fine-tune wrapper → CoreML (mac) + ONNX (all)
-  export_to_coreml.py      # .pt → .mlpackage (+ sibling .onnx) with int8 + NMS
-  export_onnx.py           # .pt → .onnx for ONNX Runtime (Windows/Linux/mac)
-  export_labels.py         # in-app labels → MULTI-CLASS YOLO dataset (+ data.yaml names)
-  build_gallery.py         # reference logos → DINOv2/CLIP embeddings (protected-mark gallery)
-  gallery_references_layout.md  # how to lay out reference logos for build_gallery.py
-  auto.sh                  # macOS + Linux hands-off train+install+notify
-  auto.ps1                 # Windows hands-off train+install+toast
-  _unattended_runner.sh    # internal worker (OS-aware: mac rebuild vs linux ONNX install)
-  README.md                # this file
-  .venv/                   # gitignored
-  runs/                    # training outputs, gitignored
-```
-
-### Multi-class labels (sponsor-vs-team/number)
-
-`export_labels.py` now reads each box's `class` (from the label JSON sidecars —
-see `liveblock_labels::LabelClass`) and emits a **multi-class** YOLO dataset:
-
-| JSON `class`        | YOLO id | name             | intent |
-|---------------------|---------|------------------|--------|
-| `ad` (or absent)    | 0       | `ad`             | remove |
-| `sponsor_remove`    | 1       | `sponsor_remove` | remove |
-| `team_keep`         | 2       | `team_keep`      | keep   |
-| `number_keep`       | 3       | `number_keep`    | keep   |
-
-Legacy single-class datasets (no `class` key) map to id 0 byte-identically.
-The KEEP classes are trained on purpose: the detector learns to localize team
-emblems / numbers so the on-device pipeline can **carve them out** of the remove
-mask (`build_remove_mask_from_tracks`) — identity is never erased. Pass
-`--binary` to collapse back to the legacy single `ad` class (drops keep boxes).
-
-### One training run → every platform
-
-`train_logos.py --install` exports **both** a CoreML `.mlpackage` (macOS Vision)
-and an `.onnx` (Windows ORT+DirectML, Linux ORT+CUDA/ROCm/CPU). The ONNX lands
-in the per-OS runtime models dir (hot-loaded by a running Tauri app) and the
-in-repo Tauri `resources/` (bundled on the next build). NMS is left to the Rust
-detector (`liveblock_detection::non_max_suppression`), so the ONNX is exported
-without the embedded NMS op.
-
-### Cross-platform data paths
-
-All tools resolve the LiveBlock dir per-OS via `lb_paths.py`, matching the native
-apps exactly:
-
-- macOS   → `~/Library/Application Support/LiveBlock`
-- Windows → `%APPDATA%\LiveBlock`
-- Linux   → `~/.local/share/LiveBlock` (or `$XDG_DATA_HOME/LiveBlock`)
-
-Run `python tools/lb_paths.py` to print the resolved paths on your box.
-
-### Protected-mark reference gallery
-
-`build_gallery.py` embeds team/league reference logos with DINOv2 (default) or
-CLIP and writes `gallery.json` (+ optional `.npy`) for
-`liveblock-detection::GalleryMatcher`, which computes `team_gallery_sim` on
-device. The model weights are a one-time prerequisite (`pip install timm` for
-DINOv2). See [`gallery_references_layout.md`](gallery_references_layout.md).
-
-### Hands-off training per OS
+Use the same screenshot split through the actual inference path:
 
 ```bash
-# macOS / Linux
-tools/auto.sh /path/to/data.yaml          # or omit to auto-export labels (mac)
-# Windows
-pwsh -File tools/auto.ps1                  # auto-exports labels, then trains
-pwsh -File tools/auto.ps1 path\to\data.yaml --epochs 30
+swift tools/validate_coreml.swift MODEL.mlpackage IMAGES_DIR coreml-predictions.json
+tools/.venv/bin/python tools/evaluate_predictions.py \
+  --predictions coreml-predictions.json --labels LABELS_DIR --output coreml-results.json
+
+cargo run --release --manifest-path tools/validate_onnx/Cargo.toml -- \
+  linux PATH_TO_ORT_LIBRARY MODEL.onnx IMAGES_DIR linux-predictions.json
 ```
 
-`auto.ps1` and `auto.sh` share the same subcommands: `status`, `log`, `stop`.
+The Rust harness also accepts `windows` and imports that port's real detector.
+It tests preprocessing, ONNX inference and decoding; it does not test native
+screen capture or compositor behavior on a different OS. ONNX class metadata
+must match the model's SHA-256 before automatic removal is permitted.
 
-User-collected training data lives outside the repo, in your
-Application Support folder:
+## Bundle ONNX Runtime
 
+```bash
+python3 tools/setup_onnx_runtime.py --platform windows --arch x64
+python3 tools/setup_onnx_runtime.py --platform linux --arch x64
+# For a native Linux ARM64 build:
+python3 tools/setup_onnx_runtime.py --platform linux --arch aarch64
 ```
-~/Library/Application Support/LiveBlock/training/
-  screenshots/   captured PNGs (⌘⇧S in app, or auto-capture)
-  labels/        one JSON per labeled PNG (in-app format)
-  exports/       YOLO-format datasets from export_labels.py
-  trash/         screenshots you discarded in the labeling UI
+
+This downloads official ONNX Runtime 1.24.4 CPU binaries, verifies their published
+SHA-256 digests, and preserves LICENSE and ThirdPartyNotices in the app resources.
+Bundle the matching architecture before building each installer. Missing runtime
+or model files leave manual blocking available and disable automatic detection.
+An optional GPU runtime can be selected with `ORT_DYLIB_PATH`.
+
+## Mac signing and notarization
+
+```bash
+tools/release_macos.sh
+# Save credentials locally once; never put passwords in a repository or chat:
+xcrun notarytool store-credentials LiveBlock --team-id RSDJXF7DXN
+tools/release_macos.sh --notarize LiveBlock
 ```
 
-## End-to-end "train on your own data" flow
-
-1. Run LiveBlock. **Start** capturing.
-2. While browsing, press **⌘⇧S** every time you see an ad.
-   (Or: enable Auto-capture in Settings — saves a frame every N seconds.)
-3. Open the **Label** window (Control Panel → Label, or menu bar).
-   For each screenshot: drag a rectangle around each ad, then press → to
-   advance. Press **N** if there are no ads in the screenshot
-   (negative example — just as valuable).
-4. Once you have ~200+ labeled screenshots:
-   ```bash
-   tools/.venv/bin/python tools/export_labels.py
-   tools/auto.sh ~/Library/Application\ Support/LiveBlock/training/exports/<latest>/data.yaml
-   ```
-5. Walk away. macOS notification arrives 30 min – 3 hrs later.
-6. `./run.sh` — your fine-tuned model is now active. Toggle Detection in the
-   menu bar to see it fire.
-
-Iterate by capturing more, labeling more, and re-training. Each cycle the
-detector gets better at the ads you actually see in your day-to-day.
+The script builds ARM64 and Intel, signs with Developer ID and hardened runtime,
+checks both architectures and the compiled model, and creates the ZIP under
+`~/Library/Caches/LiveBlock/release`. Notarization requires a valid keychain
+profile. Only Apple's `Accepted` response, successful stapling and Gatekeeper
+assessment establish a notarized release. No Gatekeeper exceptions are installed.

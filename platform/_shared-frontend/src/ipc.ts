@@ -21,6 +21,7 @@ export interface PatchPayload {
   width: number;
   height: number;
   png_data_url: string;
+  fill?: { r: number; g: number; b: number; a: number };
 }
 
 export interface MonitorInfo {
@@ -41,6 +42,7 @@ export interface LabelBox {
   y: number;
   width: number;
   height: number;
+  class?: "ad" | "sponsor_remove" | "team_keep" | "number_keep";
 }
 
 export interface LabelDocument {
@@ -54,7 +56,12 @@ export interface LabelDocument {
 
 export const lb = {
   // Capture / detection lifecycle.
+  captureStatus: () => invoke<{ running: boolean; coverOnly: boolean; detectionEnabled: boolean; detectorReady: boolean; overlayMode: string; trainingRunning: boolean }>("capture_status"),
   startCapture: () => invoke<void>("start_capture"),
+  startPaintOver: () => invoke<void>("start_paint_over"),
+  setCoverOnlyPreferred: (coverOnly: boolean) =>
+    invoke<void>("set_cover_only_preferred", { coverOnly }),
+  currentPatches: () => invoke<PatchPayload[]>("current_patches"),
   stopCapture: () => invoke<void>("stop_capture"),
   setDetectionEnabled: (enabled: boolean) =>
     invoke<void>("set_detection_enabled", { enabled }),
@@ -71,7 +78,7 @@ export const lb = {
 
   // Labeling pipeline.
   captureScreenshotForLabeling: () =>
-    invoke<string | null>("capture_screenshot_for_labeling").catch(() => null),
+    invoke<string | null>("capture_screenshot_for_labeling"),
   listScreenshots: () => invoke<ScreenshotEntry[]>("list_screenshots"),
   loadScreenshot: (path: string) => invoke<number[]>("load_screenshot", { path }),
   saveLabel: (path: string, doc: LabelDocument) =>
@@ -81,8 +88,8 @@ export const lb = {
   discardScreenshot: (path: string) => invoke<void>("discard_screenshot", { path }),
 
   // Training.
-  startTraining: (epochs: number, batch: number, imgsz: number) =>
-    invoke<void>("start_training", { epochs, batch, imgsz }),
+  startTraining: (epochs: number, batch: number, imgsz: number, dataset?: string) =>
+    invoke<void>("start_training", { epochs, batch, imgsz, dataset: dataset || null }),
   cancelTraining: () => invoke<void>("cancel_training"),
 
   // Window lifecycle.
@@ -92,10 +99,16 @@ export const lb = {
 };
 
 export const events = {
+  onOperationFailed: (cb: (message: string) => void) =>
+    listen<string>("operation-failed", e => cb(e.payload)),
   onPatches: (cb: (patches: PatchPayload[]) => void) =>
     listen<PatchPayload[]>("patches-updated", (e) => cb(e.payload)),
   onRegions: (cb: (regions: NormalizedRegion[]) => void) =>
     listen<NormalizedRegion[]>("regions-updated", (e) => cb(e.payload)),
   onCaptureState: (cb: (running: boolean) => void) =>
-    listen<boolean>("capture-state-changed", (e) => cb(e.payload)),
+    listen<boolean | { running: boolean }>("capture-state-changed", (e) =>
+      cb(typeof e.payload === "boolean" ? e.payload : e.payload.running)),
+  onTrainingLog: (cb: (line: string) => void) => listen<string>("training-log", e => cb(e.payload)),
+  onTrainingFinished: (cb: (code: number | null) => void) =>
+    listen<{ exitCode: number | null }>("training-finished", e => cb(e.payload.exitCode)),
 };

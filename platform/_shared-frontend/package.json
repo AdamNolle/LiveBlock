@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Shared Tauri webview frontend for the Windows + Linux LiveBlocker ports. Light-only neumorphism on a lavender base, ported verbatim from the Claude Design handoff bundle.",
+  "description": "Shared LiveBlock desktop interface with adaptive light and dark appearance.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

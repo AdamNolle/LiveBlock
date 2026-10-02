@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import math
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -91,20 +92,15 @@ def box_class_name(box: dict) -> str:
     """Resolve a box's class string, defaulting to legacy 'ad' when absent.
 
     Mirrors liveblock_labels: a missing/empty `class` key == LabelClass::Ad.
-    Unknown class strings are conservatively treated as 'ad' (REMOVE) so a
-    future label class never silently becomes an un-handled keep — but we warn.
+    Unknown class strings are rejected so protected content cannot accidentally
+    become a removal target.
     """
     raw = box.get("class")
     if raw is None or raw == "":
         return "ad"
     if raw in CLASS_TO_ID:
         return raw
-    print(
-        f"Warning: unknown box class {raw!r}; treating as 'ad' (remove). "
-        f"Update CLASS_ORDER in export_labels.py if this is a new class.",
-        file=sys.stderr,
-    )
-    return "ad"
+    raise ValueError(f"Unknown label class {raw!r}; refusing to train it as removable content")
 
 
 def to_yolo_lines(label_doc: dict, class_to_id: Dict[str, int], *, binary: bool) -> List[str]:
@@ -129,6 +125,8 @@ def to_yolo_lines(label_doc: dict, class_to_id: Dict[str, int], *, binary: bool)
         y = float(box["y"])
         w = float(box["width"])
         h = float(box["height"])
+        if not all(math.isfinite(v) for v in (x, y, w, h)) or min(x, y) < 0 or min(w, h) <= 0 or x + w > 1.000001 or y + h > 1.000001:
+            raise ValueError(f"Invalid normalized label rectangle: {box!r}")
         cx = x + w / 2.0
         cy = y + h / 2.0
         lines.append(f"{class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
@@ -138,7 +136,7 @@ def to_yolo_lines(label_doc: dict, class_to_id: Dict[str, int], *, binary: bool)
 def render_data_yaml(out: Path, names: List[str]) -> str:
     """Produce a YOLO data.yaml body with an indexed `names:` mapping."""
     lines = [
-        f"path: {out}",
+        f"path: {json.dumps(str(out))}",
         "train: images/train",
         "val: images/val",
         "names:",
@@ -183,6 +181,10 @@ def main() -> int:
         "Use for backward-compat with old single-class consumers.",
     )
     args = ap.parse_args()
+    if not 0 < args.val_split < 1:
+        ap.error("--val-split must be between 0 and 1 (exclusive)")
+    if args.name and (Path(args.name).name != args.name or args.name in (".", "..")):
+        ap.error("--name must be a single folder name")
 
     root = args.root.expanduser().resolve()
     pairs = discover(root)
@@ -208,6 +210,10 @@ def main() -> int:
             print(f"Warning: couldn't parse {json_path}: {e}", file=sys.stderr)
             continue
         boxes = doc.get("boxes", [])
+        try:
+            to_yolo_lines(doc, class_to_id, binary=args.binary)
+        except (ValueError, TypeError, KeyError) as e:
+            sys.exit(f"Invalid label file {json_path}: {e}")
         if not boxes and not args.include_empty:
             skipped_empty += 1
             continue
@@ -218,16 +224,20 @@ def main() -> int:
     if not kept:
         sys.exit("All labels are empty. Add some boxes, or pass --include-empty.")
 
+    if len(kept) < 2:
+        sys.exit("At least two labeled screenshots are required for separate training and validation sets.")
     # Split
     random.seed(args.seed)
     random.shuffle(kept)
-    val_n = max(1, int(len(kept) * args.val_split)) if len(kept) > 1 else 0
+    val_n = min(len(kept) - 1, max(1, int(len(kept) * args.val_split)))
     val = kept[:val_n]
     train = kept[val_n:]
 
     # Output structure
     name = args.name or "export-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     out = root / "exports" / name
+    if out.exists():
+        sys.exit(f"Export already exists: {out}. Choose a fresh --name to avoid stale train/validation images.")
     images_train = out / "images" / "train"
     images_val = out / "images" / "val"
     labels_train = out / "labels" / "train"

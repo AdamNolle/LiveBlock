@@ -9,7 +9,10 @@ targets:
     platform: macOS
     deploymentTarget: "26.0"
     sources:
-      - Sources
+      - path: Sources
+        excludes:
+          - "**/*.bak"
+          - "**/*.bak/**"
       - path: core/crates/liveblock-bridge/generated/LiveBlockBridge/LiveBlockBridge.swift
         group: Bridge
       - path: core/crates/liveblock-bridge/generated/SwiftBridgeCore.swift

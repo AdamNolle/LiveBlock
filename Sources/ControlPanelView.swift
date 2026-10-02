@@ -2,21 +2,30 @@ import SwiftUI
 
 /// LiveBlocker control panel — port of the design's menu-bar-dropdown screen.
 struct ControlPanelView: View {
+    @Environment(\.openSettings) private var openSettings
+    @AppStorage("settingsSection") private var settingsSection = "blocking"
     @ObservedObject var controller: AppController
+    @ObservedObject private var captureManager: ScreenCaptureManager
+
+    init(controller: AppController) {
+        self.controller = controller
+        self.captureManager = controller.captureManager
+    }
 
     var body: some View {
-        ZStack {
-
+        ScrollView {
             VStack(spacing: Theme.Spacing.l) {
                 header
                 statusBanner
                 primaryActions
                 regionList
-                Spacer(minLength: 0)
                 footer
             }
             .padding(Theme.Spacing.l)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(.regularMaterial)
     }
 
     // MARK: - Status banner — single source of truth the user can always trust
@@ -76,17 +85,22 @@ struct ControlPanelView: View {
     }
 
     private var bannerState: BannerState {
-        let cm = controller.captureManager
+        let cm = captureManager
 
         // Highest-priority: missing permission. Nothing else matters until this is fixed.
-        if !controller.screenRecordingGranted {
+        if !controller.screenRecordingGranted && !controller.usesCoverOnly {
             return BannerState(
                 icon: "exclamationmark.shield.fill",
                 tint: Theme.warn,
                 title: "Screen Recording permission needed",
                 detail: "Grant LiveBlock permission so it can see what's on your screen.",
                 action: BannerAction(label: "Open Settings",
-                                     run: { Permissions.openSystemSettings(.screenRecording) })
+                                     run: {
+                                         Permissions.requestScreenRecording()
+                                         if !Permissions.screenRecordingGranted() {
+                                             Permissions.openSystemSettings(.screenRecording)
+                                         }
+                                     })
             )
         }
 
@@ -100,6 +114,16 @@ struct ControlPanelView: View {
                 detail: err,
                 action: BannerAction(label: "Try again",
                                      run: { controller.toggleCapture() })
+            )
+        }
+
+        if cm.isStarting {
+            return BannerState(
+                icon: "hourglass",
+                tint: Theme.block,
+                title: "Starting screen capture",
+                detail: "Waiting for the macOS capture service.",
+                action: BannerAction(label: "Cancel", run: { controller.toggleCapture() })
             )
         }
 
@@ -131,8 +155,12 @@ struct ControlPanelView: View {
                     action: nil
                 )
             default:
-                let regions = controller.regionCount
+                let regions = controller.activeRegionCount
                 let live = cm.currentPatches.count
+                if cm.isCoverOnly {
+                    return BannerState(icon: "checkmark.shield.fill", tint: Theme.success,
+                                       title: "Cover only", detail: "\(live) opaque cover\(live == 1 ? "" : "s") · no screen capture", action: nil)
+                }
                 let fps = Int(cm.framesPerSecond.rounded())
                 return BannerState(
                     icon: "checkmark.shield.fill",
@@ -148,10 +176,10 @@ struct ControlPanelView: View {
         return BannerState(
             icon: "shield.lefthalf.filled",
             tint: Theme.block,
-            title: "Ready",
+                title: "Ready",
             detail: controller.regionCount > 0
                 ? "\(controller.regionCount) region\(controller.regionCount == 1 ? "" : "s") drawn. Click Block to start."
-                : "Draw a region first, or just click Block to use the detector.",
+                : "Draw a region, or enable automatic detection in Settings.",
             action: BannerAction(label: "Block",
                                  run: { controller.toggleCapture() })
         )
@@ -174,18 +202,20 @@ struct ControlPanelView: View {
                 }
             }
             Spacer()
-            Toggle("", isOn: Binding(
-                get: { controller.isRunning },
-                set: { _ in controller.toggleCapture() }
-            ))
-            .labelsHidden()
-            .help(controller.isRunning ? "Stop blocking (\u{2318}\u{21E7}L)" : "Start blocking (\u{2318}\u{21E7}L)")
+            Button(captureManager.isStarting ? "Cancel" : controller.isRunning ? "Stop" : "Start") {
+                controller.toggleCapture()
+            }
+            .buttonStyle(.glassProminent)
+            .tint(Theme.block)
+            .keyboardShortcut("l", modifiers: [.command, .shift])
+            .help(captureManager.isStarting ? "Cancel starting capture" : controller.isRunning ? "Stop blocking (\u{2318}\u{21E7}L)" : "Start blocking (\u{2318}\u{21E7}L)")
         }
     }
 
     // MARK: - Primary actions
 
     private var primaryActions: some View {
+        GlassEffectContainer(spacing: 8) {
         HStack(spacing: 8) {
             Button {
                 controller.toggleEditor()
@@ -196,7 +226,7 @@ struct ControlPanelView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.glassProminent).tint(Theme.block)
+            .buttonStyle(.glass)
             .keyboardShortcut("b", modifiers: [.command, .shift])
             .help("Drag a rectangle on screen to block (\u{2318}\u{21E7}B)")
 
@@ -209,8 +239,9 @@ struct ControlPanelView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.glassProminent).tint(Theme.detect)
+            .buttonStyle(.glass)
             .keyboardShortcut("s", modifiers: [.command, .shift])
+            .disabled(controller.usesCoverOnly)
             .help("Snapshot the screen for labeling (\u{2318}\u{21E7}S). Starts capture if needed.")
 
             Button {
@@ -222,8 +253,9 @@ struct ControlPanelView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.glassProminent).tint(Theme.train)
+            .buttonStyle(.glass)
             .help("Open the Training Dashboard")
+        }
         }
     }
 
@@ -246,11 +278,8 @@ struct ControlPanelView: View {
                           systemImage: "square.dashed.inset.filled",
                           accent: Theme.train,
                           help: "View, rename, toggle, or delete saved regions") {
-                    if #available(macOS 14, *) {
-                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                    } else {
-                        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-                    }
+                    settingsSection = "regions"
+                    openSettings()
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 if controller.regionCount > 0 {
@@ -291,7 +320,7 @@ struct ControlPanelView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(Color.white.opacity(0.5))
+            .background(.quaternary.opacity(0.35))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -305,16 +334,12 @@ struct ControlPanelView: View {
     private var footer: some View {
         HStack(spacing: 8) {
             Button {
-                if #available(macOS 14, *) {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                } else {
-                    NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-                }
+                openSettings()
                 NSApp.activate(ignoringOtherApps: true)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "gearshape")
-                    Text("Preferences")
+                    Text("Settings")
                 }
             }
             .buttonStyle(.glass).controlSize(.small)
@@ -328,7 +353,7 @@ struct ControlPanelView: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "stop.circle.fill")
-                    Text("Panic")
+                    Text("Stop all")
                 }
             }
             .buttonStyle(.glass).controlSize(.small)
@@ -350,7 +375,8 @@ struct ControlPanelView: View {
 
     private var stateColor: Color { controller.isRunning ? Theme.success : Theme.warn }
     private var stateLine: String {
-        controller.isRunning ? "Active · \(controller.regionCount) region\(controller.regionCount == 1 ? "" : "s")"
+        if captureManager.isStarting { return "Starting" }
+        return controller.isRunning ? "Active · \(controller.activeRegionCount) region\(controller.activeRegionCount == 1 ? "" : "s")"
                              : "Idle"
     }
 }

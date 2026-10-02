@@ -1,0 +1,25 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  linux-core:
+    name: Rust core and Python tools on Adlon
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","personal-ci"]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test portable Rust core
+        run: cargo test --manifest-path core/Cargo.toml
+      - name: Check Python and shell tool syntax
+        shell: bash
+        run: |
+          python3 -m compileall -q tools
+          bash -n kill.sh run.sh tools/*.sh

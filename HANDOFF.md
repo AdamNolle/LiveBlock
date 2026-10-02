@@ -9,7 +9,8 @@ Apple notarized, or undetectable to DRM systems.
 This session began from main commit `c151d18`. It modernized the SwiftUI and
 shared desktop UI, hardened capture/overlay lifecycle and model loading,
 trained an openly sourced starter ad detector, and built all three desktop
-ports. There is no iOS app target. `validation/release-packages.json` records
+ports. There is no iOS app target. The snapshot
+[release manifest](https://github.com/AdamNolle/LiveBlock/blob/31d0195/validation/release-packages.json) records
 exact artifact hashes and distinguishes compile checks from native acceptance.
 Main is being consolidated using the newer release branch at `54c7756`.
 The complete session snapshot is commit `31d0195`, retained as a merge parent.
@@ -32,7 +33,7 @@ Local signed app: `/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock.a
 The signed ZIP is recorded in the release manifest. It is **not notarized**.
 The last `notarytool history --keychain-profile LiveBlock` exited 69 because
 that profile is missing. The user does not know an existing profile name.
-Follow `NOTARIZATION.md`: have the user save Apple credentials locally; never
+Follow the snapshot `NOTARIZATION.md` and current `docs/MACOS_RELEASE.md`: have the user save Apple credentials locally; never
 request passwords, private keys, or app-specific passwords in chat. Then run
 `tools/release_macos.sh --notarize LiveBlock`, verify Apple's Accepted result,
 staple, and verify Gatekeeper. Signing alone is not notarization.
@@ -53,7 +54,8 @@ A larger combined-v3-small training job is still running locally:
 - Log: `/tmp/liveblock-combined-v3-training.log`.
 - Results: `tools/runs/combined-v3-small/results.csv`.
 - Checkpoints: `tools/runs/combined-v3-small/weights/`.
-- Latest observed progress is in `validation/combined-v3-small/training-start.json`.
+- Last confirmed completed epoch: 17 of 30; the process remains active.
+- Earlier observation report is in the snapshot `validation/combined-v3-small/training-start.json`.
 - Command: `tools/.venv/bin/python -u tools/train_logos.py --data tools/datasets/combined/yolo/data.yaml --model tools/pretrained/yolo11s.pt --epochs 30 --batch 2 --imgsz 960 --device mps --run-name combined-v3-small --patience 8 --screen-ads --no-int8`.
 
 Do not launch a duplicate job, infer completion from old logs, or install an
@@ -88,27 +90,28 @@ compositor-loss checks in an isolated Openbox/xcompmgr display. Reports bind
 those observations to exact binary hashes. Ubuntu 26.04 build requires glibc
 2.43; do not advertise compatibility with older distributions.
 
-Latest source additionally initializes actual Tauri GTK renderer/editor
-windows using GTK layer-shell before realization. Compilation passed; the initial release build was killed by VM memory
-pressure. A retry uses a temporary 1 GiB swap file; release
-build retry session 82440 runs in the owned Lima VM `liveblock-check`, with guest
-log `/tmp/liveblock-wayland-layer-release-retry.log`. Native application acceptance
-is pending until explicitly recorded. The separately tested Python layer
-probe proved fullscreen placement and click-through after remapping on Sway
-1.11, not the application's capture pipeline. Start from
-`tools/validate_wayland_overlay/README.md` and its validation report.
-The host temporary fixture is `/tmp/liveblock-wayland-app-session.sh`.
-The VM currently has no fixture viewer/app running. Do not stop it while the
-release build remains live. Afterwards stop only this owned VM and close owned
-viewer tabs. Do not kill unrelated processes or reset user privacy settings.
+The session snapshot additionally initializes the actual Tauri GTK renderer/editor
+windows using GTK layer-shell before realization. The release compile retry
+passed, the package installed, and native application checks passed on Sway:
+cover-only Start, editor above fullscreen, Escape, precise cover placement,
+initial click-through, Stop, restart/remap, and click-through after remapping.
+The underlying test counter reached 1 initially and 2 after remapping.
+See [the exact application report](docs/session-2026-10-01/wayland-app-cover.json).
+This report applies to snapshot `31d0195`, not the different current main source.
+The snapshot package is retained separately in the local release directory as
+`LiveBlock-linux-arm64-session-31d0195-layer-shell.deb`; it does not replace the
+previously recorded package or establish a release for current main.
 
-Verify the actual release renderer above fullscreen content, remap click-through,
-editor keyboard/escape behavior and X11 regression before promoting the new
-package. A headless single-output software-rendered result does not establish
-multiple-output mapping, fractional scaling, hardware GPU behavior or portal
-capture. The current Sway fixture lacks a GlobalShortcuts portal provider;
-configure portal environment/services for real capture acceptance.
-GNOME without layer-shell remains a degraded floating-window path.
+The initial release build hit VM memory pressure. A retry succeeded with a
+1 GiB disk-backed swap file, subsequently removed. The viewer and owned app,
+fixture, compositor and network processes have been stopped. The owned VM is confirmed Stopped. Graceful Lima shutdown timed out after
+fixture cleanup; a scoped force-stop completed successfully. Temporary fixture files were in `/tmp`; no user display or
+privacy setting was changed.
+
+Next verify portal capture, global shortcuts with an actual provider, X11
+regression for this new package, multiple-output mapping, fractional scaling
+and hardware GPUs. The headless Sway single-output cover test does not prove
+those paths. GNOME without layer-shell remains a degraded floating-window path.
 
 Protected video can intentionally return black frames or reject capture.
 Handle this transparently and fail closed. Do not promise invisible capture,
@@ -121,13 +124,27 @@ modify third-party players, or claim that overlay/capture settings defeat DRM.
 2. Finish Apple credential setup, notarization, stapling and Gatekeeper acceptance.
 3. Observe the existing training job, evaluate completed exports by domain,
    promote only a candidate that passes recorded deployment gates.
-4. Finish native Wayland application verification and native Windows acceptance.
+4. Extend Wayland acceptance to portal capture, display/scale cases and
+   hardware; verify the current main implementation and native Windows.
 5. Expand display/scale/fullscreen/runtime matrix; record precise limitations.
 
 Local release binaries live outside Git in
 `/Users/adamnolle/Library/Caches/LiveBlock/release/`. Hashes are in the manifest.
 GitHub repository source is not equivalent to notarized release publication.
 
-Temporary retry swap: `/home/adamnolle.guest/liveblock-release.swap`.
-After the build exits, run guest `sudo swapoff /home/adamnolle.guest/liveblock-release.swap`
-and remove only that owned file before stopping the VM.
+
+## Consolidation verification
+
+Merge `2dbee79` has parents `31d0195` (this session) and `54c7756` (existing
+release implementation). The latter also contains the former open-vocabulary
+branch head `37f8e2d`. Both remote feature branches were deleted only after
+confirming all three heads are ancestors of main. The GitHub default branch
+and sole local/remote branch are `main`. The main working tree differs from
+the existing release implementation only by these handoff notes and local
+artifact ignore rules; no competing app sources were mixed automatically.
+
+[Desktop CI](https://github.com/AdamNolle/LiveBlock/actions/runs/36953691194)
+for `2dbee79`: shared contract checks, macOS 26 build/tests, Ubuntu compilation, Fedora RPM
+lifecycle and Flatpak lifecycle passed. Windows compilation was still running
+when last checked; the next agent should inspect its final result. This does not
+prove notarization, real-device Windows acceptance or model promotion.

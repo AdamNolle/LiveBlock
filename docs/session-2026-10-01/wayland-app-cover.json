@@ -1,0 +1,83 @@
+{
+  "observed_at_utc": "2026-10-02T02:19:29.526059+00:00",
+  "source_snapshot": "31d0195",
+  "applies_to_current_main_implementation": false,
+  "native_source_sha256": {
+    "platform/linux/src-tauri/src/overlay/mod.rs": "9ee34323a342765e8b61496292b0403a42dd03b839c9da063abb2a0468ff2aef",
+    "platform/linux/src-tauri/src/main.rs": "5e679782febfaa4928c8d4650167cd873af4dc488a0d41580a854bd31e5a89fb",
+    "platform/linux/src-tauri/src/state.rs": "c49b38be365616bfef71a742ed85632442ff91932694caa905049521ae275385",
+    "platform/linux/src-tauri/tauri.conf.json": "0e07eb40f4efc6a523b13003dcc1c1dbc1fd3085beb7c8b3c8766ad76f9f1a15"
+  },
+  "release_build_passed": true,
+  "initial_build_failure": "SIGKILL during release compilation without swap; retry succeeded using 1 GiB temporary disk-backed swap",
+  "package": {
+    "path": "/Users/adamnolle/Library/Caches/LiveBlock/release/LiveBlock-linux-arm64-session-31d0195-layer-shell.deb",
+    "bytes": 24292272,
+    "sha256": "278bd27c3dc1742d412529aa293390ea3c82824798c298a5e10c412d25a5e34f",
+    "installed_executable_sha256": "53d73c4fb08a712a56fc73c009c21f03f08b8ce48081a48ca7f841e620585323",
+    "required_layer_shell_dependency": "libgtk-layer-shell0 (>= 0.6)",
+    "promoted_as_current_main_release": false
+  },
+  "environment": {
+    "platform": "Ubuntu 26.04 ARM64 Lima VM",
+    "compositor": "Sway 1.11",
+    "gtk_layer_shell": "0.10.0",
+    "display_logical_size": [
+      1280,
+      800
+    ],
+    "scale": 1,
+    "renderer": "headless pixman"
+  },
+  "native_startup": {
+    "render_realized_before_initialization": false,
+    "editor_realized_before_initialization": false,
+    "both_actual_tauri_windows_initialized_as_layer_surfaces": true,
+    "control_panel_rendered": true
+  },
+  "actual_application_checks": {
+    "cover_only_mode_start": true,
+    "editor_above_fullscreen_window": true,
+    "editor_escape_closes": true,
+    "cover_drawn_at_logical_rectangle": [
+      120,
+      150,
+      200,
+      80
+    ],
+    "renderer_above_fullscreen_window": true,
+    "outside_rectangle_transparent": true,
+    "initial_click_through_counter": 1,
+    "stop_hides_cover": true,
+    "start_remaps_saved_cover": true,
+    "restored_fullscreen_placement": true,
+    "click_through_after_remap_counter": 2
+  },
+  "target_log": [
+    "target-ready",
+    "actual-app-covered-target-click=1",
+    "fullscreen=False",
+    "fullscreen=True",
+    "actual-app-covered-target-click=2"
+  ],
+  "not_verified": [
+    "portal capture",
+    "GlobalShortcuts portal",
+    "multiple outputs",
+    "fractional scaling",
+    "hardware GPU rendering",
+    "native X11 regression for this new package",
+    "current main implementation using a different source tree"
+  ],
+  "diagnostics": [
+    "GTK scale-factor assertions occurred during startup; tested cover/editor behavior still passed",
+    "Sway fixture lacks a usable GlobalShortcuts provider; no global-hotkey acceptance claim"
+  ],
+  "cleanup": {
+    "viewer_closed": true,
+    "owned_fixture_processes_stopped": true,
+    "temporary_swap_removed": true,
+    "vm_stopped": true,
+    "vm_shutdown_method": "Graceful Lima stop timed out waiting for exiting event; scoped force-stop succeeded and list reported Stopped."
+  }
+}

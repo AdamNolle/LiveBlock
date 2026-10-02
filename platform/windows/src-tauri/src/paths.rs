@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use liveblock_config::{validate_managed_file_path, ManagedPathMode};
 use std::path::{Path, PathBuf};
 
 /// `%APPDATA%\LiveBlock`. Falls back to the platform config dir if APPDATA isn't set.
@@ -26,6 +27,16 @@ pub fn appdata_root() -> PathBuf {
 
 pub fn regions_path() -> PathBuf {
     appdata_root().join("regions.json")
+}
+
+pub fn models_dir() -> PathBuf {
+    appdata_root().join("models")
+}
+pub fn active_model_path() -> PathBuf {
+    models_dir().join("liveblock-detector.onnx")
+}
+pub fn model_update_state_path() -> PathBuf {
+    models_dir().join("update-state.json")
 }
 
 pub fn training_root() -> PathBuf {
@@ -48,6 +59,7 @@ pub fn trash_dir() -> PathBuf {
 pub fn ensure_directories() -> Result<()> {
     for dir in [
         appdata_root(),
+        models_dir(),
         training_root(),
         screenshots_dir(),
         labels_dir(),
@@ -66,6 +78,32 @@ pub fn new_screenshot_stem() -> String {
 }
 
 /// Path to the JSON label sidecar for a screenshot path.
+pub fn validate_screenshot_path(path: &Path) -> Result<PathBuf> {
+    ensure_directories()?;
+    validate_managed_file_path(
+        path,
+        &screenshots_dir(),
+        "png",
+        ManagedPathMode::ExistingRegularFile,
+    )
+    .context("validate managed screenshot path")
+}
+
+pub fn validate_label_path(path: &Path, must_exist: bool) -> Result<PathBuf> {
+    ensure_directories()?;
+    validate_managed_file_path(
+        path,
+        &labels_dir(),
+        "json",
+        if must_exist {
+            ManagedPathMode::ExistingRegularFile
+        } else {
+            ManagedPathMode::ExistingOrNewRegularFile
+        },
+    )
+    .context("validate managed label path")
+}
+
 pub fn label_path_for(screenshot: &Path) -> PathBuf {
     let stem = screenshot
         .file_stem()

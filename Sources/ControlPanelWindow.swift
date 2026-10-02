@@ -7,11 +7,12 @@ import SwiftUI
 /// title bar with a close button (close hides, doesn't quit). Never traps
 /// clicks outside its own ~380x220 frame, so it can never lock the user out.
 final class ControlPanelWindow: NSPanel, NSWindowDelegate {
+    private var suppressCloseHint = false
 
     init(rootView: AnyView) {
         let initial = Self.defaultFrame()
         super.init(contentRect: initial,
-                   styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
+                   styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow, .hudWindow],
                    backing: .buffered,
                    defer: false)
 
@@ -31,12 +32,11 @@ final class ControlPanelWindow: NSPanel, NSWindowDelegate {
         // macOS 26; canJoinAllSpaces is what we want here.
         self.collectionBehavior = [.canJoinAllSpaces, .stationary]
 
-        // The capture filter excludes all windows owned by this app.
-        self.sharingType = .readOnly
+        // Don't appear in our own ScreenCaptureKit output.
+        self.sharingType = .none
 
         let host = NSHostingView(rootView: rootView)
-        host.sizingOptions = []
-        host.autoresizingMask = [.width, .height]
+        host.translatesAutoresizingMaskIntoConstraints = false
         self.contentView = host
         self.minSize = NSSize(width: 360, height: 360)
         self.setContentSize(initial.size)
@@ -46,30 +46,43 @@ final class ControlPanelWindow: NSPanel, NSWindowDelegate {
         self.delegate = self
     }
 
-    /// On the first time the user closes the Control Panel, post a quick
-    /// notification reminding them the app keeps running in the menu bar.
-    /// Without this, new users will think LiveBlock crashed because the
-    /// Dock icon stays but the panel disappears.
+    /// Prevent application termination from persisting the user-close hint or
+    /// opening a modal alert while AppKit is closing windows.
+    func prepareForShutdown() {
+        suppressCloseHint = true
+    }
+
+    /// On the first time the user closes the Control Panel, show a local
+    /// accessible reminder that the app keeps running in the menu bar. Using an
+    /// NSAlert avoids both a surprise notification-permission prompt and the
+    /// deprecated NSUserNotification API.
     func windowWillClose(_ notification: Notification) {
+        guard !suppressCloseHint else { return }
         let key = "didShowMenuBarHint"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
-        UserDefaults.standard.set(true, forKey: key)
-        let n = NSUserNotification()
-        n.title = "LiveBlock keeps running"
-        n.informativeText = "Click the shield icon in your menu bar to bring this back, or press \u{2318}\u{21E7}L to toggle blocking from anywhere."
-        NSUserNotificationCenter.default.deliver(n)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.suppressCloseHint,
+                  !UserDefaults.standard.bool(forKey: key) else { return }
+            UserDefaults.standard.set(true, forKey: key)
+            let alert = NSAlert()
+            alert.messageText = "LiveBlock keeps running"
+            alert.informativeText = "Click the shield icon in your menu bar to bring the control panel back, or press \u{2318}\u{21E7}L to toggle blocking from anywhere."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Got it")
+            alert.runModal()
+        }
     }
 
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeMain: Bool { false }
 
     /// Anchor the panel to the top-right of the active display, sized to
     /// fit naturally on small screens (12" MacBook ≈ 1280pt wide) while
-    /// keeping the 400×400 default on anything bigger.
+    /// keeping the 400×480 default on anything bigger.
     private static func defaultFrame() -> NSRect {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let preferredW: CGFloat = 400
-        let preferredH: CGFloat = 400
+        let preferredH: CGFloat = 480
         // Cap to 80% of the screen so the panel can't fall off a 1280×800 lid.
         let w = max(360, min(preferredW, screen.width * 0.80))
         let h = max(360, min(preferredH, screen.height * 0.80))

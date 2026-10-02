@@ -40,28 +40,15 @@ if [[ -z "${LB_BRIDGE_HOST_ONLY:-}" ]]; then
 fi
 
 echo "==> ensuring rust targets are installed"
-CARGO=(cargo)
-if command -v rustup >/dev/null 2>&1; then
-  # Use the same toolchain that owns the installed cross-target libraries.
-  # Homebrew cargo/rustc on PATH otherwise ignores rustup's Intel target.
-  CARGO=(rustup run stable cargo)
-  export RUSTC="$(rustup which --toolchain stable rustc)"
-  export RUSTDOC="$(rustup which --toolchain stable rustdoc)"
-fi
 for t in "${TARGETS[@]}"; do
-  if command -v rustup >/dev/null 2>&1; then
-    rustup target add --toolchain stable "$t"
-  elif [[ "${#TARGETS[@]}" -gt 1 ]]; then
-    echo "Universal builds require rustup (or LB_BRIDGE_HOST_ONLY=1 for local builds)." >&2
-    exit 1
-  fi
+  rustup target add "$t" >/dev/null 2>&1 || true
 done
 
 for t in "${TARGETS[@]}"; do
   echo "==> cargo build -p liveblock-bridge --target $t ($PROFILE)"
   (
     cd "$CRATE_ROOT"
-    "${CARGO[@]}" build -p liveblock-bridge --target "$t" ${CARGO_PROFILE_FLAG[@]+"${CARGO_PROFILE_FLAG[@]}"}
+    cargo build -p liveblock-bridge --target "$t" ${CARGO_PROFILE_FLAG[@]+"${CARGO_PROFILE_FLAG[@]}"}
   )
 done
 

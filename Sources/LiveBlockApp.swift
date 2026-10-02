@@ -189,11 +189,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Seed the overlay + editor on the controller's current screen. The
-        // controller re-aligns these to the ACTUAL capture screen on every
-        // start and on NSApplication.didChangeScreenParametersNotification, so
-        // this is only the initial placement, not a permanent pin to main.
-        let screen = controller.currentScreen() ?? NSScreen.main ?? NSScreen.screens.first!
+        Theme.registerFonts()
+        guard let screen = controller.currentScreen() ?? NSScreen.main ?? NSScreen.screens.first else {
+            NSLog("LiveBlock: no display is available during launch.")
+            return
+        }
 
         // Render layer (always click-through)
         let renderLayer = RenderLayerWindow(
@@ -208,11 +208,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             targetScreen: screen
         )
         controller.regionEditor = regionEditor
-
-        // Ensure both windows are aligned to the current screen now that the
-        // controller holds references to them (covers the case where the
-        // control panel lands on a non-main display at launch).
-        controller.alignOverlayWindows(to: screen)
 
         // Control panel (always visible main UI)
         let controlPanel = ControlPanelWindow(
@@ -245,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: AnyView(MiniHUDView(controller: controller))
         )
         controller.miniHUDWindow = miniHUD
+        miniHUD.align(to: screen)
 
         // Show / hide HUD with capture state.
         controller.captureManager.$isRunning
@@ -255,23 +251,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.controller.handleScreenConfigurationChange() }
+            .store(in: &cancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.controller.handleActiveSpaceChange() }
+            .store(in: &cancellables)
+
         // Build the onboarding window up-front so the menu bar's "Show
         // onboarding tour" can re-show it later. It is created hidden;
         // first-launch is what calls showOnboarding().
         let onboarding = OnboardingWindow(
             rootView: AnyView(OnboardingView(
                 onFinish: { [weak self] in
-                    UserDefaults.standard.set(true, forKey: "didOnboard")
-                    self?.controller.onboardingWindow?.close()
+                    self?.controller.finishOnboarding()
                 },
                 onTryFirstBlock: { [weak self] in
-                    // Start blocking AND open the editor in one click — the
-                    // visual-first replacement for "memorize ⌘⇧B".
-                    guard let self else { return }
-                    if !self.controller.isRunning { self.controller.toggleCapture() }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                        self?.controller.openEditor()
-                    }
+                    // Start blocking AND open the editor through one sequenced
+                    // action. Panic/stop/quit can invalidate the delayed open.
+                    self?.controller.startFirstBlockFromOnboarding()
                 }
             ))
         )
@@ -294,7 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         .receive(on: RunLoop.main)
         .sink { [weak self] running, editing in
             guard let self else { return }
-            if running && !editing {
+            if running && !editing && self.controller.allowsRenderVisibility {
                 self.controller.renderLayer?.orderFrontRegardless()
             } else {
                 self.controller.renderLayer?.orderOut(nil)
@@ -319,15 +320,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeys.start()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !controller.quitIsReady else { return .terminateNow }
+        controller.quitWhenApplicationRequestsTermination {
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Closing the control panel must not quit the app — the menu bar /
         // Dock icon should keep it discoverable.
         false
-    }
-
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        controller.showControlPanel()
-        return true
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {

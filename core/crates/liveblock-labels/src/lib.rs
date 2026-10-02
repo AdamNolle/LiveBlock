@@ -1,8 +1,9 @@
 //! Training-label types for LiveBlock.
 //!
 //! Mirrors `LabelBox` and `LabelDocument` in `Sources/LabelingController.swift`.
-//! Saved JSON uses pretty-printed, sorted-key encoding with ISO-8601 dates,
-//! matching the Swift output byte-for-byte for the round-tripping fields.
+//! Schema 1 sidecars use pretty-printed, sorted-key encoding with ISO-8601
+//! dates. Legacy unversioned documents migrate atomically; future versions are
+//! rejected without rewriting.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
@@ -20,51 +21,8 @@ pub enum LabelError {
     Json(#[from] serde_json::Error),
     #[error("invalid date: {0}")]
     Date(String),
-}
-
-/// Semantic intent of a labeled box: whether the pixels under it should be
-/// REMOVED (a commercial ad / sponsor mark) or explicitly KEPT (a team/league
-/// identity mark, or a player/car number — the sports-broadcast case where
-/// erasing identity is the spec-forbidden failure).
-///
-/// Backward compatibility: legacy single-class datasets written by the macOS
-/// app have no `class` key. They deserialize as [`LabelClass::Ad`] and, because
-/// the (de)serializers omit the key when it is `Ad`, they re-serialize
-/// byte-identically — so existing on-disk label files are untouched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum LabelClass {
-    /// Legacy / general meaning: "this region is an advertisement" (remove).
-    #[default]
-    #[serde(rename = "ad")]
-    Ad,
-    /// A commercial sponsor mark in sports content — livery, billboard, jersey
-    /// patch (remove).
-    #[serde(rename = "sponsor_remove")]
-    SponsorRemove,
-    /// A team or league identity mark to preserve (keep).
-    #[serde(rename = "team_keep")]
-    TeamKeep,
-    /// A player or car number to preserve (keep).
-    #[serde(rename = "number_keep")]
-    NumberKeep,
-}
-
-impl LabelClass {
-    /// Pixels under this box should be inpainted away.
-    pub fn is_remove(self) -> bool {
-        matches!(self, LabelClass::Ad | LabelClass::SponsorRemove)
-    }
-
-    /// This box marks content to explicitly preserve.
-    pub fn is_keep(self) -> bool {
-        !self.is_remove()
-    }
-
-    /// Serde + manual-serializer guard: omit the `class` key for the legacy
-    /// default so existing datasets stay byte-identical.
-    fn is_ad(&self) -> bool {
-        matches!(self, LabelClass::Ad)
-    }
+    #[error("unsupported labels schema version {found}; current version is {current}")]
+    UnsupportedSchema { found: u32, current: u32 },
 }
 
 /// A single labeled box on a screenshot. Coords normalized [0..1] with
@@ -76,10 +34,6 @@ pub struct LabelBox {
     pub y: f64,
     pub width: f64,
     pub height: f64,
-    /// Keep-vs-remove intent. Defaults to [`LabelClass::Ad`] and is omitted from
-    /// serialized output when default (legacy byte-compatibility).
-    #[serde(default, skip_serializing_if = "LabelClass::is_ad")]
-    pub class: LabelClass,
 }
 
 impl LabelBox {
@@ -98,14 +52,7 @@ impl LabelBox {
             y: cy,
             width: cw,
             height: ch,
-            class: LabelClass::Ad,
         }
-    }
-
-    /// Builder: set the keep-vs-remove class on a box.
-    pub fn classified(mut self, class: LabelClass) -> Self {
-        self.class = class;
-        self
     }
 
     /// Pixel rect for the given image size. Returns `(x, y, w, h)`.
@@ -146,9 +93,17 @@ pub fn iou(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> f64 {
     }
 }
 
+pub const LABELS_SCHEMA_VERSION: u32 = 1;
+
+fn current_labels_schema() -> u32 {
+    LABELS_SCHEMA_VERSION
+}
+
 /// Persisted JSON sidecar for one labeled screenshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabelDocument {
+    #[serde(rename = "schemaVersion", default = "current_labels_schema")]
+    pub schema_version: u32,
     /// Filename only (no path) so the dataset is portable.
     pub image: String,
     #[serde(rename = "imageWidth")]
@@ -237,7 +192,11 @@ fn format_iso8601(unix_secs: i64) -> String {
 /// Howard Hinnant's days-from-civil algorithm, reversed.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = (z - era * 146_097) as u64; // [0, 146096]
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
     let y = yoe as i64 + era * 400;
@@ -279,13 +238,31 @@ impl LabelDocument {
 
     /// Load a document from disk.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, LabelError> {
+        let path = path.as_ref();
         let bytes = fs::read(path)?;
-        let doc: LabelDocument = serde_json::from_slice(&bytes)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let had_schema = value.get("schemaVersion").is_some();
+        let doc: LabelDocument = serde_json::from_value(value)?;
+        if doc.schema_version != LABELS_SCHEMA_VERSION {
+            return Err(LabelError::UnsupportedSchema {
+                found: doc.schema_version,
+                current: LABELS_SCHEMA_VERSION,
+            });
+        }
+        if !had_schema {
+            doc.save(path)?;
+        }
         Ok(doc)
     }
 
     /// Render to bytes with sorted keys and 2-space indent.
     pub fn to_pretty_sorted_bytes(&self) -> Result<Vec<u8>, LabelError> {
+        if self.schema_version != LABELS_SCHEMA_VERSION {
+            return Err(LabelError::UnsupportedSchema {
+                found: self.schema_version,
+                current: LABELS_SCHEMA_VERSION,
+            });
+        }
         // Build a sorted representation per box plus the doc.
         let boxes: Vec<serde_json::Value> = self
             .boxes
@@ -300,11 +277,6 @@ impl LabelDocument {
                 m.insert("y", serde_json::json!(b.y));
                 m.insert("width", serde_json::json!(b.width));
                 m.insert("height", serde_json::json!(b.height));
-                // Omit `class` for the legacy default so files written before the
-                // multi-class schema (and by the macOS app) stay byte-identical.
-                if !b.class.is_ad() {
-                    m.insert("class", serde_json::json!(b.class));
-                }
                 serde_json::Value::from_iter(m)
             })
             .collect();
@@ -318,6 +290,7 @@ impl LabelDocument {
             "labeledAt",
             serde_json::Value::String(self.labeled_at.0.clone()),
         );
+        top.insert("schemaVersion", serde_json::json!(LABELS_SCHEMA_VERSION));
 
         let value = serde_json::Value::from_iter(top);
         let mut buf = Vec::new();
@@ -332,6 +305,16 @@ impl LabelDocument {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn published_schema_matches_runtime_version() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../contracts/labels.schema.json")).unwrap();
+        assert_eq!(
+            schema["properties"]["schemaVersion"]["const"],
+            LABELS_SCHEMA_VERSION
+        );
+    }
 
     #[test]
     fn iou_zero_when_disjoint() {
@@ -383,6 +366,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("shot.json");
         let doc = LabelDocument {
+            schema_version: LABELS_SCHEMA_VERSION,
             image: "shot.png".to_string(),
             image_width: 1920,
             image_height: 1080,
@@ -397,6 +381,7 @@ mod tests {
     #[test]
     fn saved_json_has_sorted_top_level_keys() {
         let doc = LabelDocument {
+            schema_version: LABELS_SCHEMA_VERSION,
             image: "shot.png".to_string(),
             image_width: 1,
             image_height: 1,
@@ -410,71 +395,33 @@ mod tests {
         let height_pos = s.find("\"imageHeight\"").unwrap();
         let width_pos = s.find("\"imageWidth\"").unwrap();
         let labeled_pos = s.find("\"labeledAt\"").unwrap();
+        let schema_pos = s.find("\"schemaVersion\"").unwrap();
         assert!(boxes_pos < image_pos);
         assert!(image_pos < height_pos);
         assert!(height_pos < width_pos);
         assert!(width_pos < labeled_pos);
+        assert!(labeled_pos < schema_pos);
     }
 
     #[test]
-    fn legacy_box_without_class_loads_as_ad() {
-        // Shaped exactly like the macOS app writes today (no `class` key).
-        let json = r#"{
-  "boxes": [
-    {
-      "height": 0.4,
-      "id": "11111111-2222-3333-4444-555555555555",
-      "width": 0.3,
-      "x": 0.1,
-      "y": 0.2
-    }
-  ],
-  "image": "shot.png",
-  "imageHeight": 1080,
-  "imageWidth": 1920,
-  "labeledAt": "1970-01-01T00:00:00Z"
-}"#;
-        let doc: LabelDocument = serde_json::from_str(json).unwrap();
-        assert_eq!(doc.boxes.len(), 1);
-        assert_eq!(doc.boxes[0].class, LabelClass::Ad);
-        assert!(doc.boxes[0].class.is_remove());
-    }
-
-    #[test]
-    fn default_class_is_omitted_non_default_is_written() {
-        let doc = LabelDocument {
-            image: "shot.png".to_string(),
-            image_width: 100,
-            image_height: 100,
-            boxes: vec![
-                LabelBox::with_id(Uuid::nil(), 0.1, 0.1, 0.1, 0.1), // Ad -> omitted
-                LabelBox::with_id(Uuid::nil(), 0.5, 0.5, 0.1, 0.1)
-                    .classified(LabelClass::TeamKeep),
-            ],
-            labeled_at: Iso8601::from_unix_seconds(0),
-        };
-        let s = String::from_utf8(doc.to_pretty_sorted_bytes().unwrap()).unwrap();
-        // Only the TeamKeep box emits a `class` key; the Ad box stays legacy.
-        assert_eq!(s.matches("\"class\"").count(), 1, "{s}");
-        assert!(s.contains("team_keep"));
-    }
-
-    #[test]
-    fn non_default_class_round_trips() {
+    fn legacy_label_migrates_and_future_schema_is_preserved() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("shot.json");
-        let doc = LabelDocument {
-            image: "shot.png".to_string(),
-            image_width: 1920,
-            image_height: 1080,
-            boxes: vec![LabelBox::with_id(Uuid::nil(), 0.1, 0.2, 0.3, 0.4)
-                .classified(LabelClass::NumberKeep)],
-            labeled_at: Iso8601::from_unix_seconds(0),
-        };
-        doc.save(&path).unwrap();
+        let legacy = r#"{"image":"shot.png","imageWidth":1,"imageHeight":1,"boxes":[],"labeledAt":"1970-01-01T00:00:00Z"}"#;
+        std::fs::write(&path, legacy).unwrap();
         let loaded = LabelDocument::load(&path).unwrap();
-        assert_eq!(loaded.boxes[0].class, LabelClass::NumberKeep);
-        assert!(loaded.boxes[0].class.is_keep());
-        assert_eq!(loaded, doc);
+        assert_eq!(loaded.schema_version, LABELS_SCHEMA_VERSION);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"schemaVersion\": 1"));
+
+        let future = r#"{"schemaVersion":99,"image":"shot.png","imageWidth":1,"imageHeight":1,"boxes":[],"labeledAt":"1970-01-01T00:00:00Z"}"#;
+        std::fs::write(&path, future).unwrap();
+        let error = LabelDocument::load(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            LabelError::UnsupportedSchema { found: 99, .. }
+        ));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), future);
     }
 }

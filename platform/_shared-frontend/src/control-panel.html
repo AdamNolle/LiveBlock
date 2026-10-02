@@ -11,17 +11,9 @@
       .head .col { flex:1; min-width:0; }
       .head .name { font: 600 13px var(--lb-font-ui); color: var(--lb-ink); }
       .head .meta { display:flex; align-items:center; gap:5px; font: 500 11px var(--lb-font-ui); color: var(--lb-ink-muted); margin-top: 1px; }
-      #status { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      #powerToggle { flex-shrink:0; }
-      #powerToggle .lb-pill { min-width:94px; justify-content:center; }
-      .error-notice { display:flex; align-items:flex-start; gap:8px; padding:10px; border-radius:10px; border:1px solid color-mix(in srgb, var(--lb-warn) 35%, var(--lb-border)); background:var(--lb-surface); color:var(--lb-warn); font-size:12px; line-height:1.5; }
-      #errorNotice[hidden] { display:none; }
-      #errorMessage { flex:1; min-width:0; overflow-wrap:anywhere; user-select:text; }
-      #dismissError { border:0; background:transparent; color:inherit; font-size:18px; padding:0 3px; }
       .actions { display:flex; gap:8px; }
       .actions .lb-pill { flex:1; justify-content:center; }
-      .stat { box-shadow:none !important; background:var(--lb-surface); border:1px solid var(--lb-border); }
-      .stats { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; }
+      .stats { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
       .stat {
         padding: 10px 8px;
         border-radius: 14px;
@@ -33,15 +25,16 @@
       }
       .stat .v { font: 600 18px var(--lb-font-mono); line-height:1; }
       .stat .l { font: 600 9px var(--lb-font-ui); margin-top:4px; letter-spacing:0.04em; text-transform:uppercase; color: var(--lb-ink-muted); }
-      .stat.block .v { color: var(--lb-block); }
       .stat.train .v { color: var(--lb-train); }
       .stat.detect .v { color: var(--lb-detect); }
       .row {
         display:flex; align-items:center; gap:10px;
         padding: 8px 10px; border-radius: 10px;
       }
-      .row.active { background: var(--lb-surface); }
+      .row.active { background: rgba(255,255,255,0.5); }
+      .monitor-select { max-width:190px;border:0;border-radius:8px;padding:5px 7px;background:var(--lb-bg);color:var(--lb-ink);font:500 11px var(--lb-font-ui); }
       .footer { display:flex; align-items:center; gap:8px; }
+      .notice { padding:9px 10px;border-radius:10px;background:rgba(224,148,42,.12);color:var(--lb-ink);font:500 11px/1.35 var(--lb-font-ui); }
       .swatch { width:16px; height:16px; border-radius:4px; }
     </style>
   </head>
@@ -51,46 +44,199 @@
         <span id="logo"></span>
         <div class="col">
           <div class="name">LiveBlock</div>
-          <div class="meta"><span id="stateDot" class="lb-dot"></span><span id="status" role="status" aria-live="polite">Stopped · 0 regions</span></div>
+          <div class="meta"><span id="statusDot" class="lb-dot"></span><span id="status">Stopped · 0 regions</span></div>
         </div>
         <span id="powerToggle"></span>
       </div>
 
-      <div id="errorNotice" class="error-notice" role="alert" hidden>
-        <span id="errorMessage"></span>
-        <button id="dismissError" aria-label="Dismiss error">×</button>
-      </div>
-      <p id="overlayNotice" role="status" hidden style="font-size:12px;line-height:1.5;color:var(--lb-warn)">On this desktop, the overlay may not stay aligned or appear over fullscreen windows.</p>
-      <label style="display:flex;align-items:center;gap:8px;font-size:12px">Blocking method
-        <select id="blockingMode" style="flex:1;min-width:0;padding:6px;border-radius:8px;border:1px solid var(--lb-border);background:var(--lb-surface);color:var(--lb-ink)">
-          <option value="capture">Screen blend</option>
-          <option value="cover">Cover only · no capture</option>
-        </select>
-      </label>
+      <div id="capabilityNotice" class="notice" role="status" hidden></div>
+
       <div class="actions">
-        <button class="lb-pill" id="blockBtn">Draw region</button>
-        <button class="lb-pill lb-train" id="trainBtn">Train detector</button>
+        <button class="lb-pill lb-block" id="blockBtn">⌧ Block</button>
+        <button class="lb-pill lb-train" id="trainBtn">⊕ Label &amp; train</button>
       </div>
 
-      <div class="stat"><div class="v" id="statRegions">0</div><div class="l">Saved regions</div></div>
-      <div class="lb-uppercase">Automatic blocking</div>
-      <div style="border-radius:14px;padding:4px;background:var(--lb-surface);border:1px solid var(--lb-border)">
+      <div class="stats">
+        <div class="stat train"><div class="v" id="statRegions">0</div><div class="l">active regions</div></div>
+        <div class="stat detect"><div class="v" id="statDropped">0</div><div class="l">stale dropped</div></div>
+      </div>
+
+      <div class="lb-uppercase">This space</div>
+      <div style="border-radius:14px;padding:4px;background:var(--lb-bg);box-shadow:inset 4.4px 4.4px 12.6px var(--lb-shadow-dark),inset -4.4px -4.4px 12.6px var(--lb-shadow-light)">
         <div class="row active">
           <div class="swatch" style="background:#3da6ff"></div>
-          <div style="flex:1;font-size:12px;font-weight:500">Auto detection</div>
-          <span class="lb-mono" style="font-size:11px;color:var(--lb-ink-muted)">—</span>
-          <span id="appToggle"></span>
+          <div style="flex:1;font-size:12px;font-weight:500">Protected display</div>
+          <select id="monitorSelect" class="monitor-select" aria-label="Protected display"></select>
         </div>
       </div>
 
       <div class="footer">
-        <button class="lb-pill lb-sm" id="prefsBtn">Label screenshots</button>
-        <button class="lb-pill lb-sm" id="captureBtn">Capture</button>
         <div class="lb-spacer"></div>
-        <span class="lb-mono" style="font-size:10px;color:var(--lb-ink-faint)">Ctrl+Shift+S</span>
+        <span id="hotkeyHint" class="lb-mono" style="font-size:10px;color:var(--lb-ink-faint)">Ctrl+Shift+B</span>
       </div>
     </div>
 
-    <script type="module" src="./control.ts"></script>
+    <script type="module">
+      import { logo, toggle } from "./primitives.ts";
+      import { events, lb } from "./ipc.ts";
+
+      document.getElementById("logo").appendChild(logo({ size: 32, radius: 8 }));
+      let selectedMonitorId = null;
+      let running = false;
+      let protectedContent = false;
+      let captureError = null;
+      let regionCount = 0;
+      let capabilitiesLoaded = false;
+      let capabilitiesEpoch = 0;
+      let editorHotkey = "Ctrl+Shift+B";
+      lb.getBehaviorContract().then((contract) => {
+        const binding = contract.hotkeys.find((item) => item.action === "toggle_region_editor");
+        if (binding) editorHotkey = binding.windowsLinux;
+        document.getElementById("hotkeyHint").textContent = editorHotkey;
+      }).catch(() => {});
+      const power = toggle({
+        value: false,
+        accent: "success",
+        onChange: async (on) => {
+          try {
+            if (on) {
+              if (!selectedMonitorId) throw new Error("No capture monitor is available");
+              captureError = null;
+              await lb.startCapture(selectedMonitorId);
+            } else {
+              await lb.stopCapture();
+            }
+          } catch (error) {
+            power.dataset.on = String(running);
+            captureError = String(error);
+            renderStatus();
+          }
+        },
+      });
+      document.getElementById("powerToggle").appendChild(power);
+      const monitorSelect = document.getElementById("monitorSelect");
+      monitorSelect.addEventListener("change", async () => {
+        const next = monitorSelect.value || null;
+        if (next === selectedMonitorId) return;
+        selectedMonitorId = next;
+        if (running) {
+          try {
+            if (!selectedMonitorId) throw new Error("No capture monitor is available");
+            await lb.startCapture(selectedMonitorId);
+          } catch (error) {
+            captureError = String(error);
+            renderStatus();
+          }
+        }
+      });
+
+      async function openWindow(label) {
+        try {
+          await lb.showWindow(label);
+        } catch (error) {
+          const notice = document.getElementById("capabilityNotice");
+          notice.textContent = `Window action failed: ${String(error)}`;
+          notice.hidden = false;
+        }
+      }
+      document.getElementById("blockBtn").addEventListener("click", () => openWindow("editor"));
+      document.getElementById("trainBtn").addEventListener("click", () => openWindow("training"));
+
+      function renderStatus() {
+        const dot = document.getElementById("statusDot");
+        dot.className = "lb-dot";
+        let text;
+        if (captureError) {
+          dot.classList.add("warn");
+          text = "Capture error · restart required";
+        } else if (protectedContent) {
+          dot.classList.add("warn");
+          text = "Possible protected or unavailable content · overlays paused";
+        } else if (running) {
+          dot.classList.add("success", "pulse");
+          text = `Active · ${regionCount} region${regionCount === 1 ? "" : "s"}`;
+        } else {
+          text = `Stopped · ${regionCount} region${regionCount === 1 ? "" : "s"}`;
+        }
+        document.getElementById("status").textContent = text;
+      }
+
+      events.onCapabilitiesChanged(() => {
+        capabilitiesEpoch += 1;
+        capabilitiesLoaded = false;
+      });
+      events.onCaptureState((value) => {
+        running = value;
+        power.dataset.on = String(value);
+        if (value) captureError = null;
+        renderStatus();
+      });
+      events.onProtectedContent((value) => {
+        protectedContent = value;
+        renderStatus();
+      });
+      events.onCaptureError((message) => {
+        captureError = message;
+        running = false;
+        power.dataset.on = "false";
+        renderStatus();
+      });
+      events.onHotkeyAvailability((available) => {
+        document.getElementById("hotkeyHint").textContent = available
+          ? editorHotkey
+          : "Global hotkeys unavailable";
+      });
+
+      // Refresh counters periodically. Values come from native telemetry; no
+      // synthetic frame-time claim is shown.
+      async function refresh() {
+        try {
+          if (!capabilitiesLoaded) {
+            const requestEpoch = capabilitiesEpoch;
+            const capabilities = await lb.getCapabilities();
+            if (requestEpoch !== capabilitiesEpoch) return;
+            capabilitiesLoaded = true;
+            if (!capabilities.globalHotkeys) {
+              document.getElementById("hotkeyHint").textContent = "Global hotkeys unavailable";
+            }
+            if (capabilities.supportMode === "limited" || !capabilities.releaseReady) {
+              const notice = document.getElementById("capabilityNotice");
+              const platform = capabilities.platform.replaceAll("_", " ");
+              notice.textContent = `${platform}: ${capabilities.limitations.join(" ")}`;
+              notice.hidden = false;
+            }
+          }
+          const monitors = await lb.listMonitors();
+          const previousSelection = selectedMonitorId;
+          if (!selectedMonitorId || !monitors.some((monitor) => monitor.id === selectedMonitorId)) {
+            selectedMonitorId = monitors.find((monitor) => monitor.isPrimary)?.id ?? monitors[0]?.id ?? null;
+          }
+          const optionSignature = monitors.map((monitor) => `${monitor.id}:${monitor.name}`).join("|");
+          if (monitorSelect.dataset.signature !== optionSignature) {
+            monitorSelect.dataset.signature = optionSignature;
+            monitorSelect.replaceChildren(...monitors.map((monitor) => {
+              const option = document.createElement("option");
+              option.value = monitor.id;
+              option.textContent = `${monitor.name}${monitor.isPrimary ? " (Primary)" : ""}`;
+              return option;
+            }));
+          }
+          monitorSelect.value = selectedMonitorId ?? "";
+          monitorSelect.disabled = monitors.length === 0;
+          if (running && previousSelection && previousSelection !== selectedMonitorId) {
+            await lb.stopCapture();
+            captureError = "Selected display was removed; capture stopped";
+          }
+          const [regions, telemetry] = await Promise.all([lb.listRegions(), lb.getCaptureTelemetry()]);
+          regionCount = regions.length;
+          protectedContent = telemetry.protectedContent;
+          document.getElementById("statRegions").textContent = String(regionCount);
+          document.getElementById("statDropped").textContent = String(telemetry.droppedFrames);
+          renderStatus();
+        } catch (_) { /* tauri not present in `vite preview` mode */ }
+      }
+      refresh();
+      setInterval(refresh, 1000);
+    </script>
   </body>
 </html>

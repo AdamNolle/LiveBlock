@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveblock.local/contracts/model-manifest.schema.json",
+  "title": "LiveBlock Signed Model Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "modelId", "modelVersion", "artifactFormat", "artifactHashAlgorithm", "artifactSha256", "runtimeClasses", "inputWidth", "inputHeight", "nmsEmbedded", "releaseSequence", "promotionGateSchema", "promotionReportSha256", "createdAt", "keyId", "signature"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "modelId": { "type": "string", "minLength": 1 },
+    "modelVersion": { "type": "string", "minLength": 1 },
+    "artifactFormat": { "enum": ["coreml", "onnx"] },
+    "artifactHashAlgorithm": { "const": "sha256-file-or-tree-v1" },
+    "artifactSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "runtimeClasses": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "Logo" },
+        { "const": "Ad banner" },
+        { "const": "Sponsored" }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "inputWidth": { "type": "integer", "minimum": 1 },
+    "inputHeight": { "type": "integer", "minimum": 1 },
+    "nmsEmbedded": { "type": "boolean" },
+    "releaseSequence": { "type": "integer", "minimum": 1 },
+    "promotionGateSchema": { "const": 5 },
+    "promotionReportSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "keyId": { "type": "string", "minLength": 1 },
+    "signature": { "type": "string", "minLength": 1 }
+  }
+}

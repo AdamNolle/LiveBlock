@@ -11,9 +11,17 @@ shared desktop UI, hardened capture/overlay lifecycle and model loading,
 trained an openly sourced starter ad detector, and built all three desktop
 ports. There is no iOS app target. `validation/release-packages.json` records
 exact artifact hashes and distinguishes compile checks from native acceptance.
-If main is consolidated using the newer release branch, the session snapshot
-must remain in Git history; its reports describe that snapshot, not the newer
-implementation. Reconcile competing model contracts before moving weights.
+Main is being consolidated using the newer release branch at `54c7756`.
+The complete session snapshot is commit `31d0195`, retained as a merge parent.
+Its reports describe that snapshot, not the newer implementation. Reconcile
+competing model contracts before moving weights.
+
+Retrieve the full snapshot without creating a branch: `git archive 31d0195 |
+tar -x -C /path/to/an/empty/snapshot-directory`. Its source, training tools,
+model card, notarization runbook and validation reports are available there.
+The current main release contract is in `docs/DESKTOP_RELEASE_MATRIX.md`;
+its notarization runbook is `docs/MACOS_RELEASE.md`. Do not use stale `AI.md`
+or older assessments as the source of current implementation facts.
 
 ### macOS
 
@@ -53,6 +61,11 @@ unfinished checkpoint. Observe process and terminal results. Export the final
 candidate only after completion; evaluate CoreML and both Rust ONNX adapters
 on independent holdouts **by domain** at the actual deployment thresholds.
 Training validation at an optimal threshold is not deployment acceptance.
+The running trainer loaded the snapshot code before branch consolidation.
+Its final automatic export imports helpers from the tools directory at that
+time; newer main has different helpers. If that export fails or uses different
+input dimensions, retain completed best.pt and export manually with the
+snapshot tooling in an isolated directory. No --install was requested.
 Sports v2 recall was roughly 48%, so improvement remains necessary.
 
 Datasets, virtual environments, training outputs and downloaded pretrained
@@ -76,9 +89,10 @@ those observations to exact binary hashes. Ubuntu 26.04 build requires glibc
 2.43; do not advertise compatibility with older distributions.
 
 Latest source additionally initializes actual Tauri GTK renderer/editor
-windows using GTK layer-shell before realization. Compilation passed; release
-build session 59153 runs in the owned Lima VM `liveblock-check`, with guest
-log `/tmp/liveblock-wayland-layer-release.log`. Native application acceptance
+windows using GTK layer-shell before realization. Compilation passed; the initial release build was killed by VM memory
+pressure. A retry uses a temporary 1 GiB swap file; release
+build retry session 82440 runs in the owned Lima VM `liveblock-check`, with guest
+log `/tmp/liveblock-wayland-layer-release-retry.log`. Native application acceptance
 is pending until explicitly recorded. The separately tested Python layer
 probe proved fullscreen placement and click-through after remapping on Sway
 1.11, not the application's capture pipeline. Start from
@@ -113,3 +127,7 @@ modify third-party players, or claim that overlay/capture settings defeat DRM.
 Local release binaries live outside Git in
 `/Users/adamnolle/Library/Caches/LiveBlock/release/`. Hashes are in the manifest.
 GitHub repository source is not equivalent to notarized release publication.
+
+Temporary retry swap: `/home/adamnolle.guest/liveblock-release.swap`.
+After the build exits, run guest `sudo swapoff /home/adamnolle.guest/liveblock-release.swap`
+and remove only that owned file before stopping the VM.

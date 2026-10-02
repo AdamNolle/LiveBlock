@@ -145,13 +145,21 @@ xcodegen generate
 # 4. Build (or test)
 if [[ $RUN_TESTS -eq 1 ]]; then
     step "Running tests"
-    TEST_COMMAND=(xcodebuild -project "$PROJECT" -scheme "$SCHEME"
-        -destination "$DESTINATION" -configuration "$CONFIG" "${SIGN_ARGS[@]}" test)
-    if command -v xcbeautify >/dev/null; then
-        "${TEST_COMMAND[@]}" | xcbeautify
-    else
-        "${TEST_COMMAND[@]}"
-    fi
+    xcodebuild \
+        -project "$PROJECT" \
+        -scheme "$SCHEME" \
+        -destination "$DESTINATION" \
+        -configuration "$CONFIG" \
+        "${SIGN_ARGS[@]}" \
+        test \
+        | xcbeautify 2>/dev/null || \
+    xcodebuild \
+        -project "$PROJECT" \
+        -scheme "$SCHEME" \
+        -destination "$DESTINATION" \
+        -configuration "$CONFIG" \
+        "${SIGN_ARGS[@]}" \
+        test
     exit $?
 fi
 
@@ -185,7 +193,7 @@ step "Built: $APP"
 
 # 5a. Optional install to /Applications. `ditto` preserves extended attrs +
 #     code signature so the installed copy keeps its TCC grant. After copy,
-#     preserve Gatekeeper protections when launching the built app
+#     strip the quarantine xattr so Gatekeeper doesn't block first launch
 #     (the self-signed cert isn't on Apple's trust list, so without this
 #     step macOS shows "Apple cannot verify..." on every double-click).
 if [[ $INSTALL -eq 1 ]]; then
@@ -193,6 +201,8 @@ if [[ $INSTALL -eq 1 ]]; then
     step "Installing to $DEST"
     rm -rf "$DEST"
     ditto "$APP" "$DEST"
+    xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+    spctl --add --label "LiveBlocker Local" "$DEST" 2>/dev/null || true
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
         -f "$DEST" >/dev/null 2>&1 || true
     APP="$DEST"
@@ -234,6 +244,8 @@ if [[ $LAUNCH -eq 1 ]]; then
     touch "$APP"
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
         -f "$APP" >/dev/null 2>&1 || true
+    killall Dock 2>/dev/null || true
+    killall Finder 2>/dev/null || true
 
     open -n "$APP"
     if [[ -f tools/.codesign_identity ]]; then

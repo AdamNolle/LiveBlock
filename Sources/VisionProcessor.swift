@@ -10,37 +10,6 @@ enum AdSource: String, Codable, Sendable {
     case detection
 }
 
-/// A detection cached BETWEEN detection runs, stored in resolution-independent
-/// normalized [0..1] coordinates with a **bottom-left** origin (CV space, the
-/// same convention `AdBoundingBox.rect` uses once converted to pixels).
-///
-/// Why normalized: the previous code cached `AdBoundingBox` rects in ABSOLUTE
-/// pixels and reused them across frames. If the captured buffer changed size
-/// mid-stream (display resolution / scale change, or a reconfigure after a
-/// monitor swap) those pixel rects mis-mapped onto the new frame. Caching
-/// normalized rects and converting per-frame from the CURRENT buffer size
-/// keeps cached detections correct across any resize.
-struct NormalizedDetection: Sendable {
-    /// Normalized rect in [0..1], bottom-left origin.
-    let normRect: CGRect
-    let confidence: Float
-    let label: String
-
-    /// Project this normalized detection onto a concrete pixel buffer size,
-    /// yielding a pixel-space `AdBoundingBox` (bottom-left origin) for the
-    /// inpaint pipeline.
-    func adBox(inPixelBufferSize size: CGSize) -> AdBoundingBox {
-        let pixelRect = CGRect(x: normRect.minX * size.width,
-                               y: normRect.minY * size.height,
-                               width: normRect.width * size.width,
-                               height: normRect.height * size.height)
-        return AdBoundingBox(rect: pixelRect,
-                             confidence: confidence,
-                             label: label,
-                             source: .detection)
-    }
-}
-
 struct AdBoundingBox: Sendable {
     let rect: CGRect          // pixel coords, bottom-left origin (CV space)
     let confidence: Float
@@ -59,21 +28,28 @@ struct AdBoundingBox: Sendable {
     }
 }
 
-/// Local Vision/CoreML detector with explicit remove and protect label semantics.
-/// The bundled starter is fine-tuned on public search-ad screenshots.
+/// Wraps a Vision/CoreML object detector around the bundled
+/// `liveblock-detector.mlpackage`.
+///
+/// The bundled model is the open-vocabulary detector baked by
+/// `tools/build_openvocab.py` from YOLO-World-v2 — one primary prompt for each
+/// class in `tools/vocab/liveblock-vocab.json` (Logo / Ad banner / Sponsored),
+/// exported NMS-baked to CoreML. No training data: the vocabulary is text, and
+/// it generalises to unseen brands. Per-class enable flags + score thresholds
+/// are read from the shared `liveblock-config` store via `DetectionVocabulary`.
 final class VisionProcessor: @unchecked Sendable {
 
     private let lock = NSLock()
-    private let inferenceLock = NSLock()
     private var model: VNCoreMLModel?
     private var realtimeRequest: VNCoreMLRequest?  // reused on the videoQueue
     private var labelingRequest: VNCoreMLRequest?  // reused on background labeling tasks
     private var loadFailed = false
-    // Unified default (was 0.35). AppController pushes the persisted value
-    // (or AppController.defaultMinConfidence = 0.5) at launch via
-    // setMinimumConfidence, so this is just the pre-startup fallback and now
-    // matches the rest of the app instead of silently running 0.15 lower.
-    private var _minimumConfidence: Float = 0.5
+    private var modelGeneration: UInt64 = 0
+    private var _minimumConfidence: Float = 0.25
+
+    /// Per-class vocabulary + thresholds from the shared Rust config. Built
+    /// lazily on first detection call so init never blocks.
+    private var _vocabulary: DetectionVocabulary?
 
     var minimumConfidence: Float {
         lock.lock(); defer { lock.unlock() }
@@ -84,62 +60,45 @@ final class VisionProcessor: @unchecked Sendable {
         // Build lazily on first detection call so init never blocks.
     }
 
-    /// Vision's label confidences are conditional and sum to one. A single
-    /// label therefore reports 1 even for a weak detection. Combine it with
-    /// the object confidence before applying the user's blocking threshold.
-    static func combinedConfidence(object: Float, classification: Float) -> Float? {
-        guard object.isFinite, classification.isFinite,
-              (0...1).contains(object), (0...1).contains(classification) else { return nil }
-        return object * classification
+    /// Where the persisted per-class detection settings live.
+    private static var detectionSettingsURL: URL {
+        let support = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support")
+        return support
+            .appendingPathComponent("LiveBlock", isDirectory: true)
+            .appendingPathComponent("detection-settings.json")
+    }
+
+    /// Lazily open the vocabulary store, seeding from the bundled vocab JSON on
+    /// first run. Caller holds `lock`.
+    private func ensureVocabularyLocked() -> DetectionVocabulary {
+        if let v = _vocabulary { return v }
+        let bundledJSON = Bundle.main.url(forResource: "liveblock-vocab", withExtension: "json")
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        let v = DetectionVocabulary(settingsURL: Self.detectionSettingsURL,
+                                    bundledVocabJSON: bundledJSON)
+        _vocabulary = v
+        return v
     }
 
     /// Detects objects in `pixelBuffer` using the bundled YOLO model.
     /// Returns `[]` if the model cannot be loaded — never throws.
-    ///
-    /// Boxes are returned in resolution-independent NORMALIZED [0..1]
-    /// coordinates (bottom-left origin) so the capture pipeline can cache them
-    /// across detection intervals and project them onto whatever the current
-    /// buffer size is, frame by frame.
-    ///
-    /// Only explicit ad/sponsor classes authorize removal. Protected classes
-    /// suppress overlapping removal boxes; generic object labels remain display-only.
-    func detect(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
-        return SponsorClassAllowlist.removableDetections(runDetection(in: pixelBuffer))
-    }
-
-    /// Same inference as `detect(in:)` but WITHOUT the auto-block allowlist
-    /// gate. Used purely to populate the live detection log / ML detector UI so
-    /// the user can see what the model sees, without any of those detections
-    /// feeding the eraser. Never wire this into the inpaint path.
-    func detectForDisplay(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
-        return runDetection(in: pixelBuffer)
-    }
-
-    /// One inference pass, two views of the result:
-    ///   • `forErase` — allowlist-gated, feeds the eraser.
-    ///   • `forDisplay` — ungated, feeds the live detection log only.
-    /// Use this on the hot capture path so we don't pay for inference twice.
-    func detectGatedAndDisplay(in pixelBuffer: CVPixelBuffer)
-        -> (forErase: [NormalizedDetection], forDisplay: [NormalizedDetection]) {
-        let all = runDetection(in: pixelBuffer)
-        let gated = SponsorClassAllowlist.removableDetections(all)
-        return (forErase: gated, forDisplay: all)
-    }
-
-    private func runDetection(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
-        inferenceLock.lock(); defer { inferenceLock.unlock() }
+    func detect(in pixelBuffer: CVPixelBuffer) -> [AdBoundingBox] {
         guard let vnModel = ensureModel() else { return [] }
-        let threshold = minimumConfidence  // snapshot under lock
-
-        // Reuse the cached request — VNCoreMLRequest is designed for create-once-reuse.
-        let request: VNCoreMLRequest = {
+        let globalThreshold: Float
+        let vocabulary: DetectionVocabulary
+        do {
             lock.lock(); defer { lock.unlock() }
-            if let r = realtimeRequest { return r }
-            let r = VNCoreMLRequest(model: vnModel)
-            r.imageCropAndScaleOption = .scaleFit
-            realtimeRequest = r
-            return r
-        }()
+            globalThreshold = _minimumConfidence
+            vocabulary = ensureVocabularyLocked()
+        }
+
+        // Publish a request only if this exact model is still current. An
+        // authenticated update may invalidate the generation between
+        // `ensureModel` and this lock acquisition.
+        guard let request = request(for: vnModel, labeling: false) else { return [] }
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         do {
@@ -149,17 +108,39 @@ final class VisionProcessor: @unchecked Sendable {
             return []
         }
 
+        let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+
         let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
-        return observations.compactMap { obs -> NormalizedDetection? in
-            guard let top = obs.labels.first,
-                  let confidence = Self.combinedConfidence(object: obs.confidence, classification: top.confidence),
-                  confidence >= threshold else { return nil }
-            // VNRecognizedObjectObservation.boundingBox is already normalized
-            // [0..1] with bottom-left origin — cache it as-is, resolution-free.
-            return NormalizedDetection(normRect: obs.boundingBox,
-                                       confidence: confidence,
-                                       label: top.identifier)
+        return observations.compactMap { obs -> AdBoundingBox? in
+            guard let top = obs.labels.first else { return nil }
+            // Per-class effective threshold keyed on the vocab class name. A nil
+            // result means the class is known and disabled -> drop the detection.
+            guard let threshold = vocabulary.effectiveThreshold(forLabel: top.identifier,
+                                                                globalFallback: globalThreshold),
+                  top.confidence >= threshold else { return nil }
+            // VNRecognizedObjectObservation.boundingBox is normalized [0..1] with origin bottom-left.
+            let bb = obs.boundingBox
+            let pixelRect = CGRect(x: bb.minX * width,
+                                   y: bb.minY * height,
+                                   width: bb.width * width,
+                                   height: bb.height * height)
+            return AdBoundingBox(rect: pixelRect,
+                                 confidence: top.confidence,
+                                 label: top.identifier,
+                                 source: .detection)
         }
+    }
+
+    private func request(for candidate: VNCoreMLModel, labeling: Bool) -> VNCoreMLRequest? {
+        lock.lock(); defer { lock.unlock() }
+        guard let model, model === candidate else { return nil }
+        if labeling, let labelingRequest { return labelingRequest }
+        if !labeling, let realtimeRequest { return realtimeRequest }
+        let request = VNCoreMLRequest(model: candidate)
+        request.imageCropAndScaleOption = .scaleFill
+        if labeling { labelingRequest = request } else { realtimeRequest = request }
+        return request
     }
 
     func updateMinimumConfidence(_ value: Float) {
@@ -167,30 +148,29 @@ final class VisionProcessor: @unchecked Sendable {
         _minimumConfidence = max(0, min(1, value))
     }
 
+    func detectorRules() -> [DetectorClassRule] {
+        lock.lock(); defer { lock.unlock() }
+        return ensureVocabularyLocked().rules
+    }
+
+    @discardableResult
+    func setDetectorClassEnabled(id: UInt32, enabled: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ensureVocabularyLocked().setClassEnabled(id: id, enabled: enabled)
+    }
+
     /// Detect against a PNG on disk. Returns proposals as `LabelBox` (normalized,
     /// top-left origin) suitable for the labeling UI. Lower confidence threshold
     /// than realtime detection so the user can prune false positives quickly.
     func detectBoxesInPNGFile(at url: URL) async -> [LabelBox] {
-        await Task.detached(priority: .userInitiated) { self.detectBoxesInPNG(at: url) }.value
-    }
-
-    private func detectBoxesInPNG(at url: URL) -> [LabelBox] {
-        inferenceLock.lock(); defer { inferenceLock.unlock() }
         guard let vnModel = ensureModel() else { return [] }
         guard let nsImage = NSImage(contentsOf: url),
               let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             return []
         }
 
-        let request: VNCoreMLRequest = {
-            lock.lock(); defer { lock.unlock() }
-            if let r = labelingRequest { return r }
-            let r = VNCoreMLRequest(model: vnModel)
-            r.imageCropAndScaleOption = .scaleFit
-            labelingRequest = r
-            return r
-        }()
-        let proposalThreshold: Float = 0.20  // lower than the realtime default so the user can prune false positives
+        guard let request = request(for: vnModel, labeling: true) else { return [] }
+        let proposalThreshold: Float = 0.20  // lower than the 0.35 realtime default
 
         let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up)
         do {
@@ -202,17 +182,14 @@ final class VisionProcessor: @unchecked Sendable {
 
         let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
         return observations.compactMap { obs -> LabelBox? in
-            guard let top = obs.labels.first,
-                  let confidence = Self.combinedConfidence(object: obs.confidence, classification: top.confidence),
-                  confidence >= proposalThreshold,
-                  let labelClass = LabelClass(rawValue: top.identifier.lowercased()) else { return nil }
+            guard let top = obs.labels.first, top.confidence >= proposalThreshold else { return nil }
             // VNRecognizedObjectObservation rect is bottom-left origin, normalized.
             // LabelBox uses top-left origin, normalized.
             let bb = obs.boundingBox
             return LabelBox(x: Double(bb.minX),
                             y: Double(1.0 - bb.maxY),
                             width: Double(bb.width),
-                            height: Double(bb.height), labelClass: labelClass)
+                            height: Double(bb.height))
         }
     }
 
@@ -233,9 +210,9 @@ final class VisionProcessor: @unchecked Sendable {
     /// reloads from disk, picking up whatever the training pipeline wrote
     /// into Application Support/LiveBlock/models/.
     func reloadModel() {
-        inferenceLock.lock(); defer { inferenceLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
+        modelGeneration &+= 1
         model = nil
         realtimeRequest = nil
         labelingRequest = nil
@@ -244,49 +221,69 @@ final class VisionProcessor: @unchecked Sendable {
     }
 
     private func ensureModel() -> VNCoreMLModel? {
-        lock.lock(); defer { lock.unlock() }
-        if let model { return model }
-        if loadFailed { return nil }
+        lock.lock()
+        if let model { lock.unlock(); return model }
+        if loadFailed { lock.unlock(); return nil }
+        let generation = modelGeneration
+        lock.unlock()
 
         do {
+            // Distribution recovery may wait for an installer transaction. Do
+            // not hold the processor lock: installer activation must be able to
+            // invalidate this generation without deadlocking.
             let mlModel = try Self.loadModel()
             let vnModel = try VNCoreMLModel(for: mlModel)
+            lock.lock(); defer { lock.unlock() }
+            guard modelGeneration == generation else { return model }
             self.model = vnModel
-            NSLog("VisionProcessor: loaded yolov8n CoreML model.")
+            NSLog("VisionProcessor: loaded liveblock-detector CoreML model.")
             return vnModel
         } catch {
-            loadFailed = true
-            NSLog("VisionProcessor: failed to load yolov8n model: \(error.localizedDescription)")
+            lock.lock(); defer { lock.unlock() }
+            if modelGeneration == generation { loadFailed = true }
+            NSLog("VisionProcessor: failed to load liveblock-detector model: \(error.localizedDescription)")
             return nil
         }
     }
 
-    /// Look up the model in priority order:
-    ///   1. The runtime directory the trainer writes to (newer than bundle).
-    ///   2. The app bundle (the original ships-with-app default).
+    /// Release builds accept only a model authenticated by the embedded keyring
+    /// and signed manifest. Debug/source builds retain the explicit developer
+    /// candidate path used by the local training workflow.
     private static func loadModel() throws -> MLModel {
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .all
 
+#if !DEBUG
+        guard let authenticated = try MacModelDistribution().resolveAuthenticatedModel() else {
+            throw NSError(domain: "VisionProcessor", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "no authenticated CoreML detector is installed or packaged"
+            ])
+        }
+        return try MLModel(contentsOf: authenticated, configuration: configuration)
+#else
         let runtimeDir = runtimeModelDirectory
-        for ext in ["mlmodelc", "mlpackage"] {
-            let url = runtimeDir.appendingPathComponent("yolov8n.\(ext)")
-            if FileManager.default.fileExists(atPath: url.path) {
-                NSLog("VisionProcessor: loading model from runtime dir \(url.path)")
-                let compiled = ext == "mlpackage" ? try MLModel.compileModel(at: url) : url
-                return try MLModel(contentsOf: compiled, configuration: configuration)
+        let runtimeCandidates = ["mlmodelc", "mlpackage"]
+            .map { runtimeDir.appendingPathComponent("liveblock-detector.\($0)") }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+            .sorted {
+                let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhs > rhs
             }
+        if let url = runtimeCandidates.first {
+            NSLog("VisionProcessor: loading newest runtime model \(url.path)")
+            return try MLModel(contentsOf: url, configuration: configuration)
         }
 
         let bundle = Bundle.main
         for ext in ["mlmodelc", "mlpackage"] {
-            if let url = bundle.url(forResource: "yolov8n", withExtension: ext) {
-                let compiled = ext == "mlpackage" ? try MLModel.compileModel(at: url) : url
-                return try MLModel(contentsOf: compiled, configuration: configuration)
+            if let url = bundle.url(forResource: "liveblock-detector", withExtension: ext) {
+                return try MLModel(contentsOf: url, configuration: configuration)
             }
         }
         throw NSError(domain: "VisionProcessor", code: 1, userInfo: [
-            NSLocalizedDescriptionKey: "yolov8n model not found in bundle or runtime dir"
+            NSLocalizedDescriptionKey: "liveblock-detector model not found in bundle or runtime dir"
         ])
+#endif
     }
 }

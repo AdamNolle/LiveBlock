@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8"/>
-    <title>LiveBlocker — Render Layer</title>
+    <title>LiveBlock — Render Layer</title>
     <style>
       html, body { margin:0; height:100%; background: transparent; pointer-events: none; overflow: hidden; }
       #patches { position:absolute; inset:0; pointer-events: none; }
@@ -12,13 +12,21 @@
   <body>
     <div id="patches"></div>
     <script type="module">
-      import { events, lb } from "./ipc.ts";
-      import { renderPatches } from "./render.ts";
+      import { events } from "./ipc.ts";
       const root = document.getElementById("patches");
-      events.onPatches(patches => renderPatches(root, patches)).then(async () => {
-        // Recover a cover emitted before this hidden webview finished loading.
-        renderPatches(root, await lb.currentPatches());
-      }).catch(console.error);
+      events.onPatches(patches => {
+        root.innerHTML = "";
+        for (const p of patches) {
+          const img = document.createElement("img");
+          img.className = "patch";
+          img.src = p.png_data_url;
+          img.style.left = `${p.x * 100}%`;
+          img.style.top = `${p.y * 100}%`;
+          img.style.width = `${p.width * 100}%`;
+          img.style.height = `${p.height * 100}%`;
+          root.appendChild(img);
+        }
+      });
     </script>
   </body>
 </html>

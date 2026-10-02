@@ -11,6 +11,7 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 liveblock-core = { path = "../liveblock-core" }
+liveblock-config = { path = "../liveblock-config" }
 liveblock-regions = { path = "../liveblock-regions" }
 liveblock-labels = { path = "../liveblock-labels" }
 liveblock-detection = { path = "../liveblock-detection" }

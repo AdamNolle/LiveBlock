@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "status": "blocked",
+  "decision": "defer",
+  "runtime": {
+    "onnxRuntime": "1.18.1",
+    "ort": "2.0.0-rc.4",
+    "ortSys": "2.0.0-rc.4"
+  },
+  "currentInputTransport": "cpu-uploaded-f32-rgb-nchw",
+  "confirmedSafetySeams": [
+    "capacity-one-newest-frame",
+    "worker-side-staging-map",
+    "per-run-ort-termination",
+    "generation-invalidation-before-cancel",
+    "explicit-cpu-session-after-directml-load-failure",
+    "truthful-runtime-capability"
+  ],
+  "requiredGates": {
+    "captureAdapterIdentity": {
+      "passed": false,
+      "evidence": []
+    },
+    "d3d11On12CaptureDevice": {
+      "passed": false,
+      "evidence": []
+    },
+    "gpuPreprocessingParity": {
+      "passed": false,
+      "evidence": []
+    },
+    "ortDmlAllocationLifetime": {
+      "passed": false,
+      "evidence": []
+    },
+    "ioBindingOutputReadback": {
+      "passed": false,
+      "evidence": []
+    },
+    "fenceCancellationGeneration": {
+      "passed": false,
+      "evidence": []
+    },
+    "deviceLossCpuFallback": {
+      "passed": false,
+      "evidence": []
+    },
+    "vendorHardwareMatrix": {
+      "passed": false,
+      "evidence": []
+    }
+  }
+}

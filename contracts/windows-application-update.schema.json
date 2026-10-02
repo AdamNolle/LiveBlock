@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveblock.local/contracts/windows-application-update.schema.json",
+  "title": "LiveBlock staged Windows application update",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "channel",
+    "platform",
+    "version",
+    "gitCommit",
+    "source",
+    "authenticode",
+    "descriptorSignature",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "channel": { "const": "stable-staged-nsis" },
+    "platform": { "const": "windows-x86_64" },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "gitCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "repository", "tag"],
+      "properties": {
+        "type": { "const": "github-release" },
+        "repository": { "const": "AdamNolle/LiveBlock" },
+        "tag": { "type": "string", "pattern": "^desktop-v[0-9]+\\.[0-9]+\\.[0-9]+$" }
+      }
+    },
+    "descriptorSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "format"],
+      "properties": {
+        "fileName": { "const": "windows-application-update.p7s" },
+        "format": { "const": "cms-detached-sha256" }
+      }
+    },
+    "authenticode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publisherSubject", "certificateSha256", "timestampCertificateSha256"],
+      "properties": {
+        "publisherSubject": { "type": "string", "minLength": 1 },
+        "certificateSha256": { "$ref": "#/$defs/sha256" },
+        "timestampCertificateSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "installer",
+        "sbom",
+        "licenseReport",
+        "obligationReport",
+        "licenseDecisions",
+        "mplSourceOffer",
+        "mplLicense"
+      ],
+      "properties": {
+        "installer": { "$ref": "#/$defs/file" },
+        "sbom": { "$ref": "#/$defs/file" },
+        "licenseReport": { "$ref": "#/$defs/file" },
+        "obligationReport": { "$ref": "#/$defs/file" },
+        "licenseDecisions": { "$ref": "#/$defs/file" },
+        "mplSourceOffer": { "$ref": "#/$defs/file" },
+        "mplLicense": { "$ref": "#/$defs/file" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "size", "sha256"],
+      "properties": {
+        "fileName": { "type": "string", "pattern": "^[^/\\\\]+$", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

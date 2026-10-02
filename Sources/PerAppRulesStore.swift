@@ -1,5 +1,7 @@
 import Foundation
 
+private let perAppRulesStorageKey = "perAppExcludedBundleIDs"
+
 /// Persists the user's per-app exclusion list. When the frontmost app's
 /// bundle identifier appears in `excludedBundleIDs`, the capture pipeline
 /// pauses (no detection, no inpaint, no patches drawn). Default is empty
@@ -10,18 +12,26 @@ import Foundation
 /// of `@AppStorage`-backed settings.
 @MainActor
 final class PerAppRulesStore: ObservableObject {
-    private static let key = "perAppExcludedBundleIDs"
+    private let defaults: UserDefaults
+    private let storageKey: String
+    private var shutdownRequested = false
 
-    @Published var excludedBundleIDs: Set<String> {
+    @Published private(set) var excludedBundleIDs: Set<String> {
         didSet {
-            UserDefaults.standard.set(Array(excludedBundleIDs).sorted(),
-                                      forKey: Self.key)
+            defaults.set(Array(excludedBundleIDs).sorted(), forKey: storageKey)
         }
     }
 
-    init() {
-        let stored = UserDefaults.standard.stringArray(forKey: Self.key) ?? []
+    init(defaults: UserDefaults = .standard,
+         storageKey: String = perAppRulesStorageKey) {
+        self.defaults = defaults
+        self.storageKey = storageKey
+        let stored = defaults.stringArray(forKey: storageKey) ?? []
         self.excludedBundleIDs = Set(stored)
+    }
+
+    func prepareForShutdown() {
+        shutdownRequested = true
     }
 
     func isExcluded(_ bundleID: String) -> Bool {
@@ -30,7 +40,7 @@ final class PerAppRulesStore: ObservableObject {
     }
 
     func setExcluded(_ bundleID: String, excluded: Bool) {
-        guard !bundleID.isEmpty else { return }
+        guard !shutdownRequested, !bundleID.isEmpty else { return }
         if excluded {
             excludedBundleIDs.insert(bundleID)
         } else {
@@ -40,5 +50,10 @@ final class PerAppRulesStore: ObservableObject {
 
     func toggle(_ bundleID: String) {
         setExcluded(bundleID, excluded: !isExcluded(bundleID))
+    }
+
+    func clear() {
+        guard !shutdownRequested else { return }
+        excludedBundleIDs = []
     }
 }

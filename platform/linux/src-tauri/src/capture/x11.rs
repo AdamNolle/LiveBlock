@@ -1,75 +1,27 @@
-//! X11 capture via XComposite (redirected window manager output) + XShm
-//! (shared-memory pixel transfer).
-//!
-//! XComposite tells the server to render windows into off-screen pixmaps so
-//! we can pull them without race conditions. XShm gives us a (near) zero-copy
-//! shared-memory pipe for the actual pixel bytes: we allocate a SysV shared
-//! segment with `shmget`/`shmat`, hand its id to the X server via
-//! `XShmAttach`, then each frame `XShmGetImage` fills the segment directly and
-//! we read it back as BGRX → BGRA.
-//!
-//! The isolated native integration harness exercises real SysV shared memory
-//! and XShm. Pixel conversion honors the server's depth, masks, byte order and
-//! row padding. Desktop overlay self-exclusion still needs compositor testing.
+//! X11 root capture via XComposite capability detection and MIT-SHM images.
+//! We do not claim root redirection ownership because the desktop compositor
+//! may already own it; root GetImage reads the final composited desktop.
 
-use super::x11_pixels::X11PixelFormat;
-use super::{CaptureSource, FrameView};
+use super::{CaptureEvent, CaptureSource, FrameView};
 use anyhow::{anyhow, Context, Result};
+use memmap2::{MmapMut, MmapOptions};
+use std::fs::File;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::composite::ConnectionExt as _;
 use x11rb::protocol::shm::ConnectionExt as _;
-use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, Screen};
+use x11rb::protocol::xproto::ConnectionExt as _;
+use x11rb::protocol::xproto::{ImageFormat, ImageOrder, Screen};
 use x11rb::rust_connection::RustConnection;
 
-/// RAII wrapper over a SysV shared-memory segment (shmget + shmat).
-struct ShmSegment {
-    /// SysV IPC id from `shmget`.
-    shmid: i32,
-    /// Mapped address from `shmat`.
-    addr: *mut libc::c_void,
-    /// Byte length of the segment.
-    len: usize,
-}
+const ROOT_GEOMETRY_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
-// The mapped pointer is only ever touched on the capture thread while a frame
-// is being read; we never share it across threads concurrently.
-unsafe impl Send for ShmSegment {}
-
-impl ShmSegment {
-    fn new(len: usize) -> Result<Self> {
-        // 0o600 = owner rw. IPC_CREAT to allocate a fresh segment.
-        let shmid = unsafe { libc::shmget(libc::IPC_PRIVATE, len, libc::IPC_CREAT | 0o600) };
-        if shmid < 0 {
-            return Err(anyhow!(
-                "shmget({len}) failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let addr = unsafe { libc::shmat(shmid, std::ptr::null(), 0) };
-        if addr == (-1isize as *mut libc::c_void) {
-            // Clean up the id we just created before bailing.
-            unsafe { libc::shmctl(shmid, libc::IPC_RMID, std::ptr::null_mut()) };
-            return Err(anyhow!("shmat failed: {}", std::io::Error::last_os_error()));
-        }
-        Ok(Self { shmid, addr, len })
-    }
-
-    /// View the mapped memory as a byte slice.
-    fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.addr as *const u8, self.len) }
-    }
-}
-
-impl Drop for ShmSegment {
-    fn drop(&mut self) {
-        unsafe {
-            libc::shmdt(self.addr);
-            // IPC_RMID marks the segment for deletion once detached everywhere
-            // (the X server detaches when we XShmDetach / close the connection).
-            libc::shmctl(self.shmid, libc::IPC_RMID, std::ptr::null_mut());
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+struct ColorMasks {
+    red: u32,
+    green: u32,
+    blue: u32,
 }
 
 pub struct X11Capture {
@@ -77,175 +29,356 @@ pub struct X11Capture {
     root: u32,
     width: u16,
     height: u16,
-    pixel_format: X11PixelFormat,
-    /// X server's id for the attached shm segment.
+    depth: u8,
+    stride: usize,
+    bits_per_pixel: u8,
+    scanline_pad: u8,
+    lsb_first: bool,
+    color_masks: ColorMasks,
     shm_seg: u32,
-    /// The shared-memory backing store. `None` if shm setup failed (we then
-    /// fall back to a plain `GetImage` round-trip).
-    segment: Option<ShmSegment>,
+    mapping: MmapMut,
+    shm_attached: bool,
+    last_geometry_check: Instant,
+}
+
+fn geometry_check_due(last_check: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_check) >= ROOT_GEOMETRY_CHECK_INTERVAL
+}
+
+fn packed_stride(width: u16, bits_per_pixel: u8, scanline_pad: u8) -> Result<usize> {
+    let pad_bits = usize::from(scanline_pad);
+    if width == 0 || bits_per_pixel == 0 || pad_bits == 0 || pad_bits % 8 != 0 {
+        return Err(anyhow!(
+            "unsupported X11 packed layout width={width} bpp={bits_per_pixel} pad={scanline_pad}"
+        ));
+    }
+    let row_bits = usize::from(width)
+        .checked_mul(usize::from(bits_per_pixel))
+        .ok_or_else(|| anyhow!("X11 row size overflow"))?;
+    let padded_units = row_bits
+        .checked_add(pad_bits - 1)
+        .ok_or_else(|| anyhow!("X11 padded row size overflow"))?
+        / pad_bits;
+    padded_units
+        .checked_mul(pad_bits / 8)
+        .ok_or_else(|| anyhow!("X11 packed stride overflow"))
+}
+
+fn create_shm_mapping(conn: &RustConnection, stride: usize, height: u16) -> Result<(u32, MmapMut)> {
+    if height == 0 {
+        return Err(anyhow!("X11 root height is zero"));
+    }
+    let byte_len = stride
+        .checked_mul(usize::from(height))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| anyhow!("X11 capture dimensions overflow shared-memory size"))?;
+    let shm_seg = conn.generate_id().context("allocate XShm segment id")?;
+    let reply = conn
+        .shm_create_segment(shm_seg, byte_len, false)?
+        .reply()
+        .context("XShm create_segment (MIT-SHM 1.2 fd transport required)")?;
+    let file = File::from(reply.shm_fd);
+    match unsafe { MmapOptions::new().len(byte_len as usize).map_mut(&file) } {
+        Ok(mapping) => Ok((shm_seg, mapping)),
+        Err(error) => {
+            if let Ok(cookie) = conn.shm_detach(shm_seg) {
+                let _ = cookie.check();
+            }
+            let _ = conn.flush();
+            Err(error).context("map XShm capture segment")
+        }
+    }
 }
 
 impl X11Capture {
-    /// Runtime diagnostic used by the isolated X11 integration harness.
-    #[allow(dead_code)]
-    pub fn uses_shared_memory(&self) -> bool {
-        self.segment.is_some()
-    }
-
     pub fn new() -> Result<Self> {
         let (conn, screen_num) = x11rb::connect(None).context("X11 connect")?;
-        let setup = conn.setup();
-        let screen: &Screen = &setup.roots[screen_num];
-        let root = screen.root;
-        let width = screen.width_in_pixels;
-        let height = screen.height_in_pixels;
-        let format = setup
-            .pixmap_formats
-            .iter()
-            .find(|f| f.depth == screen.root_depth)
-            .context("No pixel format for X11 root depth")?;
-        let visual = screen
-            .allowed_depths
-            .iter()
-            .flat_map(|d| &d.visuals)
-            .find(|v| v.visual_id == screen.root_visual)
-            .context("No X11 root visual")?;
-        let pixel_format = X11PixelFormat {
-            bits_per_pixel: format.bits_per_pixel,
-            scanline_pad: format.scanline_pad,
-            little_endian: setup.image_byte_order == x11rb::protocol::xproto::ImageOrder::LSB_FIRST,
-            masks: [visual.red_mask, visual.green_mask, visual.blue_mask],
+        let (
+            root,
+            width,
+            height,
+            depth,
+            stride,
+            bits_per_pixel,
+            scanline_pad,
+            lsb_first,
+            color_masks,
+        ) = {
+            let setup = conn.setup();
+            let screen: &Screen = &setup.roots[screen_num];
+            let format = setup
+                .pixmap_formats
+                .iter()
+                .find(|format| format.depth == screen.root_depth)
+                .ok_or_else(|| anyhow!("X11 root depth has no pixmap format"))?;
+            let visual = screen
+                .allowed_depths
+                .iter()
+                .find(|allowed| allowed.depth == screen.root_depth)
+                .and_then(|allowed| {
+                    allowed
+                        .visuals
+                        .iter()
+                        .find(|visual| visual.visual_id == screen.root_visual)
+                })
+                .ok_or_else(|| anyhow!("X11 root visual metadata is unavailable"))?;
+            let stride = packed_stride(
+                screen.width_in_pixels,
+                format.bits_per_pixel,
+                format.scanline_pad,
+            )?;
+            (
+                screen.root,
+                screen.width_in_pixels,
+                screen.height_in_pixels,
+                screen.root_depth,
+                stride,
+                format.bits_per_pixel,
+                format.scanline_pad,
+                setup.image_byte_order == ImageOrder::LSB_FIRST,
+                ColorMasks {
+                    red: visual.red_mask,
+                    green: visual.green_mask,
+                    blue: visual.blue_mask,
+                },
+            )
         };
+        if !matches!(bits_per_pixel, 24 | 32) {
+            return Err(anyhow!(
+                "unsupported X11 root pixel width {bits_per_pixel} at depth {depth}"
+            ));
+        }
 
-        // Redirect rendering of all top-level windows to off-screen storage so
-        // we can read the composited result without tearing.
-        conn.composite_redirect_subwindows(root, x11rb::protocol::composite::Redirect::AUTOMATIC)
-            .context("composite_redirect_subwindows request")?
-            .check()
-            .context("composite_redirect_subwindows")?;
+        conn.composite_query_version(0, 4)?
+            .reply()
+            .context("XComposite query_version")?;
 
-        // Allocate a SysV shm segment sized for one BGRA frame and attach it to
-        // the X server. If anything here fails we degrade to non-shm GetImage.
-        let len = pixel_format
-            .buffer_len(width as u32, height as u32)
-            .map_err(|e| anyhow!(e))?;
-        let (shm_seg, segment) = match Self::setup_shm(&conn, len) {
-            Ok(pair) => (pair.0, Some(pair.1)),
-            Err(e) => {
-                tracing::warn!("XShm setup failed ({e:#}); falling back to GetImage");
-                (0, None)
-            }
-        };
+        let (shm_seg, mapping) = create_shm_mapping(&conn, stride, height)?;
 
         Ok(Self {
             conn,
             root,
             width,
             height,
-            pixel_format,
+            depth,
+            stride,
+            bits_per_pixel,
+            scanline_pad,
+            lsb_first,
+            color_masks,
             shm_seg,
-            segment,
+            mapping,
+            shm_attached: true,
+            last_geometry_check: Instant::now(),
         })
     }
 
-    /// shmget/shmat a segment and XShmAttach it. Returns the X server's segment
-    /// id and the RAII handle.
-    fn setup_shm(conn: &RustConnection, len: usize) -> Result<(u32, ShmSegment)> {
-        let segment = ShmSegment::new(len)?;
-        let shm_seg = conn.generate_id().context("generate shm seg id")?;
-        // read_only = false: the server writes pixels into our segment.
-        conn.shm_attach(shm_seg, segment.shmid as u32, false)
-            .context("shm_attach request")?
-            .check()
-            .context("XShmAttach")?;
-        Ok((shm_seg, segment))
+    fn refresh_root_geometry(&mut self) -> Result<bool> {
+        let geometry = self
+            .conn
+            .get_geometry(self.root)?
+            .reply()
+            .context("query current X11 root geometry")?;
+        if geometry.depth != self.depth {
+            return Err(anyhow!(
+                "X11 root depth changed from {} to {}",
+                self.depth,
+                geometry.depth
+            ));
+        }
+        if geometry.width == self.width && geometry.height == self.height {
+            return Ok(false);
+        }
+        let stride = packed_stride(geometry.width, self.bits_per_pixel, self.scanline_pad)?;
+        let (new_shm_seg, new_mapping) = create_shm_mapping(&self.conn, stride, geometry.height)?;
+        let detach_result = (|| -> Result<()> {
+            self.conn
+                .shm_detach(self.shm_seg)?
+                .check()
+                .context("detach previous XShm capture segment")?;
+            self.conn.flush().context("flush XShm resize")?;
+            Ok(())
+        })();
+        if let Err(error) = detach_result {
+            if let Ok(cookie) = self.conn.shm_detach(new_shm_seg) {
+                let _ = cookie.check();
+            }
+            let _ = self.conn.flush();
+            return Err(error);
+        }
+        self.shm_seg = new_shm_seg;
+        self.mapping = new_mapping;
+        self.width = geometry.width;
+        self.height = geometry.height;
+        self.stride = stride;
+        Ok(true)
+    }
+
+    fn capture_frame(&mut self) -> Result<FrameView> {
+        self.conn
+            .shm_get_image(
+                self.root,
+                0,
+                0,
+                self.width,
+                self.height,
+                u32::MAX,
+                ImageFormat::Z_PIXMAP.into(),
+                self.shm_seg,
+                0,
+            )?
+            .reply()
+            .context("XShm get_image")?;
+        let packed = convert_native_to_bgra(
+            &self.mapping,
+            self.width as u32,
+            self.height as u32,
+            self.stride,
+            self.bits_per_pixel,
+            self.lsb_first,
+            self.color_masks,
+        )?;
+        Ok(FrameView {
+            pixels: Arc::from(packed),
+            width: self.width as u32,
+            height: self.height as u32,
+            stride: self.width as u32 * 4,
+        })
+    }
+
+    fn cleanup(&mut self) {
+        if self.shm_attached {
+            let _ = self.conn.shm_detach(self.shm_seg);
+            let _ = self.conn.flush();
+            self.shm_attached = false;
+        }
+    }
+}
+
+impl Drop for X11Capture {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
 
 #[async_trait::async_trait]
 impl CaptureSource for X11Capture {
-    async fn next_frame(&mut self) -> Result<FrameView> {
-        let w = self.width as u32;
-        let h = self.height as u32;
-        if w == 0 || h == 0 {
-            return Ok(FrameView {
-                pixels: Arc::from([0u8; 0]),
-                width: 0,
-                height: 0,
-                stride: 0,
-            });
-        }
-
-        // X11 has no frame-ready signal for root-window polling, so we pace the
-        // grab to ~60 Hz here; the runtime loop throttles inference further.
-        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-
-        // The x11rb calls are synchronous round-trips. They run on this tokio
-        // worker thread; on the multi-thread runtime that's acceptable for a
-        // dedicated capture task. (A future optimization is the XDamage/XShm
-        // completion event to avoid full-frame polling.)
-        let bgra = if let Some(seg) = &self.segment {
-            // Fast path: server DMAs the image into our shared segment.
-            let reply = self
-                .conn
-                .shm_get_image(
-                    self.root,
-                    0,
-                    0,
-                    self.width,
-                    self.height,
-                    u32::MAX, // plane mask: all planes
-                    ImageFormat::Z_PIXMAP.into(),
-                    self.shm_seg,
-                    0, // offset into segment
-                )
-                .context("shm_get_image request")?
-                .reply()
-                .context("XShmGetImage")?;
-            if reply.size as usize != seg.len {
-                return Err(anyhow!("Unexpected XShm pixel buffer size"));
+    async fn next_event(&mut self) -> Result<CaptureEvent> {
+        let now = Instant::now();
+        if geometry_check_due(self.last_geometry_check, now) {
+            self.last_geometry_check = now;
+            if self.refresh_root_geometry()? {
+                return Ok(CaptureEvent::Reset);
             }
-            self.pixel_format
-                .decode(seg.as_slice(), w, h)
-                .map_err(|e| anyhow!(e))?
-        } else {
-            // Fallback path: a regular GetImage round-trip (slower, copies the
-            // pixels back over the socket).
-            let reply = self
-                .conn
-                .get_image(
-                    ImageFormat::Z_PIXMAP,
-                    self.root,
-                    0,
-                    0,
-                    self.width,
-                    self.height,
-                    u32::MAX,
-                )
-                .context("get_image request")?
-                .reply()
-                .context("GetImage")?;
-            self.pixel_format
-                .decode(&reply.data, w, h)
-                .map_err(|e| anyhow!(e))?
-        };
+        }
+        match self.capture_frame() {
+            Ok(frame) => Ok(CaptureEvent::Frame(frame)),
+            Err(frame_error) => match self.refresh_root_geometry() {
+                Ok(true) => Ok(CaptureEvent::Reset),
+                Ok(false) => Err(frame_error),
+                Err(geometry_error) => Err(anyhow!(
+                    "X11 frame failed ({frame_error}); geometry recovery failed ({geometry_error})"
+                )),
+            },
+        }
+    }
+    async fn stop(&mut self) {
+        self.cleanup();
+    }
+}
 
-        Ok(FrameView {
-            pixels: Arc::from(bgra.into_boxed_slice()),
-            width: w,
-            height: h,
-            stride: w * 4,
-        })
+fn convert_native_to_bgra(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+    bits_per_pixel: u8,
+    lsb_first: bool,
+    masks: ColorMasks,
+) -> Result<Vec<u8>> {
+    let bytes_per_pixel = usize::from(bits_per_pixel / 8);
+    let row_bytes = width as usize * bytes_per_pixel;
+    let required = stride
+        .checked_mul(height as usize)
+        .ok_or_else(|| anyhow!("X11 frame dimensions overflow"))?;
+    if stride < row_bytes || source.len() < required {
+        return Err(anyhow!("truncated or invalid X11 shared-memory frame"));
+    }
+    let mut output = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height as usize {
+        let row = &source[y * stride..y * stride + row_bytes];
+        for x in 0..width as usize {
+            let pixel = &row[x * bytes_per_pixel..(x + 1) * bytes_per_pixel];
+            let native = if lsb_first {
+                pixel.iter().enumerate().fold(0u32, |value, (index, byte)| {
+                    value | (u32::from(*byte) << (index * 8))
+                })
+            } else {
+                pixel
+                    .iter()
+                    .fold(0u32, |value, byte| (value << 8) | u32::from(*byte))
+            };
+            let r = expand_mask(native, masks.red)?;
+            let g = expand_mask(native, masks.green)?;
+            let b = expand_mask(native, masks.blue)?;
+            let offset = (y * width as usize + x) * 4;
+            output[offset..offset + 4].copy_from_slice(&[b, g, r, 255]);
+        }
+    }
+    Ok(output)
+}
+
+fn expand_mask(pixel: u32, mask: u32) -> Result<u8> {
+    if mask == 0 {
+        return Err(anyhow!("X11 visual has an empty RGB mask"));
+    }
+    let shift = mask.trailing_zeros();
+    let maximum = mask >> shift;
+    let value = (pixel & mask) >> shift;
+    Ok(((u64::from(value) * 255 + u64::from(maximum) / 2) / u64::from(maximum)) as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RGB888: ColorMasks = ColorMasks {
+        red: 0x00ff0000,
+        green: 0x0000ff00,
+        blue: 0x000000ff,
+    };
+
+    #[test]
+    fn geometry_polling_and_stride_are_bounded() {
+        let now = Instant::now();
+        assert!(!geometry_check_due(now, now));
+        assert!(geometry_check_due(now - ROOT_GEOMETRY_CHECK_INTERVAL, now,));
+        assert_eq!(packed_stride(3, 24, 32).unwrap(), 12);
+        assert_eq!(packed_stride(3, 32, 32).unwrap(), 12);
+        assert!(packed_stride(0, 32, 32).is_err());
+        assert!(packed_stride(3, 32, 7).is_err());
     }
 
-    fn stop(&mut self) {
-        // Detach the shm segment from the X server before the connection (and
-        // the segment's Drop) tear everything down.
-        if self.segment.is_some() {
-            let _ = self.conn.shm_detach(self.shm_seg);
-            let _ = self.conn.flush();
-        }
-        // `self.segment`'s Drop releases the SysV segment; closing `self.conn`
-        // releases the XComposite redirection.
+    #[test]
+    fn converts_padded_lsb_bgrx_to_packed_bgra() {
+        let source = [1, 2, 3, 0, 4, 5, 6, 0, 99, 99, 99, 99];
+        assert_eq!(
+            convert_native_to_bgra(&source, 2, 1, 12, 32, true, RGB888).unwrap(),
+            [1, 2, 3, 255, 4, 5, 6, 255]
+        );
+    }
+
+    #[test]
+    fn converts_msb_xrgb_to_packed_bgra() {
+        let source = [0, 30, 20, 10];
+        assert_eq!(
+            convert_native_to_bgra(&source, 1, 1, 4, 32, false, RGB888).unwrap(),
+            [10, 20, 30, 255]
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_rows() {
+        assert!(convert_native_to_bgra(&[0; 7], 2, 1, 8, 32, true, RGB888).is_err());
     }
 }

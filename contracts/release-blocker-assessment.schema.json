@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveblock.local/contracts/release-blocker-assessment.schema.json",
+  "title": "LiveBlock automatable release blocker assessment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "automatablePrerequisitesSatisfied",
+    "projectCommit",
+    "blockerIds",
+    "gates",
+    "externalPrerequisitesNotAssessed",
+    "boundary"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "status": { "enum": ["blocked", "external-review-required"] },
+    "automatablePrerequisitesSatisfied": { "type": "boolean" },
+    "projectCommit": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "blockerIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "human-review",
+          "schema-5-promotion",
+          "production-model-trust",
+          "directml-texture-transport"
+        ]
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "humanReview",
+        "schema5Promotion",
+        "productionModelTrust",
+        "directmlTextureTransport"
+      ],
+      "properties": {
+        "humanReview": { "$ref": "#/$defs/humanReview" },
+        "schema5Promotion": { "$ref": "#/$defs/promotion" },
+        "productionModelTrust": { "$ref": "#/$defs/modelTrust" },
+        "directmlTextureTransport": { "$ref": "#/$defs/directml" }
+      }
+    },
+    "externalPrerequisitesNotAssessed": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "accountable-dependency-approval" },
+        { "const": "production-signing-and-publication" },
+        { "const": "real-device-platform-validation" }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "boundary": {
+      "const": "diagnostic only; never authorizes model installation, signing, publication, or release"
+    }
+  },
+  "$defs": {
+    "status": { "enum": ["blocked", "satisfied"] },
+    "sha256OrNull": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        { "type": "null" }
+      ]
+    },
+    "nonnegativeOrNull": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "null" }
+      ]
+    },
+    "humanReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reasonCode",
+        "approved",
+        "pending",
+        "excluded",
+        "missing",
+        "plannedGroupCount",
+        "remainingCandidateDeficitCount",
+        "planSha256",
+        "reviewStateSha256",
+        "statusSha256"
+      ],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "reasonCode": {
+          "enum": [
+            "human-review-complete",
+            "human-review-incomplete",
+            "human-review-input-missing",
+            "human-review-input-invalid",
+            "human-review-input-mismatch"
+          ]
+        },
+        "approved": { "$ref": "#/$defs/nonnegativeOrNull" },
+        "pending": { "$ref": "#/$defs/nonnegativeOrNull" },
+        "excluded": { "$ref": "#/$defs/nonnegativeOrNull" },
+        "missing": { "$ref": "#/$defs/nonnegativeOrNull" },
+        "plannedGroupCount": { "$ref": "#/$defs/nonnegativeOrNull" },
+        "remainingCandidateDeficitCount": { "$ref": "#/$defs/nonnegativeOrNull" },
+        "planSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "reviewStateSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "statusSha256": { "$ref": "#/$defs/sha256OrNull" }
+      }
+    },
+    "promotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reasonCode",
+        "reportSha256",
+        "reportPassed",
+        "gateCodeCurrent",
+        "failureCount"
+      ],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "reasonCode": {
+          "enum": [
+            "promotion-passed-current-rerun",
+            "promotion-report-failed",
+            "promotion-report-missing",
+            "promotion-report-invalid",
+            "promotion-report-stale",
+            "promotion-fresh-rerun-required",
+            "promotion-fresh-rerun-failed"
+          ]
+        },
+        "reportSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "reportPassed": {
+          "oneOf": [{ "type": "boolean" }, { "type": "null" }]
+        },
+        "gateCodeCurrent": {
+          "oneOf": [{ "type": "boolean" }, { "type": "null" }]
+        },
+        "failureCount": { "$ref": "#/$defs/nonnegativeOrNull" }
+      }
+    },
+    "keyring": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "path", "sha256", "keyCount"],
+      "properties": {
+        "platform": { "enum": ["macos", "windows", "linux"] },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256OrNull" },
+        "keyCount": { "$ref": "#/$defs/nonnegativeOrNull" }
+      }
+    },
+    "modelTrust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasonCode", "keyrings"],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "reasonCode": {
+          "enum": [
+            "production-keyrings-nonempty",
+            "production-keyring-empty",
+            "production-keyring-missing",
+            "production-keyring-invalid"
+          ]
+        },
+        "keyrings": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/keyring" }
+        }
+      }
+    },
+    "directml": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reasonCode",
+        "readinessSha256",
+        "passedGateCount",
+        "requiredGateCount",
+        "currentInputTransport"
+      ],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "reasonCode": {
+          "enum": ["directml-ready", "directml-deferred", "directml-readiness-invalid"]
+        },
+        "readinessSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "passedGateCount": { "$ref": "#/$defs/nonnegativeOrNull" },
+        "requiredGateCount": { "$ref": "#/$defs/nonnegativeOrNull" },
+        "currentInputTransport": {
+          "oneOf": [
+            { "enum": ["cpu-uploaded-f32-rgb-nchw", "d3d12-dml-allocation-f32-rgb-nchw"] },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}

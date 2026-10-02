@@ -3,18 +3,16 @@
 //! `ScreenshotEntry` UI type stays local — it's purely the shape the Tauri
 //! frontend wants for the labeling list.
 
-// Re-export the shared label types. `LabelDocument` is used directly by the
-// command layer; `LabelBox`/`Iso8601`/`LabelClass` are part of the on-disk
-// schema and kept available to callers (and future label-editing commands).
-#[allow(unused_imports)]
-pub use liveblock_labels::{Iso8601, LabelBox, LabelClass, LabelDocument};
+pub use liveblock_labels::{Iso8601, LabelBox, LabelDocument};
 
 use serde::Serialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScreenshotEntry {
     pub path: PathBuf,
+    pub label_path: PathBuf,
     pub stem: String,
     pub labeled: bool,
 }

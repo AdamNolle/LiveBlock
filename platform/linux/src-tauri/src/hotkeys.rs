@@ -1,282 +1,327 @@
-//! Global hotkeys.
-//!
-//! Wayland: xdg-desktop-portal `org.freedesktop.portal.GlobalShortcuts` via
-//! `ashpd` (the user grants access once; we persist the session). Some portal
-//! backends let the COMPOSITOR pick the actual key combos, so the trigger
-//! definitions are advisory.
-//!
-//! X11: classic `XGrabKey` on the root window + an XEvent pump thread.
-//!
-//! PANIC-DISABLE GUARANTEE: `PanicDisable` (Ctrl+Shift+Alt+.) must ALWAYS be
-//! able to stop all overlay output, even if the portal denied the other
-//! shortcuts or the grab partly failed. On X11 we grab the panic combo FIRST
-//! and treat its grab as mandatory; on Wayland it is registered as the first
-//! shortcut and the receiver loop in `main.rs` handles it unconditionally.
+//! Linux global shortcuts.
+//! Wayland uses the permissioned GlobalShortcuts portal. X11 uses passive
+//! XGrabKey registrations on the root and releases them when the connection
+//! closes. Runtime availability is emitted separately from static capability.
 
-use x11rb::connection::Connection as _;
 use anyhow::{anyhow, Context, Result};
+use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
+use ashpd::WindowIdentifier;
 use crossbeam_channel::Sender;
+use futures_util::StreamExt;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use crate::state::AppState;
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::{ConnectionExt as _, GrabMode, ModMask};
+use x11rb::protocol::Event;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HotkeyAction {
-    ToggleCapture,      // Ctrl+Shift+L
-    ToggleEditor,       // Ctrl+Shift+B
-    CaptureForLabeling, // Ctrl+Shift+S
-    PanicDisable,       // Ctrl+Shift+Alt+Period
+    ToggleCapture,
+    ToggleEditor,
+    CaptureForLabeling,
+    PanicDisable,
 }
 
-/// Install global hotkeys for the active display server. Spawns a background
-/// listener that forwards `HotkeyAction`s on `tx`. The receiver loop lives in
-/// `main.rs` (so it can touch Tauri state / emit events).
-pub fn install(tx: Sender<HotkeyAction>) -> Result<()> {
+const TOGGLE_CAPTURE_ID: &str = "toggle_capture";
+const TOGGLE_EDITOR_ID: &str = "toggle_editor";
+const CAPTURE_LABEL_ID: &str = "capture_for_labeling";
+const PANIC_ID: &str = "panic_disable";
+
+pub fn spawn(app: AppHandle, actions: Sender<HotkeyAction>, state: Arc<AppState>) {
     match crate::session::detect_session() {
-        crate::session::SessionType::Wayland => install_wayland_portal(tx),
-        crate::session::SessionType::X11 | crate::session::SessionType::Unknown => {
-            install_x11_grab(tx)
+        crate::session::SessionType::Wayland => {
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = run_wayland_portal(actions, app.clone(), state.clone()).await {
+                    report_unavailable(&app, &state, error);
+                }
+            });
+        }
+        crate::session::SessionType::X11 => {
+            std::thread::spawn(move || {
+                let availability_app = app.clone();
+                let availability_state = state.clone();
+                if let Err(error) = run_x11_grab(
+                    actions,
+                    || false,
+                    move || set_availability(&availability_app, &availability_state, true),
+                ) {
+                    report_unavailable(&app, &state, error);
+                }
+            });
+        }
+        crate::session::SessionType::Unknown => {
+            report_unavailable(&app, &state, anyhow!("unknown Linux display server"));
         }
     }
 }
 
-// ===========================================================================
-// Wayland: xdg-desktop-portal GlobalShortcuts (ashpd)
-// ===========================================================================
-
-fn install_wayland_portal(tx: Sender<HotkeyAction>) -> Result<()> {
-    // ashpd is async; run a dedicated single-thread tokio runtime for the
-    // portal session + signal listener so we don't depend on the Tauri runtime
-    // being available at install time.
-    std::thread::Builder::new()
-        .name("hotkeys-portal".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!("hotkeys portal runtime: {e:#}");
-                    return;
-                }
-            };
-            if let Err(e) = rt.block_on(wayland_portal_loop(tx)) {
-                tracing::warn!("GlobalShortcuts portal unavailable: {e:#}");
-            }
-        })
-        .context("spawn hotkeys-portal thread")?;
-    Ok(())
+fn set_availability(app: &AppHandle, state: &AppState, available: bool) {
+    state.hotkeys_available.store(available, Ordering::SeqCst);
+    state.hotkeys_initialized.store(true, Ordering::SeqCst);
+    let _ = app.emit("hotkey-availability-changed", available);
 }
 
-async fn wayland_portal_loop(tx: Sender<HotkeyAction>) -> Result<()> {
-    use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
-    use futures_util::StreamExt;
+fn report_unavailable(app: &AppHandle, state: &AppState, error: anyhow::Error) {
+    tracing::warn!("Linux global shortcuts unavailable: {error}");
+    set_availability(app, state, false);
+    let _ = app.emit("hotkey-runtime-error", error.to_string());
+}
 
-    let shortcuts = GlobalShortcuts::new()
+async fn run_wayland_portal(
+    actions: Sender<HotkeyAction>,
+    app: AppHandle,
+    state: Arc<AppState>,
+) -> Result<()> {
+    let proxy = GlobalShortcuts::new()
         .await
-        .context("GlobalShortcuts proxy")?;
-    let session = shortcuts
+        .context("create GlobalShortcuts portal proxy")?;
+    let session = proxy
         .create_session()
         .await
-        .context("create_session")?;
-
-    // The trigger strings are portal "shortcut" syntax ("CTRL+SHIFT+l"). Backends
-    // that prefer to let the user choose ignore the preferred trigger; the IDs
-    // are what we map back to actions.
-    // VERIFY-ON-LINUX(linux-port): `preferred_trigger` takes `Option<&str>` in
-    // ashpd 0.9. The trigger syntax is the portal's ("CTRL+SHIFT+l"); some
-    // backends ignore it and let the user choose, in which case the IDs are what
-    // matter for dispatch.
-    let defs = [
-        // Panic FIRST so it's the most likely to register if the backend caps
-        // the number of shortcuts.
-        NewShortcut::new("panic_disable", "Panic: disable all overlays")
-            .preferred_trigger(Some("CTRL+SHIFT+ALT+period")),
-        NewShortcut::new("toggle_capture", "Toggle capture")
-            .preferred_trigger(Some("CTRL+SHIFT+l")),
-        NewShortcut::new("toggle_editor", "Toggle region editor")
-            .preferred_trigger(Some("CTRL+SHIFT+b")),
-        NewShortcut::new("capture_for_labeling", "Capture screenshot for labeling")
-            .preferred_trigger(Some("CTRL+SHIFT+s")),
+        .context("create GlobalShortcuts portal session")?;
+    let shortcuts = [
+        NewShortcut::new(TOGGLE_CAPTURE_ID, "Toggle LiveBlock capture")
+            .preferred_trigger("CTRL+SHIFT+l"),
+        NewShortcut::new(TOGGLE_EDITOR_ID, "Toggle LiveBlock region editor")
+            .preferred_trigger("CTRL+SHIFT+b"),
+        NewShortcut::new(CAPTURE_LABEL_ID, "Capture a LiveBlock labeling frame")
+            .preferred_trigger("CTRL+SHIFT+s"),
+        NewShortcut::new(PANIC_ID, "Immediately disable LiveBlock")
+            .preferred_trigger("CTRL+SHIFT+ALT+period"),
     ];
-
-    shortcuts
-        .bind_shortcuts(&session, &defs, &ashpd::WindowIdentifier::default())
+    let response = proxy
+        .bind_shortcuts(&session, &shortcuts, &WindowIdentifier::default())
         .await
-        .context("bind_shortcuts")?;
+        .context("request GlobalShortcuts bindings")?
+        .response()
+        .context("GlobalShortcuts binding response")?;
+    let bound: HashSet<&str> = response
+        .shortcuts()
+        .iter()
+        .map(|shortcut| shortcut.id())
+        .collect();
+    let required: HashSet<&str> = [
+        TOGGLE_CAPTURE_ID,
+        TOGGLE_EDITOR_ID,
+        CAPTURE_LABEL_ID,
+        PANIC_ID,
+    ]
+    .into_iter()
+    .collect();
+    if bound != required {
+        let _ = session.close().await;
+        return Err(anyhow!("portal did not bind every required shortcut"));
+    }
 
-    // Listen for activations. `activated()` yields a stream of events carrying
-    // the shortcut id; map id → action and forward.
-    let mut activated = shortcuts
+    let mut activated = proxy
         .receive_activated()
         .await
-        .context("receive_activated")?;
-
-    tracing::info!("GlobalShortcuts portal bound; listening for activations");
-    while let Some(evt) = activated.next().await {
-        let id = evt.shortcut_id();
-        let action = match id {
-            "panic_disable" => Some(HotkeyAction::PanicDisable),
-            "toggle_capture" => Some(HotkeyAction::ToggleCapture),
-            "toggle_editor" => Some(HotkeyAction::ToggleEditor),
-            "capture_for_labeling" => Some(HotkeyAction::CaptureForLabeling),
-            other => {
-                tracing::debug!("unknown shortcut id {other}");
-                None
+        .context("listen for GlobalShortcuts activation")?;
+    set_availability(&app, &state, true);
+    // Availability means all bindings succeeded and the activation stream is
+    // live. This loop owns proxy + session for the rest of app lifetime.
+    let mut last_dispatch = HashMap::new();
+    while let Some(event) = activated.next().await {
+        if let Some(action) = action_for_id(event.shortcut_id()) {
+            if !take_debounced(&mut last_dispatch, action, Instant::now()) {
+                continue;
             }
-        };
-        if let Some(a) = action {
-            if tx.send(a).is_err() {
-                break; // receiver gone; app shutting down
-            }
-        }
-    }
-    Ok(())
-}
-
-// ===========================================================================
-// X11: XGrabKey on the root window
-// ===========================================================================
-
-fn install_x11_grab(tx: Sender<HotkeyAction>) -> Result<()> {
-    std::thread::Builder::new()
-        .name("hotkeys-x11".into())
-        .spawn(move || {
-            if let Err(e) = x11_grab_loop(tx) {
-                tracing::error!("X11 hotkeys loop: {e:#}");
-            }
-        })
-        .context("spawn hotkeys-x11 thread")?;
-    Ok(())
-}
-
-fn x11_grab_loop(tx: Sender<HotkeyAction>) -> Result<()> {
-    use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{ConnectionExt as _, GrabMode, ModMask};
-    use x11rb::protocol::Event;
-
-    let (conn, screen_num) = x11rb::connect(None).context("X11 connect")?;
-    let screen = &conn.setup().roots[screen_num];
-    let root = screen.root;
-
-    // X11 modifier bits (raw, per the core protocol): Shift=1, Lock=2,
-    // Control=4, Mod1/Alt=8, Mod2/NumLock=16. We work in raw u16 throughout to
-    // avoid bitmask-newtype conversion churn across x11rb patch releases.
-    const SHIFT: u16 = 1 << 0;
-    const LOCK: u16 = 1 << 1;
-    const CONTROL: u16 = 1 << 2;
-    const MOD1: u16 = 1 << 3; // Alt
-    const MOD2: u16 = 1 << 4; // NumLock
-
-    // Map our combos to X keysyms (resolved to keycodes below).
-    //   l=0x6c, b=0x62, s=0x73, period=0x2e
-    let combos = [
-        (HotkeyAction::PanicDisable, 0x002e_u32, CONTROL | SHIFT | MOD1),
-        (HotkeyAction::ToggleCapture, 0x006c_u32, CONTROL | SHIFT),
-        (HotkeyAction::ToggleEditor, 0x0062_u32, CONTROL | SHIFT),
-        (HotkeyAction::CaptureForLabeling, 0x0073_u32, CONTROL | SHIFT),
-    ];
-
-    let keycode_for = build_keysym_map(&conn)?;
-
-    // (keycode, base modifiers) → action, for dispatch in the event pump.
-    let mut bound: Vec<(u8, u16, HotkeyAction)> = Vec::new();
-    let mut panic_bound = false;
-    for (action, keysym, base) in combos {
-        let Some(&keycode) = keycode_for.get(&keysym) else {
-            tracing::warn!("no keycode for keysym {keysym:#x}; skipping {action:?}");
-            continue;
-        };
-        // Grab with the four lock-key permutations (NumLock/CapsLock) so the
-        // hotkey fires regardless of lock state.
-        let lock_variants = [0u16, LOCK, MOD2, LOCK | MOD2];
-        let mut ok_any = false;
-        for extra in lock_variants {
-            let m = ModMask::from(base | extra);
-            match conn.grab_key(true, root, m, keycode, GrabMode::ASYNC, GrabMode::ASYNC) {
-                Ok(cookie) => match cookie.check() {
-                    Ok(()) => ok_any = true,
-                    Err(_) => tracing::debug!("grab_key check failed for {action:?}"),
-                },
-                Err(_) => tracing::debug!("grab_key request failed for {action:?}"),
-            }
-        }
-        if ok_any {
-            bound.push((keycode, base, action));
-            if action == HotkeyAction::PanicDisable {
-                panic_bound = true;
-            }
-        }
-    }
-
-    conn.flush().ok();
-
-    if !panic_bound {
-        // PANIC-DISABLE GUARANTEE: if even the panic combo couldn't be grabbed
-        // (another app holds it), surface it loudly. The tray "Quit" and the
-        // control window remain as the manual kill switch.
-        tracing::error!(
-            "could not grab panic-disable hotkey (Ctrl+Shift+Alt+.) — use the tray to disable"
-        );
-    }
-
-    // Pump key events forever.
-    loop {
-        let event = match conn.wait_for_event() {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("X11 event wait failed: {e:#}");
+            if actions.send(action).is_err() {
                 break;
             }
-        };
-        if let Event::KeyPress(kp) = event {
-            // Strip the lock bits (CapsLock/NumLock) from the reported state
-            // before matching so the combo fires regardless of lock state.
-            let lock_bits = LOCK | MOD2;
-            let state = u16::from(kp.state) & !lock_bits;
-            if let Some((_, _, action)) = bound
-                .iter()
-                .find(|(kc, base, _)| *kc == kp.detail && state == *base)
-            {
-                if tx.send(*action).is_err() {
-                    break;
+        }
+    }
+    let _ = session.close().await;
+    Err(anyhow!("GlobalShortcuts activation stream ended"))
+}
+
+fn run_x11_grab(
+    actions: Sender<HotkeyAction>,
+    should_stop: impl Fn() -> bool,
+    on_registered: impl FnOnce(),
+) -> Result<()> {
+    let (conn, screen_number) = x11rb::connect(None).context("connect X11 for global shortcuts")?;
+    let root = conn.setup().roots[screen_number].root;
+    let keys = resolve_x11_keycodes(&conn)?;
+    let base = ModMask::CONTROL | ModMask::SHIFT;
+    let panic = base | ModMask::M1;
+    for (keycode, modifiers) in [
+        (keys.toggle_capture, base),
+        (keys.toggle_editor, base),
+        (keys.capture_label, base),
+        (keys.panic, panic),
+    ] {
+        // Passive grabs must include common lock combinations or shortcuts
+        // silently stop working while CapsLock/NumLock is enabled.
+        for locks in [
+            ModMask::default(),
+            ModMask::LOCK,
+            ModMask::M2,
+            ModMask::LOCK | ModMask::M2,
+        ] {
+            conn.grab_key(
+                false,
+                root,
+                modifiers | locks,
+                keycode,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )?
+            .check()
+            .with_context(|| format!("XGrabKey conflict for keycode {keycode}"))?;
+        }
+    }
+    conn.flush().context("flush X11 hotkey grabs")?;
+
+    // Report availability before entering the blocking event loop.
+    // The caller emits it when this function eventually returns, so send a
+    // dedicated sentinel through tracing for real-time diagnostics.
+    tracing::info!("X11 global shortcuts registered");
+    on_registered();
+    let mut last_dispatch = HashMap::new();
+    while !should_stop() {
+        match conn.wait_for_event().context("wait for X11 hotkey event")? {
+            Event::KeyPress(event) => {
+                let action = if event.detail == keys.toggle_capture {
+                    Some(HotkeyAction::ToggleCapture)
+                } else if event.detail == keys.toggle_editor {
+                    Some(HotkeyAction::ToggleEditor)
+                } else if event.detail == keys.capture_label {
+                    Some(HotkeyAction::CaptureForLabeling)
+                } else if event.detail == keys.panic {
+                    Some(HotkeyAction::PanicDisable)
+                } else {
+                    None
+                };
+                if let Some(action) = action {
+                    if !take_debounced(&mut last_dispatch, action, Instant::now()) {
+                        continue;
+                    }
+                    if actions.send(action).is_err() {
+                        return Ok(());
+                    }
                 }
             }
+            _ => {}
         }
     }
     Ok(())
 }
 
-/// Build a keysym → keycode lookup from the server's keyboard mapping. We only
-/// need a handful of keys, so a linear scan of the first keysym column is fine.
-fn build_keysym_map(
-    conn: &x11rb::rust_connection::RustConnection,
-) -> Result<std::collections::HashMap<u32, u8>> {
-    use x11rb::protocol::xproto::ConnectionExt as _;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct X11Keycodes {
+    toggle_capture: u8,
+    toggle_editor: u8,
+    capture_label: u8,
+    panic: u8,
+}
 
+fn resolve_x11_keycodes<C: Connection>(conn: &C) -> Result<X11Keycodes> {
     let setup = conn.setup();
-    let min = setup.min_keycode;
-    let max = setup.max_keycode;
-    let count = max - min + 1;
-    let mapping = conn
-        .get_keyboard_mapping(min, count)
-        .context("get_keyboard_mapping request")?
+    let first = setup.min_keycode;
+    let count = setup.max_keycode.saturating_sub(first).saturating_add(1);
+    let reply = conn
+        .get_keyboard_mapping(first, count)?
         .reply()
-        .context("GetKeyboardMapping")?;
+        .context("read X11 keyboard mapping")?;
+    let find = |keysym: u32| {
+        find_keycode(first, reply.keysyms_per_keycode, &reply.keysyms, keysym)
+            .ok_or_else(|| anyhow!("X11 keyboard mapping has no keysym 0x{keysym:x}"))
+    };
+    Ok(X11Keycodes {
+        toggle_capture: find('l' as u32)?,
+        toggle_editor: find('b' as u32)?,
+        capture_label: find('s' as u32)?,
+        panic: find('.' as u32)?,
+    })
+}
 
-    let per = mapping.keysyms_per_keycode as usize;
-    let mut map = std::collections::HashMap::new();
-    for (i, chunk) in mapping.keysyms.chunks(per).enumerate() {
-        let keycode = min as usize + i;
-        if keycode > u8::MAX as usize {
-            break;
-        }
-        // Column 0 is the unshifted keysym — that's what our lowercase keysyms
-        // (l/b/s/period) live in.
-        if let Some(&ks) = chunk.first() {
-            map.entry(ks).or_insert(keycode as u8);
-        }
+fn find_keycode(first: u8, per_keycode: u8, keysyms: &[u32], target: u32) -> Option<u8> {
+    if per_keycode == 0 {
+        return None;
     }
-    if map.is_empty() {
-        return Err(anyhow!("empty keyboard mapping"));
+    keysyms
+        .chunks(usize::from(per_keycode))
+        .position(|symbols| symbols.iter().any(|symbol| *symbol == target))
+        .and_then(|index| first.checked_add(index as u8))
+}
+
+fn take_debounced(
+    last_dispatch: &mut HashMap<HotkeyAction, Instant>,
+    action: HotkeyAction,
+    now: Instant,
+) -> bool {
+    if last_dispatch
+        .get(&action)
+        .is_some_and(|last| now.duration_since(*last) < Duration::from_millis(250))
+    {
+        return false;
     }
-    Ok(map)
+    last_dispatch.insert(action, now);
+    true
+}
+
+fn action_for_id(id: &str) -> Option<HotkeyAction> {
+    match id {
+        TOGGLE_CAPTURE_ID => Some(HotkeyAction::ToggleCapture),
+        TOGGLE_EDITOR_ID => Some(HotkeyAction::ToggleEditor),
+        CAPTURE_LABEL_ID => Some(HotkeyAction::CaptureForLabeling),
+        PANIC_ID => Some(HotkeyAction::PanicDisable),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portal_ids_map_only_to_locked_actions() {
+        assert_eq!(
+            action_for_id(TOGGLE_CAPTURE_ID),
+            Some(HotkeyAction::ToggleCapture)
+        );
+        assert_eq!(action_for_id(PANIC_ID), Some(HotkeyAction::PanicDisable));
+        assert_eq!(action_for_id("unknown"), None);
+    }
+
+    #[test]
+    fn hotkey_repeat_is_debounced() {
+        let start = Instant::now();
+        let mut last = HashMap::new();
+        assert!(take_debounced(
+            &mut last,
+            HotkeyAction::ToggleCapture,
+            start
+        ));
+        assert!(!take_debounced(
+            &mut last,
+            HotkeyAction::ToggleCapture,
+            start + Duration::from_millis(249)
+        ));
+        assert!(take_debounced(
+            &mut last,
+            HotkeyAction::PanicDisable,
+            start + Duration::from_millis(1)
+        ));
+        assert!(take_debounced(
+            &mut last,
+            HotkeyAction::ToggleCapture,
+            start + Duration::from_millis(250)
+        ));
+    }
+
+    #[test]
+    fn x11_mapping_resolves_keycodes_across_layout_levels() {
+        let symbols = [0u32, 'l' as u32, 'b' as u32, 0, 's' as u32, '.' as u32];
+        assert_eq!(find_keycode(20, 2, &symbols, 'l' as u32), Some(20));
+        assert_eq!(find_keycode(20, 2, &symbols, 'b' as u32), Some(21));
+        assert_eq!(find_keycode(20, 2, &symbols, '.' as u32), Some(22));
+        assert_eq!(find_keycode(20, 2, &symbols, 'x' as u32), None);
+    }
 }

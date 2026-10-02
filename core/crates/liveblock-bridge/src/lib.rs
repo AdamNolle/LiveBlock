@@ -5,13 +5,18 @@
 //! targets use. Generated headers + Swift glue land in
 //! `core/crates/liveblock-bridge/generated/` after `cargo build`.
 //!
-//! Compatibility note: the underlying `RegionStore` writes JSON with sorted
-//! keys + 2-space pretty indentation, so files written by Swift's
-//! `RegionStore.swift` and by the bridge are byte-identical.
+//! Compatibility note: the underlying `RegionStore` owns the shared schema-1
+//! envelope and atomically migrates legacy arrays. Swift consumes snapshots
+//! through this bridge rather than maintaining a second on-disk encoder.
 
+// swift-bridge 0.1's generated glue performs same-type raw-pointer casts.
+// They are harmless and outside this crate's handwritten code.
+#![allow(clippy::unnecessary_cast)]
+
+use liveblock_config::{SettingsStore, Vocabulary};
 use liveblock_regions::{NormalizedRegion, RegionStore};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 #[swift_bridge::bridge]
@@ -46,12 +51,54 @@ mod ffi {
             height: f64,
         ) -> bool;
 
+        fn replace_all_json(self: &RegionStoreHandle, json: String) -> bool;
+
         fn remove(self: &RegionStoreHandle, id: String) -> bool;
 
         fn clear(self: &RegionStoreHandle) -> bool;
 
         fn to_json(self: &RegionStoreHandle) -> String;
     }
+
+    extern "Rust" {
+        fn macos_capabilities_json() -> String;
+        fn desktop_behavior_contract_json() -> String;
+    }
+
+    extern "Rust" {
+        type VocabularyHandle;
+
+        #[swift_bridge(init)]
+        fn new() -> VocabularyHandle;
+
+        fn vocabulary_open(path: String) -> VocabularyHandle;
+
+        fn set_vocabulary(self: &VocabularyHandle, json: String) -> bool;
+
+        fn get_detector_classes(self: &VocabularyHandle) -> String;
+
+        fn set_class_enabled(self: &VocabularyHandle, class_id: u32, enabled: bool) -> bool;
+
+        fn set_class_threshold(self: &VocabularyHandle, class_id: u32, threshold: f32) -> bool;
+
+        fn to_json(self: &VocabularyHandle) -> String;
+    }
+}
+
+fn macos_capabilities_json() -> String {
+    let profile = liveblock_config::DesktopCapabilityProfile::macos();
+    if profile.validate().is_err() {
+        return String::new();
+    }
+    serde_json::to_string(&profile).unwrap_or_default()
+}
+
+fn desktop_behavior_contract_json() -> String {
+    let contract = liveblock_config::DesktopBehaviorContract::default();
+    if contract.validate().is_err() {
+        return String::new();
+    }
+    serde_json::to_string(&contract).unwrap_or_default()
 }
 
 pub struct RegionStoreHandle {
@@ -94,6 +141,13 @@ impl RegionStoreHandle {
         self.inner.replace_id(uuid, region).is_ok()
     }
 
+    fn replace_all_json(&self, json: String) -> bool {
+        let Ok(regions) = serde_json::from_str::<Vec<NormalizedRegion>>(&json) else {
+            return false;
+        };
+        self.inner.replace(regions).is_ok()
+    }
+
     fn remove(&self, id: String) -> bool {
         let Ok(uuid) = Uuid::parse_str(&id) else {
             return false;
@@ -124,7 +178,12 @@ impl RegionStoreHandle {
                 m
             })
             .collect();
-        let value = serde_json::Value::Array(array.into_iter().map(serde_json::Value::from_iter).collect());
+        let value = serde_json::Value::Array(
+            array
+                .into_iter()
+                .map(serde_json::Value::from_iter)
+                .collect(),
+        );
         let mut buf = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(b"  ");
         let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
@@ -142,9 +201,141 @@ fn region_store_open(path: String) -> RegionStoreHandle {
     }
 }
 
+/// Opaque handle exposing the shared open-vocabulary config to Swift.
+///
+/// Wraps a `Mutex<(Vocabulary, SettingsStore)>`: the vocabulary supplies class
+/// ids/names while the settings store supplies per-class enable flags + score
+/// thresholds. swift-bridge 0.1 can't marshal rich structs, so every read
+/// crosses the FFI boundary as a JSON string serialized with the same 2-space,
+/// sorted-key formatter used on disk (byte-compatible with Swift's
+/// `JSONEncoder([.prettyPrinted, .sortedKeys])`).
+pub struct VocabularyHandle {
+    inner: Mutex<(Vocabulary, SettingsStore)>,
+}
+
+/// One row of `get_detector_classes`. Fields are declared in alphabetical order
+/// so direct serialization yields sorted keys and the `f32` threshold keeps its
+/// shortest decimal form (e.g. `0.6`, not `0.6000000238418579`).
+#[derive(serde::Serialize)]
+struct DetectorClass {
+    enabled: bool,
+    id: u32,
+    name: String,
+    threshold: f32,
+}
+
+impl VocabularyHandle {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new((
+                Vocabulary {
+                    version: 1,
+                    classes: Vec::new(),
+                },
+                SettingsStore::in_memory(),
+            )),
+        }
+    }
+
+    fn set_vocabulary(&self, json: String) -> bool {
+        let Ok(vocab) = Vocabulary::from_json(&json) else {
+            return false;
+        };
+        let mut guard = self.inner.lock().expect("vocabulary mutex poisoned");
+        guard.0 = vocab;
+        true
+    }
+
+    fn get_detector_classes(&self) -> String {
+        let guard = self.inner.lock().expect("vocabulary mutex poisoned");
+        let (vocab, store) = &*guard;
+        let settings = store.current();
+        let rows: Vec<DetectorClass> = vocab
+            .classes
+            .iter()
+            .map(|c| {
+                let enabled = settings
+                    .classes
+                    .iter()
+                    .find(|r| r.class_id == c.id)
+                    .map(|r| r.enabled)
+                    .unwrap_or(true);
+                DetectorClass {
+                    enabled,
+                    id: c.id,
+                    name: c.name.clone(),
+                    threshold: settings.effective_threshold(c.id),
+                }
+            })
+            .collect();
+        // Serialize the struct slice DIRECTLY (not through serde_json::Value) so
+        // each f32 keeps its shortest decimal form, matching Swift byte-for-byte.
+        let mut buf = Vec::new();
+        let fmt = serde_json::ser::PrettyFormatter::with_indent(b"  ");
+        let mut ser = serde_json::Serializer::with_formatter(&mut buf, fmt);
+        if serde::Serialize::serialize(&rows, &mut ser).is_err() {
+            return String::new();
+        }
+        String::from_utf8(buf).unwrap_or_default()
+    }
+
+    fn set_class_enabled(&self, class_id: u32, enabled: bool) -> bool {
+        let guard = self.inner.lock().expect("vocabulary mutex poisoned");
+        let store = &guard.1;
+        if store.set_class_enabled(class_id, enabled).is_err() {
+            return false;
+        }
+        store.persist().is_ok()
+    }
+
+    fn set_class_threshold(&self, class_id: u32, threshold: f32) -> bool {
+        let guard = self.inner.lock().expect("vocabulary mutex poisoned");
+        let store = &guard.1;
+        if store
+            .set_class_threshold(class_id, Some(threshold))
+            .is_err()
+        {
+            return false;
+        }
+        store.persist().is_ok()
+    }
+
+    fn to_json(&self) -> String {
+        let guard = self.inner.lock().expect("vocabulary mutex poisoned");
+        guard.0.to_json()
+    }
+}
+
+fn vocabulary_open(path: String) -> VocabularyHandle {
+    let store =
+        SettingsStore::open(PathBuf::from(path)).unwrap_or_else(|_| SettingsStore::in_memory());
+    VocabularyHandle {
+        inner: Mutex::new((
+            Vocabulary {
+                version: 1,
+                classes: Vec::new(),
+            },
+            store,
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_contracts_bridge_as_valid_json() {
+        let capabilities: serde_json::Value =
+            serde_json::from_str(&macos_capabilities_json()).unwrap();
+        assert_eq!(capabilities["platform"], "macos");
+        assert_eq!(capabilities["localFrameProcessing"], true);
+        assert_eq!(capabilities["releaseReady"], false);
+        let behavior: serde_json::Value =
+            serde_json::from_str(&desktop_behavior_contract_json()).unwrap();
+        assert_eq!(behavior["runtimeClasses"][0], "Logo");
+        assert_eq!(behavior["panicClearsCaptureIntent"], true);
+    }
 
     #[test]
     fn add_then_count() {
@@ -183,12 +374,37 @@ mod tests {
     }
 
     #[test]
+    fn replace_all_json_commits_one_complete_snapshot() {
+        let store = RegionStoreHandle::new();
+        let _ = store.add(0.1, 0.1, 0.2, 0.2);
+        let replacement = r#"[{"id":"11111111-2222-3333-4444-555555555555","x":0.4,"y":0.4,"width":0.3,"height":0.3}]"#;
+        assert!(store.replace_all_json(replacement.to_string()));
+        assert_eq!(store.count(), 1);
+        assert!(store
+            .to_json()
+            .contains("11111111-2222-3333-4444-555555555555"));
+        assert!(!store.replace_all_json("{}".to_string()));
+        assert_eq!(store.count(), 1);
+    }
+
+    #[test]
     fn clear_empties_store() {
         let store = RegionStoreHandle::new();
         let _ = store.add(0.1, 0.1, 0.2, 0.2);
         let _ = store.add(0.3, 0.3, 0.2, 0.2);
         assert!(store.clear());
         assert_eq!(store.count(), 0);
+    }
+
+    #[test]
+    fn vocab_handle_get_classes_json() {
+        let h = VocabularyHandle::new();
+        assert!(h.set_vocabulary(
+            r#"{"version":1,"classes":[{"id":0,"name":"Logo","prompts":["logo"]}]}"#.to_string()
+        ));
+        let classes = h.get_detector_classes();
+        assert!(classes.contains("\"name\": \"Logo\""));
+        assert!(classes.contains("\"enabled\": true"));
     }
 
     #[test]

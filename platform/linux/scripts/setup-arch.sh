@@ -3,7 +3,7 @@ set -euo pipefail
 
 sudo pacman -S --needed --noconfirm \
     base-devel curl pkg-config \
-    webkit2gtk-4.1 gtk3 gtk-layer-shell libsoup3 \
+    webkit2gtk-4.1 gtk3 libsoup3 \
     wayland libxkbcommon wayland-protocols \
     libxcomposite libxfixes libxcb \
     pipewire pipewire-jack \

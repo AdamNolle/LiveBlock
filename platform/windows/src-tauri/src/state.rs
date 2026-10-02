@@ -1,68 +1,69 @@
 //! Shared application state passed to every Tauri command.
 
-use crate::capture::{CaptureSession, FrameView};
+use crate::capture::CaptureSession;
 use crate::detection::Detector;
-use crate::overlay::OverlayWindow;
-use crate::pipeline::PipelineWorker;
-use crate::regions::{NormalizedRegion, SharedRegionStore};
-use crate::training::TrainingJob;
+use crate::inpainting::Inpainter;
+use crate::regions::SharedRegionStore;
 
-use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize};
 use std::sync::Arc;
 use tauri::AppHandle;
 
 pub struct AppState {
     pub regions: SharedRegionStore,
-    /// Live region snapshot the pipeline worker reads each tick (kept in sync
-    /// with `regions` by the region commands).
-    pub region_snapshot: Arc<ArcSwapOption<Vec<NormalizedRegion>>>,
     pub capture: Arc<Mutex<Option<CaptureSession>>>,
-    /// Active pipeline worker (one per running capture).
-    pub pipeline: Arc<Mutex<Option<PipelineWorker>>>,
-    /// Freshest captured frame, shared between capture, worker, and labeling.
-    pub latest_frame: Arc<ArcSwapOption<FrameView>>,
-    /// Native overlay surface (created lazily on first capture for the chosen
-    /// monitor).
-    pub overlay: Arc<Mutex<Option<Arc<OverlayWindow>>>>,
+    pub capture_lifecycle: Arc<Mutex<()>>,
+    pub capture_generation: Arc<AtomicU64>,
+    pub recovery_generation: AtomicU64,
+    pub recovery_cycles: AtomicU8,
+    pub capture_desired: AtomicBool,
+    pub suspension_reasons: AtomicU8,
+    pub selected_monitor: AtomicUsize,
+    pub selected_monitor_name: Mutex<Option<String>>,
+    pub last_panic_action: AtomicU64,
+    pub last_stop_action: AtomicU64,
+    pub shutting_down: AtomicBool,
+    pub click_through_available: AtomicBool,
+    pub capture_exclusion_available: AtomicBool,
+    pub global_hotkeys_available: AtomicBool,
+    pub lifecycle_observer_available: AtomicBool,
     pub detection_enabled: Arc<AtomicBool>,
-    pub cover_only_active: AtomicBool,
-    pub cover_only_preferred: AtomicBool,
     pub detector: Arc<Mutex<Option<Detector>>>,
-    pub training: Arc<Mutex<Option<TrainingJob>>>,
+    pub detector_run: Arc<Mutex<Option<Arc<ort::RunOptions>>>>,
+    pub persistent_mutation: Mutex<()>,
+    pub model_update: Mutex<()>,
+    pub inpainter: Arc<Mutex<Inpainter>>,
     pub app: AppHandle,
 }
 
 impl AppState {
     pub fn new(app: AppHandle, regions: SharedRegionStore) -> Self {
-        // Seed the worker's region snapshot from the persisted store.
-        let snapshot = Arc::new(ArcSwapOption::from(Some(Arc::new(regions.current()))));
         Self {
             regions,
-            region_snapshot: snapshot,
             capture: Arc::new(Mutex::new(None)),
-            pipeline: Arc::new(Mutex::new(None)),
-            latest_frame: Arc::new(ArcSwapOption::from(None)),
-            overlay: Arc::new(Mutex::new(None)),
+            capture_lifecycle: Arc::new(Mutex::new(())),
+            capture_generation: Arc::new(AtomicU64::new(0)),
+            recovery_generation: AtomicU64::new(0),
+            recovery_cycles: AtomicU8::new(0),
+            capture_desired: AtomicBool::new(false),
+            suspension_reasons: AtomicU8::new(0),
+            selected_monitor: AtomicUsize::new(0),
+            selected_monitor_name: Mutex::new(None),
+            last_panic_action: AtomicU64::new(0),
+            last_stop_action: AtomicU64::new(0),
+            shutting_down: AtomicBool::new(false),
+            click_through_available: AtomicBool::new(false),
+            capture_exclusion_available: AtomicBool::new(false),
+            global_hotkeys_available: AtomicBool::new(false),
+            lifecycle_observer_available: AtomicBool::new(false),
             detection_enabled: Arc::new(AtomicBool::new(false)),
-            cover_only_active: AtomicBool::new(false),
-            cover_only_preferred: AtomicBool::new(false),
             detector: Arc::new(Mutex::new(None)),
-            training: Arc::new(Mutex::new(None)),
+            detector_run: Arc::new(Mutex::new(None)),
+            persistent_mutation: Mutex::new(()),
+            model_update: Mutex::new(()),
+            inpainter: Arc::new(Mutex::new(Inpainter::new())),
             app,
-        }
-    }
-
-    /// Refresh the worker-visible region snapshot from the persisted store.
-    /// Called after every region mutation command.
-    pub fn refresh_region_snapshot(&self) {
-        self.region_snapshot
-            .store(Some(Arc::new(self.regions.current())));
-        if self.cover_only_active.load(std::sync::atomic::Ordering::SeqCst) {
-            if let Err(error) = crate::actions::paint_over_regions_only(self) {
-                tracing::error!("refresh manual covers: {error}");
-            }
         }
     }
 }

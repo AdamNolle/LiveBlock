@@ -1,4 +1,4 @@
-// LiveBlocker — vanilla TypeScript ports of the design's React primitives.
+// LiveBlock — vanilla TypeScript ports of the design's React primitives.
 // Each function returns an HTMLElement so window TS can compose UIs without
 // pulling in a framework.
 
@@ -107,7 +107,7 @@ export function wordmark(size = 22): HTMLElement {
   const l = logo({ size: size + 12, radius: Math.round((size + 12) * 0.22) });
   root.appendChild(l);
   const text = document.createElement("span");
-  text.innerHTML = `Live<span class="red">Block</span>`;
+  text.innerHTML = `Live<span class="red">Block</span>er`;
   root.appendChild(text);
   return root;
 }
@@ -152,8 +152,6 @@ export function pill(opts: { label: string; variant?: PillVariant; size?: "sm" |
 export function toggle(opts: { value: boolean; accent?: "block" | "success" | "train" | "detect"; onChange?: (v: boolean) => void }): HTMLButtonElement {
   const b = document.createElement("button");
   b.className = "lb-toggle";
-  b.setAttribute("role", "switch");
-  b.setAttribute("aria-checked", String(opts.value));
   b.dataset.on = String(opts.value);
   if (opts.accent) b.dataset.accent = opts.accent;
   const k = document.createElement("span");
@@ -162,7 +160,6 @@ export function toggle(opts: { value: boolean; accent?: "block" | "success" | "t
   b.addEventListener("click", () => {
     const next = b.dataset.on !== "true";
     b.dataset.on = String(next);
-    b.setAttribute("aria-checked", String(next));
     opts.onChange?.(next);
   });
   return b;

@@ -1,51 +1,48 @@
-//! Wayland capture via xdg-desktop-portal (`org.freedesktop.portal.ScreenCast`)
-//! and the resulting PipeWire stream.
-//!
-//! Flow:
-//!   1. ashpd::desktop::screencast::Screencast::create_session
-//!   2. select_sources(types=Monitor, multiple=false, persist_mode=…)
-//!   3. start  → user gets the system permission dialog (first run)
-//!   4. open_pipe_wire_remote → PipeWire fd
-//!   5. spin up a PipeWire `MainLoop` on a dedicated thread, connect the remote
-//!      via that fd, create a `Stream` on `node_id`, negotiate BGRA/RGBA/YUY2/
-//!      NV12, and in `on_process` copy the buffer (honoring per-plane stride)
-//!      into a `FrameView`.
-//!   6. bridge frames to the async `next_frame()` via a bounded channel.
-//!
-//! PipeWire's `Stream`/`MainLoop` are single-threaded and not `Send`, so they
-//! live entirely on the worker thread. The async side only ever sees finished
-//! `FrameView`s through the channel — no PipeWire types cross the boundary.
-//!
-//! The adapter compiles on Linux and chunk layout/conversion has regression
-//! coverage. Portal negotiation and compositor colorimetry still require a
-//! live Wayland session; a headless compile does not establish those behaviors.
+//! Wayland monitor capture through xdg-desktop-portal and PipeWire.
+//! Portal ownership remains alive for the capture lifetime. PipeWire runs on a
+//! dedicated thread because its local main loop is intentionally !Send.
 
-use super::pixels::{self, Plane, SourceFourcc};
-use super::{CaptureSource, FrameView};
+use super::{CaptureEvent, CaptureSource, FrameView};
 use anyhow::{anyhow, Context, Result};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
-use ashpd::{desktop::PersistMode, WindowIdentifier};
-use crossbeam_channel::{Receiver, Sender};
-use std::sync::Arc;
+use ashpd::desktop::{PersistMode, Session};
+use ashpd::WindowIdentifier;
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use pipewire as pw;
+use pw::spa::pod::Pod;
+use pw::{properties::properties, spa};
+use std::os::fd::OwnedFd;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-/// A decoded frame handed from the PipeWire worker thread to the async side.
-/// Always tightly-packed BGRA8 (stride == width*4); any source stride padding
-/// and any YUY2/NV12 source is normalized away on the worker thread.
-type FrameMsg = FrameView;
+const FORMAT_RENEGOTIATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct PipeWireWorkerGuard {
+    stop_requested: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for PipeWireWorkerGuard {
+    fn drop(&mut self) {
+        self.stop_requested.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 
 pub struct WaylandCapture {
-    /// PipeWire node id we're streaming from (kept for diagnostics).
     pub node_id: u32,
-    /// Receives decoded frames from the PipeWire worker thread.
-    rx: Receiver<FrameMsg>,
-    /// Signals the worker thread to quit (it watches for disconnect).
-    _stop_tx: Sender<()>,
-    /// Worker thread join handle (joined on `stop`).
-    worker: Option<std::thread::JoinHandle<()>>,
-    portal_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    /// Last good frame — returned if the channel momentarily has nothing (so
-    /// the detection loop sees steady frames rather than 0x0 gaps).
-    last: Option<FrameView>,
+    _portal: Screencast<'static>,
+    _session: Session<'static, Screencast<'static>>,
+    frames: Receiver<Result<CaptureEvent, String>>,
+    stop_requested: Arc<AtomicBool>,
+    dropped_frames: Arc<AtomicU64>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl WaylandCapture {
@@ -53,451 +50,796 @@ impl WaylandCapture {
         let proxy = Screencast::new()
             .await
             .context("create xdg-desktop-portal Screencast proxy")?;
-
         let session = proxy.create_session().await.context("create_session")?;
-
         proxy
             .select_sources(
                 &session,
                 CursorMode::Embedded,
                 SourceType::Monitor.into(),
-                false, // multiple
-                None,  // restore_token
-                // Persist the grant for this app so the dialog is one-time.
-                PersistMode::Application,
+                false,
+                None,
+                PersistMode::ExplicitlyRevoked,
             )
             .await
             .context("select_sources")?;
-
         let response = proxy
             .start(&session, &WindowIdentifier::default())
             .await
             .context("start")?
             .response()
             .context("start response")?;
-
-        // Read the node id off the first stream by reference — ashpd's `Stream`
-        // is not `Clone`, and the node id is all we need to connect PipeWire.
-        let node_id = {
-            let streams = response.streams();
-            let stream = streams
-                .iter()
-                .next()
-                .ok_or_else(|| anyhow!("portal returned no PipeWire streams"))?;
-            stream.pipe_wire_node_id()
-        };
-
+        let stream = response
+            .streams()
+            .first()
+            .ok_or_else(|| anyhow!("portal returned no PipeWire streams"))?;
+        let node_id = stream.pipe_wire_node_id();
         let fd = proxy
             .open_pipe_wire_remote(&session)
             .await
             .context("open_pipe_wire_remote")?;
 
-        let (tx, rx) = crossbeam_channel::bounded::<FrameMsg>(2);
-        let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
-        let (portal_shutdown, shutdown) = tokio::sync::oneshot::channel::<()>();
-        // Retain the grant while capture exists, then close the portal session
-        // even when the async capture task is aborted instead of stopped.
-        tokio::spawn(async move {
-            let _ = shutdown.await;
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.close()).await;
-            drop(proxy);
-        });
-
-        let worker = std::thread::Builder::new()
-            .name("pipewire-capture".into())
+        let (frame_tx, frames) = bounded(1);
+        let eviction_receiver = frames.clone();
+        let (setup_tx, setup_rx) = bounded(1);
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let dropped_frames = Arc::new(AtomicU64::new(0));
+        let worker_stop = stop_requested.clone();
+        let worker_dropped = dropped_frames.clone();
+        let worker = thread::Builder::new()
+            .name("liveblock-pipewire".into())
             .spawn(move || {
-                if let Err(e) = run_pipewire_loop(fd, node_id, tx, stop_rx) {
-                    tracing::error!("pipewire capture loop exited: {e:#}");
-                }
+                run_pipewire(
+                    fd,
+                    node_id,
+                    frame_tx,
+                    eviction_receiver,
+                    setup_tx,
+                    worker_stop,
+                    worker_dropped,
+                )
             })
-            .context("spawn pipewire worker")?;
+            .context("spawn PipeWire capture thread")?;
+        let mut worker_guard = PipeWireWorkerGuard {
+            stop_requested: stop_requested.clone(),
+            worker: Some(worker),
+        };
+        let setup =
+            tokio::task::spawn_blocking(move || setup_rx.recv_timeout(Duration::from_secs(10)))
+                .await
+                .context("join PipeWire setup waiter")?
+                .map_err(|_| anyhow!("PipeWire setup timed out"))?;
+        if let Err(error) = setup {
+            let _ = session.close().await;
+            return Err(anyhow!(error));
+        }
+        let worker = worker_guard
+            .worker
+            .take()
+            .ok_or_else(|| anyhow!("PipeWire worker disappeared during setup"))?;
 
         Ok(Self {
             node_id,
-            rx,
-            _stop_tx: stop_tx,
+            _portal: proxy,
+            _session: session,
+            frames,
+            stop_requested,
+            dropped_frames,
             worker: Some(worker),
-            portal_shutdown: Some(portal_shutdown),
-            last: None,
         })
     }
-}
 
-#[async_trait::async_trait]
-impl CaptureSource for WaylandCapture {
-    async fn next_frame(&mut self) -> Result<FrameView> {
-        // The PipeWire worker produces frames on its own clock. Pull the freshest
-        // one: drain the bounded(2) channel keeping only the newest frame; if the
-        // channel is momentarily empty, yield the last good frame so detection
-        // stays warm rather than stalling on a 0x0 gap.
-        let mut latest = None;
-        loop {
-            match self.rx.try_recv() {
-                Ok(f) => latest = Some(f),
-                Err(crossbeam_channel::TryRecvError::Empty) => break,
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    if latest.is_none() {
-                        return Err(anyhow!("pipewire worker disconnected"));
-                    }
-                    break;
-                }
-            }
-        }
-        if let Some(f) = latest {
-            self.last = Some(f.clone());
-            return Ok(f);
-        }
-        if let Some(f) = &self.last {
-            // No new frame this tick — pace to ~capture rate and reuse the last.
-            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-            return Ok(f.clone());
-        }
-
-        // First call(s) before format negotiation completes: block-await one
-        // frame with a timeout (multi-thread runtime required for block_in_place).
-        match tokio::task::block_in_place(|| {
-            self.rx.recv_timeout(std::time::Duration::from_millis(250))
-        }) {
-            Ok(f) => {
-                self.last = Some(f.clone());
-                Ok(f)
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(FrameView {
-                pixels: Arc::from([0u8; 0]),
-                width: 0,
-                height: 0,
-                stride: 0,
-            }),
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                Err(anyhow!("pipewire worker disconnected"))
-            }
-        }
-    }
-
-    fn stop(&mut self) {
-        // Dropping the stop channel sender signals the worker; joining ensures
-        // the PipeWire main loop is fully torn down before we return.
-        let _ = self._stop_tx.try_send(());
-        if let Some(shutdown) = self.portal_shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(h) = self.worker.take() {
-            // The worker watches the stop channel inside its main-loop timer.
-            let _ = h.join();
+    fn stop_worker(&mut self) {
+        self.stop_requested.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
 
 impl Drop for WaylandCapture {
     fn drop(&mut self) {
-        let _ = self._stop_tx.try_send(());
-        if let Some(shutdown) = self.portal_shutdown.take() {
-            let _ = shutdown.send(());
+        self.stop_worker();
+    }
+}
+
+#[async_trait::async_trait]
+impl CaptureSource for WaylandCapture {
+    async fn next_event(&mut self) -> Result<CaptureEvent> {
+        loop {
+            match self.frames.try_recv() {
+                Ok(Ok(frame)) => return Ok(frame),
+                Ok(Err(error)) => return Err(anyhow!(error)),
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    return Err(anyhow!("PipeWire capture thread stopped"));
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    tokio::time::sleep(Duration::from_millis(4)).await;
+                }
+            }
+        }
+    }
+
+    fn dropped_frames(&self) -> u64 {
+        self.dropped_frames.load(Ordering::Relaxed)
+    }
+
+    async fn stop(&mut self) {
+        self.stop_worker();
+        let _ = self._session.close().await;
+    }
+}
+
+struct PipeWireUserData {
+    format: Option<spa::param::video::VideoInfoRaw>,
+}
+
+fn terminal_stream_message(
+    old: &pw::stream::StreamState,
+    new: &pw::stream::StreamState,
+    stop_requested: bool,
+) -> Option<String> {
+    if stop_requested {
+        return None;
+    }
+    match new {
+        pw::stream::StreamState::Error(error) => Some(format!("PipeWire stream error: {error}")),
+        pw::stream::StreamState::Unconnected
+            if !matches!(old, pw::stream::StreamState::Unconnected) =>
+        {
+            Some("PipeWire portal stream was revoked or disconnected".into())
+        }
+        _ => None,
+    }
+}
+
+fn format_renegotiation_timed_out(missing_since: Option<Instant>, now: Instant) -> bool {
+    missing_since.is_some_and(|started| {
+        now.saturating_duration_since(started) >= FORMAT_RENEGOTIATION_TIMEOUT
+    })
+}
+
+fn report_terminal(
+    sender: &Sender<Result<CaptureEvent, String>>,
+    eviction_receiver: &Receiver<Result<CaptureEvent, String>>,
+    dropped_frames: &AtomicU64,
+    reported: &AtomicBool,
+    message: String,
+) {
+    if !reported.swap(true, Ordering::AcqRel) {
+        send_latest(sender, eviction_receiver, dropped_frames, Err(message));
+    }
+}
+
+fn parse_video_info(param: &Pod) -> Result<spa::param::video::VideoInfoRaw> {
+    let (media_type, media_subtype) = spa::param::format_utils::parse_format(param)
+        .map_err(|error| anyhow!("parse PipeWire media format: {error:?}"))?;
+    if media_type != spa::param::format::MediaType::Video
+        || media_subtype != spa::param::format::MediaSubtype::Raw
+    {
+        return Err(anyhow!("PipeWire negotiated a non-raw-video format"));
+    }
+    let mut format = spa::param::video::VideoInfoRaw::default();
+    format
+        .parse(param)
+        .map_err(|error| anyhow!("parse PipeWire raw-video format: {error:?}"))?;
+    let size = format.size();
+    if size.width == 0 || size.height == 0 || size.width > 16_384 || size.height > 16_384 {
+        return Err(anyhow!(
+            "PipeWire negotiated invalid dimensions {}x{}",
+            size.width,
+            size.height
+        ));
+    }
+    RawVideoFormat::from_spa(format.format())?;
+    Ok(format)
+}
+
+fn run_pipewire(
+    fd: OwnedFd,
+    node_id: u32,
+    frame_tx: Sender<Result<CaptureEvent, String>>,
+    eviction_receiver: Receiver<Result<CaptureEvent, String>>,
+    setup_tx: Sender<Result<(), String>>,
+    stop_requested: Arc<AtomicBool>,
+    dropped_frames: Arc<AtomicU64>,
+) {
+    let result = (|| -> Result<()> {
+        pw::init();
+        let mainloop = pw::main_loop::MainLoop::new(None).context("create PipeWire main loop")?;
+        let context = pw::context::Context::new(&mainloop).context("create PipeWire context")?;
+        let core = context
+            .connect_fd(fd, None)
+            .context("connect portal PipeWire fd")?;
+        let stream = pw::stream::Stream::new(
+            &core,
+            "liveblock-screen-capture",
+            properties! {
+                *pw::keys::MEDIA_TYPE => "Video",
+                *pw::keys::MEDIA_CATEGORY => "Capture",
+                *pw::keys::MEDIA_ROLE => "Screen",
+            },
+        )
+        .context("create PipeWire stream")?;
+
+        let process_tx = frame_tx.clone();
+        let process_eviction = eviction_receiver.clone();
+        let process_dropped = dropped_frames.clone();
+        let terminal_reported = Arc::new(AtomicBool::new(false));
+        let process_terminal = terminal_reported.clone();
+        let format_missing_since = Arc::new(Mutex::new(Some(Instant::now())));
+        let state_tx = frame_tx.clone();
+        let state_eviction = eviction_receiver.clone();
+        let state_dropped = dropped_frames.clone();
+        let state_stop = stop_requested.clone();
+        let state_reported = terminal_reported.clone();
+        let format_tx = frame_tx.clone();
+        let format_eviction = eviction_receiver.clone();
+        let format_dropped = dropped_frames.clone();
+        let format_stop = stop_requested.clone();
+        let format_reported = terminal_reported.clone();
+        let format_missing = format_missing_since.clone();
+        let watchdog_tx = frame_tx.clone();
+        let watchdog_eviction = eviction_receiver.clone();
+        let watchdog_dropped = dropped_frames.clone();
+        let watchdog_reported = terminal_reported.clone();
+        let _listener = stream
+            .add_local_listener_with_user_data(PipeWireUserData { format: None })
+            .state_changed(move |_, _, old, state| {
+                if let Some(message) =
+                    terminal_stream_message(&old, &state, state_stop.load(Ordering::Acquire))
+                {
+                    report_terminal(
+                        &state_tx,
+                        &state_eviction,
+                        &state_dropped,
+                        &state_reported,
+                        message,
+                    );
+                }
+            })
+            .param_changed(move |_, user_data, id, param| {
+                if id != spa::param::ParamType::Format.as_raw() {
+                    return;
+                }
+                if user_data.format.is_some() && !format_reported.load(Ordering::Acquire) {
+                    send_latest(
+                        &format_tx,
+                        &format_eviction,
+                        &format_dropped,
+                        Ok(CaptureEvent::Reset),
+                    );
+                }
+                let Some(param) = param else {
+                    user_data.format = None;
+                    *format_missing
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(Instant::now());
+                    return;
+                };
+                match parse_video_info(param) {
+                    Ok(format) => {
+                        user_data.format = Some(format);
+                        *format_missing
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = None;
+                    }
+                    Err(error) => {
+                        user_data.format = None;
+                        if !format_stop.load(Ordering::Acquire) {
+                            report_terminal(
+                                &format_tx,
+                                &format_eviction,
+                                &format_dropped,
+                                &format_reported,
+                                error.to_string(),
+                            );
+                        }
+                    }
+                }
+            })
+            .process(move |stream, user_data| {
+                if process_terminal.load(Ordering::Acquire) {
+                    return;
+                }
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
+                let Some(video_info) = user_data.format.as_ref() else {
+                    return;
+                };
+                let size = video_info.size();
+                if size.width == 0 || size.height == 0 {
+                    return;
+                }
+                let format = match RawVideoFormat::from_spa(video_info.format()) {
+                    Ok(format) => format,
+                    Err(error) => {
+                        report_terminal(
+                            &process_tx,
+                            &process_eviction,
+                            &process_dropped,
+                            &process_terminal,
+                            error.to_string(),
+                        );
+                        return;
+                    }
+                };
+                let mut planes = Vec::new();
+                for data in buffer.datas_mut() {
+                    let (offset, size, stride) = {
+                        let chunk = data.chunk();
+                        (
+                            chunk.offset() as usize,
+                            chunk.size() as usize,
+                            chunk.stride().unsigned_abs() as usize,
+                        )
+                    };
+                    let Some(mapped) = data.data() else {
+                        continue;
+                    };
+                    let end = offset.saturating_add(size).min(mapped.len());
+                    if offset >= end {
+                        continue;
+                    }
+                    planes.push(RawPlane {
+                        bytes: mapped[offset..end].to_vec(),
+                        stride,
+                    });
+                }
+                match convert_to_bgra(format, size.width, size.height, &planes) {
+                    Ok(pixels) => send_latest(
+                        &process_tx,
+                        &process_eviction,
+                        &process_dropped,
+                        Ok(CaptureEvent::Frame(FrameView {
+                            pixels: Arc::from(pixels),
+                            width: size.width,
+                            height: size.height,
+                            stride: size.width * 4,
+                        })),
+                    ),
+                    Err(error) => report_terminal(
+                        &process_tx,
+                        &process_eviction,
+                        &process_dropped,
+                        &process_terminal,
+                        error.to_string(),
+                    ),
+                }
+            })
+            .register()
+            .context("register PipeWire listener")?;
+
+        let object = spa::pod::object!(
+            spa::utils::SpaTypes::ObjectParamFormat,
+            spa::param::ParamType::EnumFormat,
+            spa::pod::property!(
+                spa::param::format::FormatProperties::MediaType,
+                Id,
+                spa::param::format::MediaType::Video
+            ),
+            spa::pod::property!(
+                spa::param::format::FormatProperties::MediaSubtype,
+                Id,
+                spa::param::format::MediaSubtype::Raw
+            ),
+            spa::pod::property!(
+                spa::param::format::FormatProperties::VideoFormat,
+                Choice,
+                Enum,
+                Id,
+                spa::param::video::VideoFormat::BGRx,
+                spa::param::video::VideoFormat::BGRx,
+                spa::param::video::VideoFormat::BGRA,
+                spa::param::video::VideoFormat::NV12,
+                spa::param::video::VideoFormat::YUY2
+            ),
+            spa::pod::property!(
+                spa::param::format::FormatProperties::VideoSize,
+                Choice,
+                Range,
+                Rectangle,
+                spa::utils::Rectangle {
+                    width: 1920,
+                    height: 1080
+                },
+                spa::utils::Rectangle {
+                    width: 1,
+                    height: 1
+                },
+                spa::utils::Rectangle {
+                    width: 16384,
+                    height: 16384
+                }
+            ),
+            spa::pod::property!(
+                spa::param::format::FormatProperties::VideoFramerate,
+                Choice,
+                Range,
+                Fraction,
+                spa::utils::Fraction { num: 30, denom: 1 },
+                spa::utils::Fraction { num: 0, denom: 1 },
+                spa::utils::Fraction { num: 60, denom: 1 }
+            )
+        );
+        let values = spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &spa::pod::Value::Object(object),
+        )
+        .map_err(|error| anyhow!("serialize PipeWire format pod: {error:?}"))?
+        .0
+        .into_inner();
+        let mut params =
+            [Pod::from_bytes(&values).ok_or_else(|| anyhow!("invalid PipeWire format pod"))?];
+        stream
+            .connect(
+                spa::utils::Direction::Input,
+                Some(node_id),
+                pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+                &mut params,
+            )
+            .context("connect PipeWire portal stream")?;
+        let _ = setup_tx.send(Ok(()));
+        while !stop_requested.load(Ordering::Acquire) {
+            mainloop.loop_().iterate(Duration::from_millis(50));
+            let format_timed_out = format_renegotiation_timed_out(
+                *format_missing_since
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                Instant::now(),
+            );
+            if format_timed_out && !stop_requested.load(Ordering::Acquire) {
+                report_terminal(
+                    &watchdog_tx,
+                    &watchdog_eviction,
+                    &watchdog_dropped,
+                    &watchdog_reported,
+                    "PipeWire video format renegotiation timed out".into(),
+                );
+            }
+        }
+        stream.disconnect().context("disconnect PipeWire stream")?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let message = error.to_string();
+        let _ = setup_tx.try_send(Err(message.clone()));
+        send_latest(&frame_tx, &eviction_receiver, &dropped_frames, Err(message));
+    }
+}
+
+fn event_priority(item: &Result<CaptureEvent, String>) -> u8 {
+    match item {
+        Err(_) => 2,
+        Ok(CaptureEvent::Reset) => 1,
+        Ok(CaptureEvent::Frame(_)) => 0,
+    }
+}
+
+fn send_latest(
+    sender: &Sender<Result<CaptureEvent, String>>,
+    eviction_receiver: &Receiver<Result<CaptureEvent, String>>,
+    dropped_frames: &AtomicU64,
+    item: Result<CaptureEvent, String>,
+) {
+    match sender.try_send(item) {
+        Ok(()) | Err(TrySendError::Disconnected(_)) => {}
+        Err(TrySendError::Full(item)) => match eviction_receiver.try_recv() {
+            Ok(evicted) if event_priority(&evicted) > event_priority(&item) => {
+                if matches!(item, Ok(CaptureEvent::Frame(_))) {
+                    dropped_frames.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = sender.try_send(evicted);
+            }
+            Ok(evicted) => {
+                if matches!(evicted, Ok(CaptureEvent::Frame(_))) {
+                    dropped_frames.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = sender.try_send(item);
+            }
+            Err(_) => {
+                let _ = sender.try_send(item);
+            }
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawVideoFormat {
+    Bgra,
+    Bgrx,
+    Nv12,
+    Yuy2,
+}
+
+impl RawVideoFormat {
+    fn from_spa(format: spa::param::video::VideoFormat) -> Result<Self> {
+        if format == spa::param::video::VideoFormat::BGRA {
+            Ok(Self::Bgra)
+        } else if format == spa::param::video::VideoFormat::BGRx {
+            Ok(Self::Bgrx)
+        } else if format == spa::param::video::VideoFormat::NV12 {
+            Ok(Self::Nv12)
+        } else if format == spa::param::video::VideoFormat::YUY2 {
+            Ok(Self::Yuy2)
+        } else {
+            Err(anyhow!("unsupported PipeWire pixel format {format:?}"))
         }
     }
 }
 
-// ===========================================================================
-// PipeWire worker thread
-// ===========================================================================
-
-/// Runs the PipeWire main loop, negotiating a video format and pumping frames
-/// into `tx` until the remote disconnects or `stop_rx` fires. All PipeWire
-/// objects are created and dropped on THIS thread (they are not `Send`).
-fn run_pipewire_loop(
-    fd: std::os::fd::OwnedFd,
-    node_id: u32,
-    tx: Sender<FrameMsg>,
-    stop_rx: Receiver<()>,
-) -> Result<()> {
-    use pipewire as pw;
-    use pw::{properties::properties, spa};
-
-    pw::init();
-
-    let mainloop = pw::main_loop::MainLoop::new(None).context("pw MainLoop")?;
-    let context = pw::context::Context::new(&mainloop).context("pw Context")?;
-
-    // Connect to the portal-provided remote via the inherited fd.
-    let core = context
-        .connect_fd(fd, None)
-        .context("pw connect_fd (portal remote)")?;
-
-    // Poll the stop channel from inside the loop. PipeWire's loop drives a timer
-    // we use to check for shutdown cooperatively.
-    let main_for_timer = mainloop.clone();
-    let timer = mainloop.loop_().add_timer(move |_| {
-        if matches!(
-            stop_rx.try_recv(),
-            Ok(()) | Err(crossbeam_channel::TryRecvError::Disconnected)
-        ) {
-            main_for_timer.quit();
-        }
-    });
-    // Fire every 100ms.
-    timer
-        .update_timer(
-            Some(std::time::Duration::from_millis(100)),
-            Some(std::time::Duration::from_millis(100)),
-        )
-        .into_result()
-        .ok();
-
-    // Per-stream negotiated state shared with the `process` callback.
-    let format: Arc<parking_lot::Mutex<Option<VideoFormat>>> =
-        Arc::new(parking_lot::Mutex::new(None));
-
-    let stream = pw::stream::Stream::new(
-        &core,
-        "liveblock-capture",
-        properties! {
-            *pw::keys::MEDIA_TYPE => "Video",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::MEDIA_ROLE => "Screen",
-        },
-    )
-    .context("pw Stream::new")?;
-
-    let format_for_param = format.clone();
-    let format_for_process = format.clone();
-    let tx_for_process = tx.clone();
-
-    let _listener = stream
-        .add_local_listener_with_user_data(())
-        .state_changed(|_stream, _ud, old, new| {
-            tracing::debug!("pipewire stream state {old:?} -> {new:?}");
-        })
-        .param_changed(move |_stream, _ud, id, param| {
-            // We only care about the negotiated Format param.
-            let Some(param) = param else { return };
-            if id != spa::param::ParamType::Format.as_raw() {
-                return;
-            }
-            match parse_video_format(param) {
-                Ok(vf) => {
-                    tracing::info!(
-                        "pipewire negotiated {}x{} fourcc={:?}",
-                        vf.width,
-                        vf.height,
-                        vf.fourcc
-                    );
-                    *format_for_param.lock() = Some(vf);
-                }
-                Err(e) => tracing::warn!("parse format param failed: {e:#}"),
-            }
-        })
-        .process(move |stream, _ud| {
-            let Some(mut buffer) = stream.dequeue_buffer() else {
-                return;
-            };
-            let vf = match *format_for_process.lock() {
-                Some(vf) => vf,
-                None => return, // format not negotiated yet
-            };
-            let datas = buffer.datas_mut();
-            if datas.is_empty() {
-                return;
-            }
-            if let Some(frame) = decode_buffer(datas, vf) {
-                // Drop the frame if the consumer is behind (bounded channel) —
-                // we want the freshest frame, never a backlog.
-                let _ = tx_for_process.try_send(frame);
-            }
-        })
-        .register()
-        .context("register stream listener")?;
-
-    // Build the EnumFormat param we accept and serialize it into a SPA Pod byte
-    // buffer (the form `Stream::connect` consumes). pipewire-rs builds params as
-    // `spa::pod::Value::Object`, serializes to bytes, then reborrows as `&Pod`.
-    let format_obj = build_format_params();
-    let pod_bytes = {
-        use spa::pod::serialize::PodSerializer;
-        let cursor = std::io::Cursor::new(Vec::new());
-        PodSerializer::serialize(cursor, &spa::pod::Value::Object(format_obj))
-            .map_err(|e| anyhow!("serialize format pod: {e:?}"))?
-            .0
-            .into_inner()
-    };
-    let pod = spa::pod::Pod::from_bytes(&pod_bytes)
-        .ok_or_else(|| anyhow!("invalid serialized format pod"))?;
-
-    stream
-        .connect(
-            spa::utils::Direction::Input,
-            Some(node_id),
-            pw::stream::StreamFlags::AUTOCONNECT
-                | pw::stream::StreamFlags::MAP_BUFFERS
-                | pw::stream::StreamFlags::RT_PROCESS,
-            &mut [pod],
-        )
-        .context("stream.connect")?;
-
-    // Blocks on this thread until `quit()` (stop signal or remote disconnect).
-    mainloop.run();
-    Ok(())
+struct RawPlane {
+    bytes: Vec<u8>,
+    stride: usize,
 }
 
-/// Negotiated video format details we need to decode buffers.
-#[derive(Debug, Clone, Copy)]
-struct VideoFormat {
+fn convert_to_bgra(
+    format: RawVideoFormat,
     width: u32,
     height: u32,
-    fourcc: SourceFourcc,
-}
-
-/// The video formats we advertise to the compositor, most-preferred first.
-/// BGRA/BGRx need no conversion (frontend/detector are BGRA); YUY2 and NV12 are
-/// accepted because some compositors only offer packed/planar YUV.
-fn build_format_params() -> pipewire::spa::pod::Object {
-    use pipewire::spa;
-    use spa::param::video::VideoFormat as SpaVideoFormat;
-    use spa::pod::{Object, Property, PropertyFlags, Value};
-
-    // We build one EnumFormat object listing an enumeration of pixel formats and
-    // a size/framerate range. The compositor picks one and replies via
-    // `param_changed`.
-    let formats = [
-        SpaVideoFormat::BGRx,
-        SpaVideoFormat::BGRA,
-        SpaVideoFormat::RGBx,
-        SpaVideoFormat::RGBA,
-        SpaVideoFormat::YUY2,
-        SpaVideoFormat::NV12,
-    ];
-
-    // VERIFY-ON-LINUX(linux-port): pod builder ergonomics differ slightly across
-    // pipewire-rs patch releases. The intent is an EnumFormat object with:
-    //   mediaType = video, mediaSubtype = raw,
-    //   format    = Enum(formats…),
-    //   size      = Range(default 1920x1080, min 1x1, max 8192x8192),
-    //   framerate = Range(default 60/1, min 0/1, max 240/1).
-    let obj = Object {
-        type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
-        id: spa::param::ParamType::EnumFormat.as_raw(),
-        properties: vec![
-            Property {
-                key: spa::param::format::FormatProperties::MediaType.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Id(spa::utils::Id(
-                    spa::param::format::MediaType::Video.as_raw(),
-                )),
-            },
-            Property {
-                key: spa::param::format::FormatProperties::MediaSubtype.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Id(spa::utils::Id(
-                    spa::param::format::MediaSubtype::Raw.as_raw(),
-                )),
-            },
-            Property {
-                key: spa::param::format::FormatProperties::VideoFormat.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Choice(spa::pod::ChoiceValue::Id(spa::utils::Choice(
-                    spa::utils::ChoiceFlags::empty(),
-                    spa::utils::ChoiceEnum::Enum {
-                        default: spa::utils::Id(formats[0].as_raw()),
-                        alternatives: formats.iter().map(|f| spa::utils::Id(f.as_raw())).collect(),
-                    },
-                ))),
-            },
-            Property {
-                key: spa::param::format::FormatProperties::VideoSize.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Choice(spa::pod::ChoiceValue::Rectangle(spa::utils::Choice(
-                    spa::utils::ChoiceFlags::empty(),
-                    spa::utils::ChoiceEnum::Range {
-                        default: spa::utils::Rectangle {
-                            width: 1920,
-                            height: 1080,
-                        },
-                        min: spa::utils::Rectangle {
-                            width: 1,
-                            height: 1,
-                        },
-                        max: spa::utils::Rectangle {
-                            width: 8192,
-                            height: 8192,
-                        },
-                    },
-                ))),
-            },
-            Property {
-                key: spa::param::format::FormatProperties::VideoFramerate.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Choice(spa::pod::ChoiceValue::Fraction(spa::utils::Choice(
-                    spa::utils::ChoiceFlags::empty(),
-                    spa::utils::ChoiceEnum::Range {
-                        default: spa::utils::Fraction { num: 60, denom: 1 },
-                        min: spa::utils::Fraction { num: 0, denom: 1 },
-                        max: spa::utils::Fraction { num: 240, denom: 1 },
-                    },
-                ))),
-            },
-        ],
-    };
-
-    obj
-}
-
-/// Parse the compositor's chosen Format param back into our `VideoFormat`.
-fn parse_video_format(param: &pipewire::spa::pod::Pod) -> Result<VideoFormat> {
-    use pipewire::spa;
-    use spa::param::video::VideoInfoRaw;
-
-    let mut info = VideoInfoRaw::new();
-    info.parse(param)
-        .map_err(|e| anyhow!("VideoInfoRaw::parse: {e:?}"))?;
-
-    let size = info.size();
-    let fourcc = map_spa_format(info.format())
-        .ok_or_else(|| anyhow!("unsupported negotiated format {:?}", info.format()))?;
-
-    Ok(VideoFormat {
-        width: size.width,
-        height: size.height,
-        fourcc,
-    })
-}
-
-fn map_spa_format(f: pipewire::spa::param::video::VideoFormat) -> Option<SourceFourcc> {
-    use pipewire::spa::param::video::VideoFormat as F;
-    Some(match f {
-        F::BGRx => SourceFourcc::Bgrx,
-        F::BGRA => SourceFourcc::Bgra,
-        F::RGBx => SourceFourcc::Rgbx,
-        F::RGBA => SourceFourcc::Rgba,
-        F::YUY2 => SourceFourcc::Yuy2,
-        F::NV12 => SourceFourcc::Nv12,
-        _ => return None,
-    })
-}
-
-/// Decode each valid SPA chunk, including independently padded NV12 planes.
-fn decode_buffer(datas: &mut [pipewire::spa::buffer::Data], vf: VideoFormat) -> Option<FrameView> {
-    let count = if vf.fourcc == SourceFourcc::Nv12 && datas.len() >= 2 {
-        2
-    } else {
-        1
-    };
-    let mut planes = Vec::with_capacity(count);
-    for data in datas.iter_mut().take(count) {
-        let chunk = data.chunk();
-        let (offset, size, stride, corrupted) = (
-            chunk.offset(),
-            chunk.size(),
-            chunk.stride(),
-            chunk
-                .flags()
-                .contains(pipewire::spa::buffer::ChunkFlags::CORRUPTED),
-        );
-        planes.push(Plane::new(data.data()?, offset, size, stride, corrupted)?);
+    planes: &[RawPlane],
+) -> Result<Vec<u8>> {
+    if width == 0 || height == 0 {
+        return Err(anyhow!("empty PipeWire frame"));
     }
-    let decoded = pixels::decode(vf.fourcc, vf.width, vf.height, &planes)?;
-    Some(FrameView {
-        pixels: Arc::from(decoded.into_boxed_slice()),
-        width: vf.width,
-        height: vf.height,
-        stride: vf.width.checked_mul(4)?,
-    })
+    match format {
+        RawVideoFormat::Bgra | RawVideoFormat::Bgrx => convert_packed_bgr(width, height, planes),
+        RawVideoFormat::Yuy2 => convert_yuy2(width, height, planes),
+        RawVideoFormat::Nv12 => convert_nv12(width, height, planes),
+    }
+}
+
+fn convert_packed_bgr(width: u32, height: u32, planes: &[RawPlane]) -> Result<Vec<u8>> {
+    let plane = planes
+        .first()
+        .ok_or_else(|| anyhow!("PipeWire frame has no data plane"))?;
+    let stride = plane.stride.max(width as usize * 4);
+    copy_rows(
+        &plane.bytes,
+        width,
+        height,
+        stride,
+        width as usize * 4,
+        |src, dst| {
+            dst.copy_from_slice(src);
+            for alpha in dst[3..].iter_mut().step_by(4) {
+                *alpha = 255;
+            }
+        },
+    )
+}
+
+fn convert_yuy2(width: u32, height: u32, planes: &[RawPlane]) -> Result<Vec<u8>> {
+    if width % 2 != 0 {
+        return Err(anyhow!("YUY2 width must be even"));
+    }
+    let plane = planes
+        .first()
+        .ok_or_else(|| anyhow!("PipeWire frame has no YUY2 plane"))?;
+    let stride = plane.stride.max(width as usize * 2);
+    let required = stride
+        .checked_mul(height as usize)
+        .ok_or_else(|| anyhow!("YUY2 dimensions overflow"))?;
+    if plane.bytes.len() < required {
+        return Err(anyhow!("truncated YUY2 frame"));
+    }
+    let mut output = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height as usize {
+        let row = &plane.bytes[y * stride..y * stride + width as usize * 2];
+        for x in (0..width as usize).step_by(2) {
+            let offset = x * 2;
+            write_yuv(
+                &mut output,
+                (y * width as usize + x) * 4,
+                row[offset],
+                row[offset + 1],
+                row[offset + 3],
+            );
+            write_yuv(
+                &mut output,
+                (y * width as usize + x + 1) * 4,
+                row[offset + 2],
+                row[offset + 1],
+                row[offset + 3],
+            );
+        }
+    }
+    Ok(output)
+}
+
+fn convert_nv12(width: u32, height: u32, planes: &[RawPlane]) -> Result<Vec<u8>> {
+    if width % 2 != 0 || height % 2 != 0 {
+        return Err(anyhow!("NV12 dimensions must be even"));
+    }
+    let y_plane = planes
+        .first()
+        .ok_or_else(|| anyhow!("PipeWire frame has no NV12 luma plane"))?;
+    let y_stride = y_plane.stride.max(width as usize);
+    let y_len = y_stride * height as usize;
+    let (uv_bytes, uv_stride) = if let Some(uv) = planes.get(1) {
+        (&uv.bytes[..], uv.stride.max(width as usize))
+    } else {
+        if y_plane.bytes.len() < y_len {
+            return Err(anyhow!("truncated NV12 luma plane"));
+        }
+        (&y_plane.bytes[y_len..], y_stride)
+    };
+    if y_plane.bytes.len() < y_len || uv_bytes.len() < uv_stride * (height as usize / 2) {
+        return Err(anyhow!("truncated NV12 frame"));
+    }
+    let mut output = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let uv = (y / 2) * uv_stride + (x / 2) * 2;
+            write_yuv(
+                &mut output,
+                (y * width as usize + x) * 4,
+                y_plane.bytes[y * y_stride + x],
+                uv_bytes[uv],
+                uv_bytes[uv + 1],
+            );
+        }
+    }
+    Ok(output)
+}
+
+fn copy_rows<F>(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+    row_bytes: usize,
+    mut copy: F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(&[u8], &mut [u8]),
+{
+    let required = stride
+        .checked_mul(height as usize)
+        .ok_or_else(|| anyhow!("frame dimensions overflow"))?;
+    if stride < row_bytes || source.len() < required {
+        return Err(anyhow!("truncated packed PipeWire frame"));
+    }
+    let mut output = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height as usize {
+        copy(
+            &source[y * stride..y * stride + row_bytes],
+            &mut output[y * row_bytes..(y + 1) * row_bytes],
+        );
+    }
+    Ok(output)
+}
+
+fn write_yuv(output: &mut [u8], offset: usize, y: u8, u: u8, v: u8) {
+    let c = i32::from(y).saturating_sub(16);
+    let d = i32::from(u) - 128;
+    let e = i32::from(v) - 128;
+    let clamp = |value: i32| ((value + 128) >> 8).clamp(0, 255) as u8;
+    let r = clamp(298 * c + 409 * e);
+    let g = clamp(298 * c - 100 * d - 208 * e);
+    let b = clamp(298 * c + 516 * d);
+    output[offset..offset + 4].copy_from_slice(&[b, g, r, 255]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_state_policy_reports_revocation_and_errors_but_not_expected_stop() {
+        use pw::stream::StreamState;
+
+        assert_eq!(
+            terminal_stream_message(&StreamState::Unconnected, &StreamState::Unconnected, false),
+            None
+        );
+        assert_eq!(
+            terminal_stream_message(&StreamState::Streaming, &StreamState::Unconnected, false),
+            Some("PipeWire portal stream was revoked or disconnected".into())
+        );
+        assert_eq!(
+            terminal_stream_message(
+                &StreamState::Streaming,
+                &StreamState::Error("permission revoked".into()),
+                false,
+            ),
+            Some("PipeWire stream error: permission revoked".into())
+        );
+        assert_eq!(
+            terminal_stream_message(&StreamState::Streaming, &StreamState::Unconnected, true),
+            None
+        );
+    }
+
+    #[test]
+    fn format_renegotiation_timeout_is_bounded_and_deterministic() {
+        let now = Instant::now();
+        assert!(!format_renegotiation_timed_out(None, now));
+        assert!(!format_renegotiation_timed_out(
+            Some(now - FORMAT_RENEGOTIATION_TIMEOUT + Duration::from_millis(1)),
+            now,
+        ));
+        assert!(format_renegotiation_timed_out(
+            Some(now - FORMAT_RENEGOTIATION_TIMEOUT),
+            now,
+        ));
+    }
+
+    #[test]
+    fn reset_evicts_stale_frame_and_terminal_is_single_assignment() {
+        let (sender, receiver) = bounded(1);
+        let dropped = AtomicU64::new(0);
+        send_latest(
+            &sender,
+            &receiver,
+            &dropped,
+            Ok(CaptureEvent::Frame(FrameView {
+                pixels: Arc::from(vec![0u8; 4]),
+                width: 1,
+                height: 1,
+                stride: 4,
+            })),
+        );
+        send_latest(&sender, &receiver, &dropped, Ok(CaptureEvent::Reset));
+        send_latest(
+            &sender,
+            &receiver,
+            &dropped,
+            Ok(CaptureEvent::Frame(FrameView {
+                pixels: Arc::from(vec![0u8; 4]),
+                width: 1,
+                height: 1,
+                stride: 4,
+            })),
+        );
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        assert!(matches!(receiver.recv().unwrap(), Ok(CaptureEvent::Reset)));
+
+        let reported = AtomicBool::new(false);
+        report_terminal(&sender, &receiver, &dropped, &reported, "first".into());
+        send_latest(&sender, &receiver, &dropped, Ok(CaptureEvent::Reset));
+        report_terminal(&sender, &receiver, &dropped, &reported, "second".into());
+        assert_eq!(receiver.recv().unwrap().unwrap_err(), "first");
+    }
+
+    #[test]
+    fn strips_bgra_row_padding_and_forces_opaque_alpha() {
+        let planes = [RawPlane {
+            bytes: vec![1, 2, 3, 0, 9, 9, 9, 9],
+            stride: 8,
+        }];
+        assert_eq!(
+            convert_to_bgra(RawVideoFormat::Bgra, 1, 1, &planes).unwrap(),
+            [1, 2, 3, 255]
+        );
+    }
+
+    #[test]
+    fn converts_yuy2_black_and_white_pair() {
+        let planes = [RawPlane {
+            bytes: vec![16, 128, 235, 128],
+            stride: 4,
+        }];
+        assert_eq!(
+            convert_to_bgra(RawVideoFormat::Yuy2, 2, 1, &planes).unwrap(),
+            [0, 0, 0, 255, 255, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn converts_two_plane_nv12_neutral_luma() {
+        let planes = [
+            RawPlane {
+                bytes: vec![16, 235, 81, 145],
+                stride: 2,
+            },
+            RawPlane {
+                bytes: vec![128, 128],
+                stride: 2,
+            },
+        ];
+        let output = convert_to_bgra(RawVideoFormat::Nv12, 2, 2, &planes).unwrap();
+        assert_eq!(&output[0..4], &[0, 0, 0, 255]);
+        assert_eq!(&output[4..8], &[255, 255, 255, 255]);
+    }
 }

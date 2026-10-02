@@ -1,1 +1,1 @@
-{"liveblock-events":{"identifier":"liveblock-events","description":"Receive backend region, patch, capture and training updates in local LiveBlock windows.","local":true,"windows":["control","editor","render","labeling","training"],"permissions":["core:event:allow-listen","core:event:allow-unlisten"]}}
+{}

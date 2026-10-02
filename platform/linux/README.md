@@ -2,77 +2,40 @@
 
 Rust + Tauri 2 + ashpd (xdg-desktop-portal) + x11rb + wgpu (Vulkan) port of
 the macOS LiveBlock app. The hot path (capture → detection → inpainting →
-overlay) is native Rust; the adaptive desktop UI is shared with the Windows port.
+overlay) is native Rust; the UI is a Tauri webview that matches the macOS
+Liquid Glass aesthetic.
 
 ## Status
 
-**Wired, pending on-hardware verification.** The full canonical pipeline is
-now implemented and routed through the shared core:
-
-```
-capture → checksum-bound detector → tracked explicit removal classes
-→ protect-overlap filter → inpaint / opaque cover → render + emit
-```
-
-- **Capture:** the mapped PipeWire frame loop (`capture/wayland.rs`) and
-  the X11 XShm path (`capture/x11.rs`) are implemented for real (format
-  negotiation, stride-honoring copy, YUY2/NV12→BGRA conversion; SysV
-  `shmget`/`shmat` + `XShmAttach`/`XShmGetImage`).
-- **Runtime loop:** `runtime.rs` spawns the capture→detect→track→mask→paint
-  task on `start_capture` and emits `capture-state-changed` / `patches-updated`
-  / `regions-updated`.
-- **Protected pixels:** black captured regions receive an opaque cover. This
-  does not recover protected video or prevent a service's capture restrictions.
-- **Cover only:** the control panel can draw opaque manual regions without
-  opening PipeWire, the screenshot portal or XShm capture. It disables automatic
-  detection and screenshots. The same compositor placement limits still apply.
-- **Overlay:** the actual patch renderer is a Tauri window. X11 requires an
-  active alpha compositor and aligns the renderer with the virtual desktop.
-  Blocking stays unavailable when the compositor is missing. If the compositor
-  stops during use, LiveBlock stops blocking and hides both overlays. Restart
-  the compositor and LiveBlock before resuming. All Wayland
-  compositors currently use a floating fallback;
-  native layer-shell helpers are not wired to the patch renderer.
-- **Hotkeys/tray:** ashpd GlobalShortcuts + XGrabKey are installed and the
-  receiver loop is wired; an app-indicator tray is registered.
-
-Linux compilation has been checked on Ubuntu 26.04 ARM64. Five PipeWire
-buffer-decoding regressions cover offsets, wrapped chunks, padding,
-truncated/corrupt data and separate NV12 planes. The actual XShm capture path
-also passes RGB stripe checks on isolated 24-bit and 16-bit Xvfb displays;
-four decoder regressions cover padding, byte order, RGB565, 10-bit channels
-and malformed buffers. An installed release also passes an isolated X11
-Openbox/xcompmgr test for editor transparency, region placement, click-through
-after remapping, live region changes and stop. Blocking stays off without a
-compositor, including after compositor loss during an active cover. The loss,
-retry, restart and panic checks are recorded in
-[`linux-compositor-loss-ui.json`](../../validation/linux-compositor-loss-ui.json);
-The final selected-mode shortcut, panic and compositor-loss checks are in
-[`linux-mode-preference-ui.json`](../../validation/linux-mode-preference-ui.json);
-broader editor checks are in `../../validation/linux-native-ui.json`. These virtual-display
-checks do not validate Wayland portals, physical multi-monitor placement,
-capture self-exclusion or hardware GPU behavior. CPU mirror-blend
-is the active inpaint path; the GPU path still needs hardware validation.
-
-The locally built ARM64 Debian package uses glibc 2.43 from Ubuntu 26.04.
-It is not a portable binary for older distributions; build from source on the
-target distribution for that compatibility baseline.
-
-### Classifier safety (important)
-
-The installed model is the public AdSERP search-ad starter described in
-[MODEL_CARD.md](../../MODEL_CARD.md). Automatic detection starts disabled.
-Only explicit removable class names authorize removal; unknown or mismatched
-metadata fails closed. Known protect labels suppress overlapping removals.
-Sports candidates are evaluated separately before installation. User-drawn
-regions remain available without a trained model.
+**Experimental, not release-ready.** Wayland uses the ScreenCast portal and a
+dedicated PipeWire loop with capacity-one newest-frame delivery and BGRA/BGRx,
+NV12, and YUY2 conversion. Valid PipeWire format/size renegotiation replaces the
+active layout; errors, revocation/disconnect, timed-out format removal, and
+malformed packed frames clear output and fail closed. Format removal permits a
+bounded two-second replacement window for resize. X11 captures the virtual root
+through XComposite and fd-backed MIT-SHM, converting padded 24/32-bit server
+pixels to packed BGRA. It polls root geometry at a bounded cadence and replaces
+the SHM mapping/stride behind a reset event when the virtual desktop resizes.
+Both paths feed local ONNX detection, bounded wgpu/WGSL mirror-blend
+inpainting when Vulkan/GL initialization succeeds, explicit CPU fallback,
+webview patch compositing, telemetry, and labeling screenshots. Capture tasks
+and screenshots are generation-bound so stop, panic, and restart invalidate
+stale publication. Monotonic user-action barriers reject delayed pre-stop or
+pre-panic starts/window opens; quit hides privacy-visible windows and awaits
+capture teardown before exit. GPU output is
+read back for PNG patch transport; this is not DMA-BUF or zero-copy rendering.
+Native CI proves compilation, WGSL parsing, CPU policy tests, and opportunistic
+software-adapter parity where available; real compositor/server, multi-output,
+GPU, overlay, hotkey, and lifecycle certification remain open.
 
 ## Distribution-server matrix
 
-| Compositor | Capture | Overlay (fidelity) | Notes |
+| Compositor | Capture | Overlay | Notes |
 |---|---|---|---|
-| Wayland | Portal + PipeWire | Tauri floating fallback (`FloatingDegraded`) | Selected-monitor alignment and compositor behavior require runtime validation |
-| X11 | XShm, falling back to GetImage | Tauri click-through renderer aligned to root desktop | Placement and self-exclusion require runtime validation |
+| Sway / Hyprland / river / wlroots | Portal + PipeWire (experimental) | GTK layer-shell click-through (experimental) | Target full support; not certified |
+| KDE Plasma (Wayland) | Portal + PipeWire (experimental) | GTK layer-shell click-through (experimental) | Target full support; not certified |
+| GNOME / Mutter (Wayland) | Portal + PipeWire (experimental) | **limited decorated preview window** | No global click-through overlay |
+| X11 (any) | XComposite + XShm (experimental) | override-redirect + XFixes click-through (experimental) | Target full support; not certified |
 
 Picked at runtime from `XDG_SESSION_TYPE` and `XDG_CURRENT_DESKTOP`.
 
@@ -85,7 +48,7 @@ sudo apt install build-essential libwebkit2gtk-4.1-dev libgtk-3-dev \
     libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libwayland-dev \
     libxkbcommon-dev pkg-config wayland-protocols libxcb-shm0-dev \
     libxcb-composite0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-    libpipewire-0.3-dev libvulkan-dev libayatana-appindicator3-dev librsvg2-dev
+    libpipewire-0.3-dev libonnxruntime-dev libvulkan-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo install tauri-cli --version "^2.0"
 ```
@@ -115,27 +78,32 @@ the Windows port. Tauri picks it up via `frontendDist` in
 cd platform/_shared-frontend && npm install
 
 # Build + run the Linux app
-cd ../linux
+cd ../linux/src-tauri
 cargo tauri dev
 ```
 
 Release bundle:
 
 ```bash
-cargo tauri build         # bundles are under platform/linux/target/release/bundle/
+cargo tauri build         # produces .deb, .rpm, .AppImage in src-tauri/target/release/bundle/
 ```
 
 ## Hotkeys
 
-| Combo                  | Action                                      |
-|------------------------|---------------------------------------------|
-| Ctrl + Shift + L       | Toggle capture                              |
-| Ctrl + Shift + B       | Toggle region editor                        |
-| Ctrl + Shift + S       | Capture screenshot for labeling             |
-| Ctrl + Shift + Alt + . | Panic disable (close editor, show panel)   |
+Global hotkeys are implemented through the permissioned Wayland
+GlobalShortcuts portal and passive X11 `XGrabKey` registrations:
 
-System-wide hotkeys on Wayland require granting access via the GlobalShortcuts
-portal (one-time prompt). On X11 they use XGrabKey on the root.
+| Combo | Action |
+|---|---|
+| Ctrl+Shift+L | Toggle capture |
+| Ctrl+Shift+B | Toggle region editor |
+| Ctrl+Shift+S | Save a labeling frame |
+| Ctrl+Shift+Alt+. | Panic disable |
+
+Availability is runtime state, not assumed: the capability response and control
+panel report unavailable until every binding succeeds. Portal denial, shortcut
+conflicts, or an unsupported environment fail closed. Always retain control-panel
+access as the fallback until the target compositor is certified.
 
 ## Data layout
 
@@ -167,26 +135,35 @@ Schema is byte-compatible with macOS + Windows so labels round-trip.
 cargo tauri build --features cuda
 ```
 
-Before packaging, install the matching CPU runtime from the repository root:
+Production packages must bundle `resources/onnxruntime/libonnxruntime.so` as a
+real non-symlink 64-bit target-architecture ELF shared object beside a nonempty
+`THIRD-PARTY-NOTICES.txt`; runtime initialization is pinned to that package
+resource before any detector session opens and checks the ONNX Runtime API.
+Optional
+provider packages additionally require `libonnxruntime_providers_shared.so` and
+the one selected provider library. Every transitive vendor library and notice
+must be included in the final artifact inventory/SBOM. The EP registration is
+preferred with ONNX Runtime's explicit CPU fallback; capability output reports
+configuration, not proof that a GPU EP actually executed. LiveBlock does not
+download runtimes, code, or replacement weights.
 
-```bash
-python3 tools/setup_onnx_runtime.py --platform linux --arch x64
-```
-
-Use `--arch aarch64` for ARM64. The installer verifies the official archive,
-preserves license notices and bundles ONNX Runtime 1.24.4. The app does not
-download missing runtime libraries; automatic detection becomes unavailable.
-Compatible GPU libraries may be supplied explicitly through `ORT_DYLIB_PATH`.
+Release builds reject an unpackaged runtime. The
+`LIVEBLOCK_ALLOW_UNPACKAGED_ORT=1` escape hatch is compile-only for source/CI,
+is accepted only alongside the actually empty development keyring override,
+and must never be used to create a distributed package. It cannot accompany
+production trust roots.
 
 ## Known limitations
 
-- **Wayland uses a floating fallback.** Exact fullscreen placement is not
-  guaranteed. Capture refuses to start if click-through setup reports failure.
+- **GNOME mode is not click-through.** Mutter does not implement
+  `wlr-layer-shell`, so rendering is confined to a bounded decorated preview
+  window. Move or close it when necessary.
 - **DRM-protected windows on Wayland** may return black frames depending on
   the compositor's portal implementation.
 - **Anti-cheat tooling** in some games will treat any overlay as suspicious.
-- **The bundled model covers search-ad layouts.** It is not proof of reliable
-  moving-sponsor detection. See the model card for measured deployment results.
+- Production packages require the exact authenticated promoted ONNX model and
+  a nonempty embedded public-key ring. The current source/CI empty-ring build is
+  intentionally not distributable.
 - **Flatpak distribution requires portal-only operation.** The X11 path
   won't work inside a Flatpak sandbox; document this in the Flathub listing.
 
@@ -203,11 +180,13 @@ flatpak run com.adamnolle.LiveBlock
 
 ## Top 3 things to verify on real Linux
 
-1. **PipeWire negotiation and colorimetry** — mapped RGB and YUY2/NV12 paths
-   exist; negotiated YUV range/matrix and unmappable DMA-BUF behavior need a
-   live compositor check.
-2. **Overlay alignment and capture self-exclusion** — confirm click-through,
-   selected-monitor alignment and absence of feedback from the app's renderer.
+1. **PipeWire SPA pod negotiation** — BGRA/BGRx, YUY2, and NV12 conversion is
+   implemented and unit-tested, but DMA-BUF-only portals, plane metadata, color
+   range, resize, revocation, and compositor-specific negotiation need devices.
+2. **wgpu dispatch and layer-shell click-through** — validate mirror-blend
+   output/250 ms fallback on Vulkan and GL drivers, then confirm the empty input
+   region remains effective after every `wl_surface::commit` and resize. KWin
+   in particular re-asserts the input region on commit.
 3. **ort EP shared-library discovery in Flatpak** — `libonnxruntime_providers_*.so`
    must be reachable inside the sandbox. The default `cpu` feature avoids
    this; CUDA/ROCm/OpenVINO need explicit `--filesystem` permissions.

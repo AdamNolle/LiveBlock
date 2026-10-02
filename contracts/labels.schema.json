@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveblock.local/contracts/labels.schema.json",
+  "title": "LiveBlock Label Sidecar",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "image", "imageWidth", "imageHeight", "boxes", "labeledAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "image": { "type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$" },
+    "imageWidth": { "type": "integer", "minimum": 1 },
+    "imageHeight": { "type": "integer", "minimum": 1 },
+    "labeledAt": { "type": "string", "format": "date-time" },
+    "boxes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "x", "y", "width", "height"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "x": { "type": "number", "minimum": 0, "maximum": 1 },
+          "y": { "type": "number", "minimum": 0, "maximum": 1 },
+          "width": { "type": "number", "minimum": 0, "maximum": 1 },
+          "height": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  }
+}

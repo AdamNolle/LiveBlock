@@ -4,6 +4,13 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import QuartzCore
 
+enum InpaintFillStyle: Int, Sendable {
+    case smart = 0
+    case blur = 1
+    case averageColor = 2
+    case solidBlack = 3
+}
+
 struct InpaintPatch: Sendable, Equatable {
     /// Rect in [0..1] coords with origin top-left — ready to position in a SwiftUI overlay.
     let normalizedRect: CGRect
@@ -46,56 +53,10 @@ final class InpaintingEngine: @unchecked Sendable {
         self.colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
     }
 
-    /// A solid fill colour for a paint-over cover patch (premultiplied RGBA,
-    /// 0...1). Mirrors the Rust core's `Fill::Solid`/`Fill::opaque_black()`.
-    struct CoverFill: Sendable {
-        let r: CGFloat
-        let g: CGFloat
-        let b: CGFloat
-        let a: CGFloat
-        /// Fully opaque black — the safe default cover for protected content.
-        static let opaqueBlack = CoverFill(r: 0, g: 0, b: 0, a: 1)
-    }
-
-    /// Capture-free paint-over: produce a flat, OPAQUE cover patch for each region
-    /// WITHOUT reading the pixels underneath. This mirrors the Rust core's
-    /// capture-free `paint_over_regions(..., Fill::opaque_black())`: when the
-    /// content is protected (HDCP/DRM) the system blanks those pixels to black,
-    /// so there is nothing meaningful to sample and the mirror-blend inpainter
-    /// would only smear black. Instead we draw a solid cover the user can't see
-    /// through. This is ordinary overlay drawing, not DRM circumvention — we
-    /// never attempt to recover or reveal the protected pixels.
-    ///
-    /// `regions` carry pixel-space rects (bottom-left origin, CV space), the
-    /// same convention `inpaintPatches` uses, so the normalized output rects
-    /// line up 1:1 with the render overlay.
-    func paintOverPatches(regions: [AdBoundingBox],
-                          bufferSize: CGSize,
-                          fill: CoverFill = .opaqueBlack) -> [InpaintPatch] {
-        guard !regions.isEmpty, bufferSize.width > 0, bufferSize.height > 0 else { return [] }
-        let extent = CGRect(x: 0, y: 0, width: bufferSize.width, height: bufferSize.height)
-        let color = CGColor(colorSpace: colorSpace,
-                            components: [fill.r, fill.g, fill.b, fill.a])
-            ?? CGColor(gray: 0, alpha: 1)
-
-        var patches: [InpaintPatch] = []
-        patches.reserveCapacity(regions.count)
-        for region in regions {
-            let clamped = region.rect.intersection(extent)
-            guard !clamped.isNull, clamped.width >= 2, clamped.height >= 2 else { continue }
-            guard let image = renderSolidPatch(color: color, size: clamped.size) else { continue }
-            // CV (bottom-left, pixel) → normalized top-left for the overlay.
-            let norm = CGRect(x: clamped.minX / bufferSize.width,
-                              y: (bufferSize.height - clamped.maxY) / bufferSize.height,
-                              width: clamped.width / bufferSize.width,
-                              height: clamped.height / bufferSize.height)
-            patches.append(InpaintPatch(normalizedRect: norm, image: image))
-        }
-        return patches
-    }
-
     /// Produce one patch per region. Empty input -> empty output.
-    func inpaintPatches(frame: CVPixelBuffer, regions: [AdBoundingBox]) -> [InpaintPatch] {
+    func inpaintPatches(frame: CVPixelBuffer,
+                        regions: [AdBoundingBox],
+                        style: InpaintFillStyle = .smart) -> [InpaintPatch] {
         guard !regions.isEmpty else { return [] }
 
         let ciImage = CIImage(cvPixelBuffer: frame)
@@ -114,7 +75,7 @@ final class InpaintingEngine: @unchecked Sendable {
             // Re-render every frame: cache by rect-only would return stale fills
             // when content scrolls / video plays behind a static region. The
             // ScreenCaptureManager throttle (≤30 Hz) bounds how often this runs.
-            guard let image = renderFill(image: ciImage, rect: clamped, frameExtent: extent) else {
+            guard let image = renderFill(image: ciImage, rect: clamped, frameExtent: extent, style: style) else {
                 continue
             }
 
@@ -130,7 +91,27 @@ final class InpaintingEngine: @unchecked Sendable {
 
     // MARK: - Fill rendering
 
-    private func renderFill(image: CIImage, rect: CGRect, frameExtent: CGRect) -> CGImage? {
+    private func renderFill(image: CIImage,
+                            rect: CGRect,
+                            frameExtent: CGRect,
+                            style: InpaintFillStyle) -> CGImage? {
+        switch style {
+        case .solidBlack:
+            return renderSolidPatch(color: CGColor(gray: 0, alpha: 1), size: rect.size)
+        case .averageColor:
+            let color = averageBorderColor(in: image, around: rect, frameExtent: frameExtent)
+            return renderSolidPatch(color: color, size: rect.size)
+        case .blur:
+            let blurred = image
+                .cropped(to: rect)
+                .clampedToExtent()
+                .applyingGaussianBlur(sigma: max(8, min(rect.width, rect.height) * 0.08))
+                .cropped(to: rect)
+            return context.createCGImage(blurred, from: rect)
+        case .smart:
+            break
+        }
+
         let aspect = rect.width / max(rect.height, 1)
         let preferVertical = aspect >= 1.0  // wider than tall → blend top↔bottom
 
@@ -200,8 +181,6 @@ final class InpaintingEngine: @unchecked Sendable {
             return nil
         }
 
-        // Partial edge bands can leave transparent holes. Extend the reflected
-        // edge pixels to cover the entire requested region before blending.
         return context.createCGImage(composed, from: rect)
     }
 
@@ -229,15 +208,11 @@ final class InpaintingEngine: @unchecked Sendable {
             return cropped
                 .transformed(by: CGAffineTransform(scaleX: 1, y: -1))
                 .transformed(by: CGAffineTransform(translationX: 0, y: 2 * axisY))
-                .clampedToExtent()
-                .cropped(to: target)
         case .horizontal:
             let axisX: CGFloat = side == .near ? target.maxX : target.minX
             return cropped
                 .transformed(by: CGAffineTransform(scaleX: -1, y: 1))
                 .transformed(by: CGAffineTransform(translationX: 2 * axisX, y: 0))
-                .clampedToExtent()
-                .cropped(to: target)
         }
     }
 

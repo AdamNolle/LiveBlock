@@ -1,12 +1,51 @@
 import Foundation
 import AppKit
 import Combine
-import CoreML
-import UniformTypeIdentifiers
 
-/// Drives the export → train → install pipeline as an in-app job.
+/// Invalidates stale asynchronous source-training completions. Cancellation
+/// advances ownership before terminating subprocesses; shutdown is terminal.
+struct TrainingOperationPolicy {
+    private(set) var sequence: UInt64 = 0
+    private(set) var activeOperation: UInt64?
+    private(set) var shutdownRequested = false
+
+    private mutating func next() -> UInt64 {
+        sequence &+= 1
+        if sequence == 0 { sequence = 1 }
+        return sequence
+    }
+
+    mutating func begin() -> UInt64? {
+        guard !shutdownRequested, activeOperation == nil else { return nil }
+        let operation = next()
+        activeOperation = operation
+        return operation
+    }
+
+    mutating func finish(_ operation: UInt64) {
+        if activeOperation == operation { activeOperation = nil }
+    }
+
+    mutating func cancel() {
+        _ = next()
+        activeOperation = nil
+    }
+
+    mutating func shutdown() {
+        cancel()
+        shutdownRequested = true
+    }
+
+    func owns(_ operation: UInt64) -> Bool {
+        !shutdownRequested && operation != 0 && activeOperation == operation
+    }
+}
+
+/// Drives the developer-only export → train → candidate pipeline.
 ///
-/// Runs the foreground training entry point, streams stdout
+/// Signed release builds are inference-only and never bootstrap Python or pip.
+/// Debug/source builds spawn `tools/export_labels.py` and the candidate runner,
+/// stream stdout
 /// in real time, parses ultralytics' epoch lines into structured progress
 /// updates, and exposes everything as `@Published` state for the dashboard.
 @MainActor
@@ -35,7 +74,13 @@ final class TrainingController: ObservableObject {
     @Published private(set) var lastSuccessAt: Date? = nil
     @Published private(set) var lastError: String? = nil
     @Published private(set) var datasetPath: URL? = nil
-    @Published var selectedDataset: URL? = nil
+    /// Most recent exported candidate. Candidates are never auto-installed;
+    /// schema-5 verification must produce a passing report first.
+    @Published private(set) var candidateModelPath: URL? = nil
+    /// Release binaries are inference-only. Training remains an explicit
+    /// source/developer workflow until a separately signed companion exists.
+    let trainingRuntimeAvailable: Bool
+
     /// Mirror of `tools/.venv` presence — drives the dashboard's
     /// "Install training environment" precondition card.
     @Published private(set) var venvInstalled: Bool = false
@@ -48,16 +93,36 @@ final class TrainingController: ObservableObject {
     var onModelInstalled: (() -> Void)?
 
     private let logTailLimit = 200
-    private var jobGeneration = UUID()
     private var process: Process?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
+    private enum BackgroundOperationKind {
+        case environmentSetup
+        case sourceTraining
+        case verifiedInstall
+    }
 
-    init() {
+    private var operationTask: Task<Void, Never>?
+    private var activeOperationKind: BackgroundOperationKind?
+    private var operationPolicy = TrainingOperationPolicy()
+
+    init(bundle: Bundle = .main) {
+        if let value = bundle.object(forInfoDictionaryKey: "LiveBlockTrainingRuntimeEnabled") as? String {
+            trainingRuntimeAvailable = ["YES", "true", "1"].contains(value)
+        } else if let value = bundle.object(forInfoDictionaryKey: "LiveBlockTrainingRuntimeEnabled") as? NSNumber {
+            trainingRuntimeAvailable = value.boolValue
+        } else {
+#if DEBUG
+            trainingRuntimeAvailable = true
+#else
+            trainingRuntimeAvailable = false
+#endif
+        }
         recheckVenv()
     }
 
     var isBusy: Bool {
+        if isInstallingEnvironment { return true }
         switch state {
         case .idle, .finished: return false
         default: return true
@@ -65,17 +130,8 @@ final class TrainingController: ObservableObject {
     }
 
     func recheckVenv() {
-        venvInstalled = FileManager.default.fileExists(atPath: venvPython.path)
-    }
-
-    func chooseDataset() {
-        guard !isBusy else { return }
-        let panel = NSOpenPanel()
-        panel.title = "Choose a YOLO dataset configuration"
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = ["yaml", "yml"].compactMap { UTType(filenameExtension: $0) }
-        if panel.runModal() == .OK { selectedDataset = panel.url }
+        venvInstalled = trainingRuntimeAvailable
+            && FileManager.default.fileExists(atPath: venvPython.path)
     }
 
     var progressFraction: Double {
@@ -88,36 +144,59 @@ final class TrainingController: ObservableObject {
     // MARK: - Public actions
 
     func startTraining(epochs: Int = 50, imgsz: Int = 640, batch: Int = 8) {
-        guard !isBusy else { return }
-        guard (1...1000).contains(epochs), (1...128).contains(batch),
-              (320...2048).contains(imgsz), imgsz % 32 == 0 else {
-            failWith("Use 1–1000 epochs, batch 1–128, and an image size from 320–2048 divisible by 32.")
+        guard !operationPolicy.shutdownRequested else { return }
+        guard trainingRuntimeAvailable else {
+            failWith("Training is unavailable in signed release builds; use the source companion workflow.")
             return
         }
-        jobGeneration = UUID()
-        let generation = jobGeneration
-        state = .exporting
-        lastError = nil
-        Task { await runFullPipeline(epochs: epochs, imgsz: imgsz, batch: batch, generation: generation) }
+        guard !isBusy, process?.isRunning != true,
+              let operation = operationPolicy.begin() else { return }
+        activeOperationKind = .sourceTraining
+        operationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runFullPipeline(epochs: epochs, imgsz: imgsz, batch: batch,
+                                       operation: operation)
+            self.finishOperation(operation)
+        }
     }
 
     func cancel() {
-        guard isBusy else { return }
-        jobGeneration = UUID()
-        if let active = process, active.isRunning {
-            // Kill only descendants of this foreground job.
-            runOneShot(launchPath: "/usr/bin/pkill",
-                       args: ["-TERM", "-P", "\(active.processIdentifier)"],
-                       onLine: { _ in })
-            active.terminate()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                if active.isRunning { kill(active.processIdentifier, SIGKILL) }
-            }
+        guard isBusy || operationPolicy.activeOperation != nil || process?.isRunning == true else { return }
+        guard activeOperationKind != .verifiedInstall else {
+            lastError = "Verified installation cannot be cancelled safely; quit waits for its atomic transaction."
+            return
         }
-        state = .finished(success: false, message: "Cancelled by user.")
+        cancelActiveOperation(message: "Cancelled by user.", immediateKill: false)
+    }
+
+    /// Installs the terminal ownership barrier synchronously and returns the
+    /// invalidated task for quit to await. Source setup/training is killed;
+    /// an authenticated install is allowed to finish its atomic transaction.
+    func prepareForShutdown() -> Task<Void, Never>? {
+        guard !operationPolicy.shutdownRequested else { return operationTask }
+        let hadWork = isBusy || operationPolicy.activeOperation != nil || process?.isRunning == true
+        let task = operationTask
+        let operationKind = activeOperationKind
+        operationPolicy.shutdown()
+        activeOperationKind = nil
+        operationTask = nil
+        isInstallingEnvironment = false
+        if hadWork {
+            if operationKind != .verifiedInstall {
+                task?.cancel()
+                terminateActiveProcess(immediateKill: true)
+                stopDetachedRunner()
+            }
+            let message = operationKind == .verifiedInstall
+                ? "LiveBlock will quit after verified installation finishes."
+                : "Cancelled because LiveBlock is quitting."
+            state = .finished(success: false, message: message)
+        }
+        return task
     }
 
     func clearTerminalState() {
+        guard !operationPolicy.shutdownRequested else { return }
         if case .finished = state {
             state = .idle
             lastError = nil
@@ -127,7 +206,14 @@ final class TrainingController: ObservableObject {
     /// Run `tools/setup_env.sh`. Streams output through the same logTail
     /// publisher the dashboard already shows.
     func installEnvironment() {
-        guard !isInstallingEnvironment, !isBusy else { return }
+        guard !operationPolicy.shutdownRequested else { return }
+        guard trainingRuntimeAvailable else {
+            failWith("Release builds never download or install a Python training environment.")
+            return
+        }
+        guard !isInstallingEnvironment, !isBusy, process?.isRunning != true,
+              let operation = operationPolicy.begin() else { return }
+        activeOperationKind = .environmentSetup
         isInstallingEnvironment = true
         appendLog("=== Installing training environment \(Date()) ===")
         let setup = repoRoot.appendingPathComponent("tools/setup_env.sh")
@@ -135,13 +221,19 @@ final class TrainingController: ObservableObject {
             appendLog("FAILED: tools/setup_env.sh missing — repo path is wrong.")
             lastError = "tools/setup_env.sh missing at \(setup.path)."
             isInstallingEnvironment = false
+            operationPolicy.finish(operation)
+            activeOperationKind = nil
             return
         }
-        Task {
-            let result = await runProcessCapturingOutput(
+        operationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.finishOperation(operation) }
+            let result = await self.runProcessCapturingOutput(
                 url: URL(fileURLWithPath: "/bin/bash"),
-                args: [setup.path]
+                args: [setup.path],
+                operation: operation
             )
+            guard self.operationIsCurrent(operation) else { return }
             self.isInstallingEnvironment = false
             self.recheckVenv()
             if result.exitCode == 0 {
@@ -212,83 +304,148 @@ final class TrainingController: ObservableObject {
         repoRoot.appendingPathComponent("tools/.venv/bin/python")
     }
 
-    private func runFullPipeline(epochs: Int, imgsz: Int, batch: Int, generation: UUID) async {
-        guard generation == jobGeneration else { return }
-        appendLog("=== Training pipeline started \(Date()) ===")
+    private func runFullPipeline(epochs: Int, imgsz: Int, batch: Int,
+                                 operation: UInt64) async {
+        guard operationIsCurrent(operation) else { return }
+        let pipelineStartedAt = Date()
+        appendLog("=== Training pipeline started \(pipelineStartedAt) ===")
+
         guard FileManager.default.fileExists(atPath: venvPython.path) else {
-            failWith("tools/.venv missing — run tools/setup_env.sh first.")
+            failWith("tools/.venv missing — run `tools/setup_env.sh` first.")
             return
         }
-        state = .training(progress: TrainingProgress(epoch: 0, totalEpochs: epochs, box_loss: 0, cls_loss: 0))
-        var arguments: [String]
-        if let selectedDataset {
-            arguments = [repoRoot.appendingPathComponent("tools/train_logos.py").path,
-                         "--data", selectedDataset.path, "--install"]
-            datasetPath = selectedDataset
-        } else {
-            arguments = [repoRoot.appendingPathComponent("tools/train_from_labels.py").path,
-                         "--root", TrainingPaths.root.path]
+
+        // Step 1: Export labels to YOLO format.
+        state = .exporting
+        let exportScript = repoRoot.appendingPathComponent("tools/export_labels.py")
+        let exportRoot = TrainingPaths.exports
+
+        let exportResult = await runProcessCapturingOutput(
+            url: venvPython,
+            args: [exportScript.path, "--include-empty", "--class-name", "Ad banner"],
+            operation: operation
+        )
+        guard operationIsCurrent(operation) else { return }
+        guard exportResult.exitCode == 0 else {
+            failWith("Export failed (exit \(exportResult.exitCode)). See log.")
+            return
         }
-        arguments += ["--epochs", String(epochs), "--imgsz", String(imgsz), "--batch", String(batch)]
-        let trainResult = await runProcessCapturingOutput(url: venvPython, args: arguments)
-        guard generation == jobGeneration else { return }
-        if selectedDataset == nil { datasetPath = newestExportYaml(in: TrainingPaths.exports) }
+
+        // Find the freshly exported data.yaml
+        guard let dataYaml = newestExportYaml(in: exportRoot) else {
+            failWith("Export script reported success but no data.yaml found.")
+            return
+        }
+        datasetPath = dataYaml
+
+        // Step 2: Run auto.sh in foreground (so we can stream output ourselves).
+        // auto.sh's normal mode backgrounds itself; instead we directly run the
+        // unattended runner, which is the inner workhorse.
+        let runner = repoRoot.appendingPathComponent("tools/_unattended_runner.sh")
+        guard FileManager.default.fileExists(atPath: runner.path) else {
+            failWith("tools/_unattended_runner.sh is missing.")
+            return
+        }
+
+        state = .training(progress: TrainingProgress(epoch: 0,
+                                                     totalEpochs: epochs,
+                                                     box_loss: 0,
+                                                     cls_loss: 0))
+        let trainResult = await runProcessCapturingOutput(
+            url: URL(fileURLWithPath: "/bin/bash"),
+            args: [runner.path,
+                   repoRoot.path,
+                   dataYaml.path,
+                   "--epochs", String(epochs),
+                   "--imgsz", String(imgsz),
+                   "--batch", String(batch)],
+            operation: operation
+        )
+        guard operationIsCurrent(operation) else { return }
 
         if trainResult.exitCode == 0 {
-            // Copy the freshly trained model into Application Support so the
-            // running app picks it up without a relaunch.
-            do { try await installFreshlyTrainedModel(generation: generation) }
-            catch {
-                guard generation == jobGeneration else { return }
-                failWith("Model installation failed: \(error.localizedDescription)")
+            guard let candidate = newestCoreMLCandidate(modifiedAfter: pipelineStartedAt) else {
+                failWith("Training finished, but no exported CoreML candidate was found.")
                 return
             }
-            // Tell VisionProcessor to drop its cached model — next inference
-            // will reload from the runtime dir we just populated.
-            guard generation == jobGeneration else { return }
-            onModelInstalled?()
+            candidateModelPath = candidate
             lastSuccessAt = Date()
-            state = .finished(success: true, message: "Trained model installed. Detection updated.")
+            state = .finished(
+                success: true,
+                message: "Candidate exported. It was not installed; schema-5 verification is required."
+            )
+            appendLog("Candidate only (not installed): \(candidate.path)")
             appendLog("=== Pipeline OK \(Date()) ===")
         } else {
             failWith("Training pipeline failed (exit \(trainResult.exitCode)). See log.")
         }
     }
 
-    /// Copy the trained `.mlpackage` into Application Support so the running
-    /// VisionProcessor finds it before falling back to the bundled model.
-    private func installFreshlyTrainedModel(generation: UUID) async throws {
-        let fm = FileManager.default
-        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+    /// Install only through the fingerprint-bound verifier. A report picker can
+    /// call this after an external/human-reviewed schema-5 run succeeds.
+    func installVerifiedModel(reportURL: URL) {
+        guard !isBusy, process?.isRunning != true,
+              let operation = operationPolicy.begin() else { return }
+        activeOperationKind = .verifiedInstall
+        state = .installing
+        operationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.finishOperation(operation) }
+            let installer = self.repoRoot.appendingPathComponent("tools/install_verified_model.py")
+            let destination = self.runtimeModelDestination()
+            do {
+                try FileManager.default.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+            } catch {
+                self.failWith("Could not create the runtime model directory: \(error.localizedDescription)")
+                return
+            }
+            let result = await self.runProcessCapturingOutput(
+                url: self.venvPython,
+                args: [installer.path, "--report", reportURL.path,
+                       "--destination", destination.path],
+                operation: operation
+            )
+            guard self.operationIsCurrent(operation) else { return }
+            if result.exitCode == 0 {
+                self.onModelInstalled?()
+                self.state = .finished(success: true,
+                                       message: "Verified model installed atomically.")
+                self.appendLog("Verified model installed: \(destination.path)")
+            } else {
+                self.failWith("Verified installation failed (exit \(result.exitCode)).")
+            }
+        }
+    }
+
+    private func runtimeModelDestination() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support")
-        let modelDir = support.appendingPathComponent("LiveBlock/models", isDirectory: true)
-        try fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        return support.appendingPathComponent("LiveBlock/models/liveblock-detector.mlpackage")
+    }
 
-        // The trainer writes new weights into `Sources/yolov8n.mlpackage` in
-        // the repo. Copy that into the runtime dir so SCStream-driven
-        // inference picks it up immediately.
-        let src = repoRoot.appendingPathComponent("Sources/yolov8n.mlpackage")
-        guard fm.fileExists(atPath: src.path) else {
-            throw NSError(domain: "LiveBlockTraining", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "Trained model missing at \(src.path)"
-            ])
+    private func newestCoreMLCandidate(modifiedAfter cutoff: Date) -> URL? {
+        let runs = repoRoot.appendingPathComponent("tools/runs", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: runs,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+        var candidates: [(URL, Date)] = []
+        for case let url as URL in enumerator where url.pathExtension == "mlpackage" {
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
+            if values?.isDirectory == true,
+               let modified = values?.contentModificationDate,
+               modified >= cutoff.addingTimeInterval(-1) {
+                candidates.append((url, modified))
+                enumerator.skipDescendants()
+            }
         }
-        let compiled = try await Task.detached(priority: .utility) {
-            try MLModel.compileModel(at: src)
-        }.value
-        defer { try? fm.removeItem(at: compiled) }
-        guard generation == jobGeneration else { throw CancellationError() }
-        let dst = modelDir.appendingPathComponent("yolov8n.mlmodelc")
-        let staged = modelDir.appendingPathComponent("\(UUID().uuidString).mlmodelc")
-        try fm.copyItem(at: compiled, to: staged)
-        defer { try? fm.removeItem(at: staged) }
-        if fm.fileExists(atPath: dst.path) {
-            _ = try fm.replaceItemAt(dst, withItemAt: staged)
-        } else {
-            try fm.moveItem(at: staged, to: dst)
-        }
-        appendLog("Installed compiled model into \(dst.path)")
+        return candidates.max(by: { $0.1 < $1.1 })?.0
     }
 
     private func failWith(_ message: String) {
@@ -301,8 +458,64 @@ final class TrainingController: ObservableObject {
 
     private struct RunResult { let exitCode: Int32 }
 
-    private func runProcessCapturingOutput(url: URL, args: [String]) async -> RunResult {
-        await withCheckedContinuation { continuation in
+    private func operationIsCurrent(_ operation: UInt64) -> Bool {
+        !Task.isCancelled && operationPolicy.owns(operation)
+    }
+
+    private func finishOperation(_ operation: UInt64) {
+        guard operationPolicy.owns(operation) else { return }
+        operationPolicy.finish(operation)
+        activeOperationKind = nil
+        operationTask = nil
+    }
+
+    private func cancelActiveOperation(message: String, immediateKill: Bool) {
+        operationPolicy.cancel()
+        operationTask?.cancel()
+        operationTask = nil
+        activeOperationKind = nil
+        isInstallingEnvironment = false
+        terminateActiveProcess(immediateKill: immediateKill)
+        stopDetachedRunner()
+        state = .finished(success: false, message: message)
+    }
+
+    private func terminateActiveProcess(immediateKill: Bool) {
+        guard let process, process.isRunning else { return }
+        let pid = process.processIdentifier
+        // The Process is bash (or python). Terminate its direct trainer child
+        // before the parent so the child cannot continue after cancellation.
+        runOneShot(launchPath: "/usr/bin/pkill", args: ["-TERM", "-P", "\(pid)"], onLine: { _ in })
+        process.terminate()
+        if immediateKill {
+            runOneShot(launchPath: "/usr/bin/pkill", args: ["-KILL", "-P", "\(pid)"], onLine: { _ in })
+            if process.isRunning { kill(pid, SIGKILL) }
+            return
+        }
+        // Capture the exact Process. Never consult self.process here: a newer
+        // workflow may own that slot by the time escalation runs.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { [process, pid] in
+            Task { @MainActor [weak self] in
+                guard process.isRunning else { return }
+                self?.runOneShot(launchPath: "/usr/bin/pkill",
+                                 args: ["-KILL", "-P", "\(pid)"],
+                                 onLine: { _ in })
+                if process.isRunning { kill(pid, SIGKILL) }
+            }
+        }
+    }
+
+    private func stopDetachedRunner() {
+        // Belt-and-suspenders for a detached runner from a prior invocation.
+        runOneShot(launchPath: "/bin/bash",
+                   args: [repoRoot.appendingPathComponent("tools/auto.sh").path, "stop"],
+                   onLine: { _ in })
+    }
+
+    private func runProcessCapturingOutput(url: URL, args: [String],
+                                           operation: UInt64) async -> RunResult {
+        guard operationIsCurrent(operation) else { return RunResult(exitCode: -1) }
+        return await withCheckedContinuation { continuation in
             let proc = Process()
             proc.executableURL = url
             proc.arguments = args
@@ -326,8 +539,8 @@ final class TrainingController: ObservableObject {
                 guard !data.isEmpty,
                       let str = String(data: data, encoding: .utf8) else { return }
                 Task { @MainActor [weak self] in
-                    guard self?.process === proc else { return }
-                    self?.ingestOutput(str)
+                    guard let self, self.operationPolicy.owns(operation) else { return }
+                    self.ingestOutput(str)
                 }
             }
             errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
@@ -335,8 +548,8 @@ final class TrainingController: ObservableObject {
                 guard !data.isEmpty,
                       let str = String(data: data, encoding: .utf8) else { return }
                 Task { @MainActor [weak self] in
-                    guard self?.process === proc else { return }
-                    self?.ingestOutput(str)
+                    guard let self, self.operationPolicy.owns(operation) else { return }
+                    self.ingestOutput(str)
                 }
             }
 
@@ -344,11 +557,10 @@ final class TrainingController: ObservableObject {
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
                 Task { @MainActor [weak self] in
-                    if self?.process === p {
-                        self?.process = nil
-                        self?.stdoutPipe = nil
-                        self?.stderrPipe = nil
-                    }
+                    guard let self, self.process === proc else { return }
+                    self.process = nil
+                    self.stdoutPipe = nil
+                    self.stderrPipe = nil
                 }
                 continuation.resume(returning: RunResult(exitCode: p.terminationStatus))
             }
@@ -356,9 +568,16 @@ final class TrainingController: ObservableObject {
             do {
                 try proc.run()
             } catch {
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                if self.process === proc {
+                    self.process = nil
+                    self.stdoutPipe = nil
+                    self.stderrPipe = nil
+                }
                 continuation.resume(returning: RunResult(exitCode: -1))
-                Task { @MainActor [weak self] in
-                    self?.appendLog("Failed to launch \(url.path): \(error.localizedDescription)")
+                if operationPolicy.owns(operation) {
+                    appendLog("Failed to launch \(url.path): \(error.localizedDescription)")
                 }
             }
         }

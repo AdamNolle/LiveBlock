@@ -1,164 +1,225 @@
-//! Object detection via ONNX Runtime + DirectML EP. Mirrors `VisionProcessor.swift`.
+//! Object detection via ONNX Runtime with DirectML and CPU fallback.
 //!
-//! Model semantics come from checksum-bound class metadata. Only explicit
-//! ad/sponsor labels are eligible for automatic removal.
-//!
-//! ## ort rc.12 API
-//! This file targets `ort = "=2.0.0-rc.12"` (the version pinned in Cargo.lock):
-//!   * sessions live under `ort::session::{Session, builder::GraphOptimizationLevel}`,
-//!   * execution providers live under `ort::ep::{DirectML, CPU}` (with `.build()`),
-//!   * `Session::inputs()` / `outputs()` are *methods* returning `&[Outlet]`,
-//!   * `Session::run` takes `&mut self`,
-//!   * `inputs!` no longer returns a `Result`,
-//!   * tensor extraction returns `(&Shape, &[T])` — no ndarray bridge needed.
-//!
-//! ## Output type
-//! `detect()` returns shared-core [`liveblock_detection::Detection`]s in
-//! **normalized [0..1] top-left** coordinates so the rest of the pipeline
-//! (Tracker -> decide_verdict -> build_remove_mask_from_tracks) consumes them
-//! verbatim. NMS is the shared-core class-aware implementation; the old broken
-//! `remove(0)` loop is gone.
+//! Pixel conversion, letterboxing, output decoding, filtering, and NMS are
+//! shared with Linux through `liveblock-detection`; this adapter only binds ORT
+//! and resolves runtime class names.
 
 use anyhow::{anyhow, Context, Result};
+use liveblock_config::Vocabulary;
+use liveblock_detection::{
+    decode_yolov8_head, preprocess_bgra_letterbox, to_pixel_rect_top_left,
+    DetectorProcessingContract,
+};
+use ndarray::Array4;
 use std::path::Path;
 
-use liveblock_detection::{yolo_input_size, letterbox_bgra, decode_yolov8, Detection, ModelClasses, ModelClassPolicy};
+const DEFAULT_VOCAB_JSON: &str = include_str!("../../../../tools/vocab/liveblock-vocab.json");
 
-use ort::ep::{CPUExecutionProvider, DirectMLExecutionProvider};
-use ort::session::{builder::GraphOptimizationLevel, Session};
-use ort::value::Tensor;
-
-/// A scored, normalized detection plus its human-readable class name. Thin
-/// wrapper over the shared-core [`Detection`] so callers that only need
-/// geometry/score/class_id can `.det`-project, while UI/labeling can show the
-/// name. Coordinates are normalized [0..1] top-left.
-///
-/// `class_name` and the convenience accessors are part of the labeling/overlay
-/// UI surface (not yet consumed by the realtime worker, which projects `.det`).
 #[derive(Debug, Clone)]
 pub struct DetBox {
-    pub det: Detection,
-    #[allow(dead_code)]
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub class_id: u32,
     pub class_name: String,
+    pub confidence: f32,
 }
 
-#[allow(dead_code)]
-impl DetBox {
-    #[inline]
-    pub fn class_id(&self) -> u32 {
-        self.det.class_id
-    }
-    #[inline]
-    pub fn confidence(&self) -> f32 {
-        self.det.score
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectorBackend {
+    DirectMlRegisteredCpuInput,
+    CpuAfterDirectMlLoadFailure,
+}
+
+impl DetectorBackend {
+    fn status(self) -> &'static str {
+        match self {
+            Self::DirectMlRegisteredCpuInput => "directml_registered_cpu_uploaded_tensor",
+            Self::CpuAfterDirectMlLoadFailure => "cpu_after_directml_load_failure",
+        }
     }
 }
 
 pub struct Detector {
-    session: Session,
+    session: ort::Session,
+    backend: DetectorBackend,
     input_name: String,
     output_name: String,
-    input_size: u32, // square; 640 for yolov8n
+    processing: DetectorProcessingContract,
     min_confidence: f32,
     iou_threshold: f32,
-    classes: ModelClasses,
+    class_names: Vec<String>,
 }
 
 impl Detector {
-    /// Load an ONNX model. Tries DirectML (Windows GPU) first, then CPU.
+    /// Load an ONNX model. DirectML is preferred; CPU remains the fallback.
     pub fn load(model_path: &Path) -> Result<Self> {
         if !model_path.exists() {
-            return Err(anyhow!(
-                "Model not found at {}. Drop a yolov8n.onnx (or your trained logo model) into src-tauri/resources/.",
-                model_path.display()
-            ));
+            return Err(anyhow!("model not found: {}", model_path.display()));
         }
-
-        // rc.12 builder chaining: each `with_*` consumes and returns the builder
-        // (wrapped in `Result<SessionBuilder, Error<SessionBuilder>>`), and
-        // `commit_from_file` takes `&mut self`. The `Error<SessionBuilder>`
-        // recover-error is NOT Send+Sync (it carries the builder), so it can't
-        // flow through `?` into anyhow — flatten it to a string-backed error.
-        let mut builder = Session::builder()?
-            .with_memory_pattern(false)
-            .map_err(|e| anyhow!("disable DirectML memory patterns: {e}"))?
-            .with_parallel_execution(false)
-            .map_err(|e| anyhow!("configure sequential DirectML execution: {e}"))?
-            .with_execution_providers([
-                DirectMLExecutionProvider::default().build(),
-                CPUExecutionProvider::default().build(),
-            ])
-            .map_err(|e| anyhow!("with_execution_providers: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow!("with_optimization_level: {e}"))?;
-        let session = builder
-            .commit_from_file(model_path)
-            .with_context(|| format!("load ONNX model {}", model_path.display()))?;
-
-        let input_shape = session.inputs().first().context("model has no inputs")?
-            .dtype().tensor_shape().context("model input is not a tensor")?;
-        let input_size = yolo_input_size(&input_shape[..]).map_err(|e| anyhow!(e))?;
-
+        // ORT's DirectML contract requires sequential execution and disabled
+        // memory patterns. Make registration failure observable instead of
+        // silently claiming DirectML, then construct a separate CPU session.
+        // Inputs remain CPU-preprocessed NCHW tensors; D3D texture binding is
+        // deliberately not claimed by this path.
+        let directml = ort::Session::builder()
+            .and_then(|builder| {
+                builder.with_execution_providers([ort::DirectMLExecutionProvider::default()
+                    .build()
+                    .error_on_failure()])
+            })
+            .and_then(|builder| builder.with_parallel_execution(false))
+            .and_then(|builder| builder.with_memory_pattern(false))
+            .and_then(|builder| {
+                builder.with_optimization_level(ort::GraphOptimizationLevel::Level3)
+            })
+            .and_then(|builder| builder.commit_from_file(model_path));
+        let (session, backend) = match directml {
+            Ok(session) => (session, DetectorBackend::DirectMlRegisteredCpuInput),
+            Err(directml_error) => {
+                tracing::warn!(
+                    "DirectML session load failed; constructing explicit CPU fallback: {directml_error}"
+                );
+                let session = ort::Session::builder()?
+                    .with_execution_providers([
+                        ort::CPUExecutionProvider::default().build().error_on_failure(),
+                    ])?
+                    .with_optimization_level(ort::GraphOptimizationLevel::Level3)?
+                    .commit_from_file(model_path)
+                    .with_context(|| {
+                        format!(
+                            "DirectML load failed ({directml_error}); CPU fallback could not load ONNX model {}",
+                            model_path.display()
+                        )
+                    })?;
+                (session, DetectorBackend::CpuAfterDirectMlLoadFailure)
+            }
+        };
         let input_name = session
-            .inputs()
+            .inputs
             .first()
-            .map(|i| i.name().to_string())
+            .map(|input| input.name.clone())
             .context("model has no inputs")?;
         let output_name = session
-            .outputs()
+            .outputs
             .first()
-            .map(|o| o.name().to_string())
+            .map(|output| output.name.clone())
             .context("model has no outputs")?;
-
-        // Reject stale class semantics when the installed weights change.
-        let classes = ModelClasses::load(model_path);
+        let class_names = Vocabulary::from_json(DEFAULT_VOCAB_JSON)
+            .map(|vocabulary| vocabulary.class_names_by_id())
+            .unwrap_or_default();
 
         Ok(Self {
             session,
+            backend,
             input_name,
             output_name,
-            input_size,
-            min_confidence: 0.5,
+            processing: DetectorProcessingContract::YOLOV8_BGRA_640,
+            min_confidence: 0.45,
             iou_threshold: 0.45,
-            classes,
+            class_names,
         })
     }
 
-    /// Run inference on a packed BGRA frame. Returns normalized detections.
-    pub fn detect(&mut self, bgra: &[u8], width: u32, height: u32) -> Result<Vec<DetBox>> {
-        if width == 0 || height == 0 || (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4)).is_none_or(|n| bgra.len() < n) {
-            return Ok(Vec::new());
-        }
-
-        let s = self.input_size as usize;
-        let input = letterbox_bgra(bgra, width, height, self.input_size).map_err(|e| anyhow!(e))?;
-
-        let tensor = Tensor::from_array((vec![1i64, 3, s as i64, s as i64], input))
-            .context("build input tensor")?;
-
-        // Run. rc.12 `inputs!` builds the value array directly (no Result).
-        let outputs = self
-            .session
-            .run(ort::inputs![self.input_name.as_str() => tensor])
-            .context("session.run")?;
-
-        let value = outputs
+    pub fn detect(
+        &mut self,
+        bgra: &[u8],
+        width: u32,
+        height: u32,
+        run_options: &ort::RunOptions,
+    ) -> Result<Vec<DetBox>> {
+        let preprocessed = preprocess_bgra_letterbox(bgra, width, height, self.processing)
+            .map_err(|error| anyhow!(error))?;
+        let tensor = Array4::from_shape_vec(
+            (
+                1,
+                self.processing.input_channels as usize,
+                self.processing.input_height as usize,
+                self.processing.input_width as usize,
+            ),
+            preprocessed.chw_rgb,
+        )
+        .context("build detector input tensor")?;
+        let inputs = ort::inputs![self.input_name.as_str() => tensor.view()]?;
+        let outputs = self.session.run_with_options(inputs, run_options)?;
+        let prediction = outputs
             .get(self.output_name.as_str())
-            .context("output missing")?;
-        let (shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract output tensor")?;
+            .context("model output missing")?
+            .try_extract_tensor::<f32>()?;
+        let raw = prediction.view().into_dyn();
+        let (channels, anchors) = match raw.shape() {
+            &[1, channels, anchors] => (channels, anchors),
+            shape => return Err(anyhow!("unexpected YOLO output shape {shape:?}")),
+        };
+        let contiguous = raw
+            .as_slice()
+            .context("YOLO output tensor is not contiguous")?;
+        let detections = decode_yolov8_head(
+            contiguous,
+            channels,
+            anchors,
+            preprocessed.transform,
+            self.min_confidence,
+            self.iou_threshold,
+        )
+        .map_err(|error| anyhow!(error))?;
 
-        let kept = decode_yolov8(data, &shape[..], width, height, self.input_size,
-            self.min_confidence, self.iou_threshold).map_err(|e| anyhow!(e))?;
-        Ok(kept.into_iter().map(|det| {
-            let class_name = self.classes.names.get(det.class_id as usize).cloned()
-                .unwrap_or_else(|| format!("class_{}", det.class_id));
-            DetBox { det, class_name }
-        }).collect())
+        Ok(detections
+            .into_iter()
+            .map(|detection| {
+                let rect = to_pixel_rect_top_left(&detection, width as f32, height as f32);
+                DetBox {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    class_id: detection.class_id,
+                    class_name: self
+                        .class_names
+                        .get(detection.class_id as usize)
+                        .filter(|name| !name.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| format!("class_{}", detection.class_id)),
+                    confidence: detection.score,
+                }
+            })
+            .collect())
     }
 
-    pub fn class_policy(&self, class_id: u32) -> ModelClassPolicy {
-        self.classes.policy(class_id)
+    /// Registration/load truth only. This does not prove that any graph node
+    /// executed on a physical GPU, and both statuses consume CPU-uploaded NCHW.
+    pub fn backend_status(&self) -> &'static str {
+        self.backend.status()
+    }
+
+    pub fn set_thresholds(&mut self, score: f32, iou: f32) {
+        self.min_confidence = score.clamp(0.05, 0.95);
+        self.iou_threshold = iou.clamp(0.10, 0.90);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_status_never_claims_texture_binding_or_gpu_execution() {
+        assert_eq!(
+            DetectorBackend::DirectMlRegisteredCpuInput.status(),
+            "directml_registered_cpu_uploaded_tensor"
+        );
+        assert_eq!(
+            DetectorBackend::CpuAfterDirectMlLoadFailure.status(),
+            "cpu_after_directml_load_failure"
+        );
+        for status in [
+            DetectorBackend::DirectMlRegisteredCpuInput.status(),
+            DetectorBackend::CpuAfterDirectMlLoadFailure.status(),
+        ] {
+            assert!(!status.contains("texture"));
+            assert!(!status.contains("executed"));
+            assert!(!status.contains("zero_copy"));
+        }
     }
 }

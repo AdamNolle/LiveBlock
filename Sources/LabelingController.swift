@@ -2,6 +2,24 @@ import Foundation
 import AppKit
 import Combine
 
+enum LabelClass: String, Codable, CaseIterable, Sendable {
+    case ad
+    case sponsorRemove = "sponsor_remove"
+    case teamKeep = "team_keep"
+    case numberKeep = "number_keep"
+
+    var title: String {
+        switch self {
+        case .ad: return "Ad"
+        case .sponsorRemove: return "Sponsor / livery"
+        case .teamKeep: return "Team mark — keep"
+        case .numberKeep: return "Number — keep"
+        }
+    }
+
+    var isKeep: Bool { self == .teamKeep || self == .numberKeep }
+}
+
 /// One labeled box on a screenshot. Coords normalized [0..1] with origin top-left.
 struct LabelBox: Codable, Identifiable, Hashable, Sendable {
     let id: UUID
@@ -9,13 +27,41 @@ struct LabelBox: Codable, Identifiable, Hashable, Sendable {
     var y: Double
     var width: Double
     var height: Double
+    var labelClass: LabelClass
 
-    init(id: UUID = UUID(), x: Double, y: Double, width: Double, height: Double) {
+    private enum CodingKeys: String, CodingKey {
+        case id, x, y, width, height
+        case labelClass = "class"
+    }
+
+    init(id: UUID = UUID(), x: Double, y: Double, width: Double, height: Double,
+         labelClass: LabelClass = .ad) {
         self.id = id
         self.x = max(0, min(1, x))
         self.y = max(0, min(1, y))
         self.width = max(0, min(1 - self.x, width))
         self.height = max(0, min(1 - self.y, height))
+        self.labelClass = labelClass
+    }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try box.decode(UUID.self, forKey: .id),
+                  x: try box.decode(Double.self, forKey: .x),
+                  y: try box.decode(Double.self, forKey: .y),
+                  width: try box.decode(Double.self, forKey: .width),
+                  height: try box.decode(Double.self, forKey: .height),
+                  labelClass: try box.decodeIfPresent(LabelClass.self, forKey: .labelClass) ?? .ad)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(id, forKey: .id)
+        try box.encode(x, forKey: .x)
+        try box.encode(y, forKey: .y)
+        try box.encode(width, forKey: .width)
+        try box.encode(height, forKey: .height)
+        if labelClass != .ad { try box.encode(labelClass, forKey: .labelClass) }
     }
 
     func rect(in size: CGSize) -> CGRect {
@@ -127,30 +173,46 @@ final class LabelingController: ObservableObject {
 
     func addBox(_ box: LabelBox) {
         currentBoxes.append(box)
+        currentIsLabeled = false
     }
 
     func removeLastBox() {
-        if !currentBoxes.isEmpty { currentBoxes.removeLast() }
+        if !currentBoxes.isEmpty { currentBoxes.removeLast(); currentIsLabeled = false }
     }
 
     func removeBox(id: UUID) {
         currentBoxes.removeAll { $0.id == id }
+        currentIsLabeled = false
+    }
+
+    func setClass(_ labelClass: LabelClass, for id: UUID) {
+        guard let index = currentBoxes.firstIndex(where: { $0.id == id }) else { return }
+        currentBoxes[index].labelClass = labelClass
+        currentIsLabeled = false
     }
 
     func clearBoxes() {
         currentBoxes.removeAll()
+        currentIsLabeled = false
     }
 
     /// Promote a yellow proposal into a confirmed (green) box.
-    func acceptSuggestion(id: UUID) {
+    func acceptSuggestion(id: UUID, as labelClass: LabelClass = .ad) {
         guard let idx = currentSuggestions.firstIndex(where: { $0.id == id }) else { return }
-        let s = currentSuggestions.remove(at: idx)
+        var s = currentSuggestions.remove(at: idx)
+        s.labelClass = labelClass
         currentBoxes.append(s)
+        currentIsLabeled = false
     }
 
-    func acceptAllSuggestions() {
-        currentBoxes.append(contentsOf: currentSuggestions)
+    func acceptAllSuggestions(as labelClass: LabelClass = .ad) {
+        currentBoxes.append(contentsOf: currentSuggestions.map { suggestion in
+            var box = suggestion
+            box.labelClass = labelClass
+            return box
+        })
         currentSuggestions.removeAll()
+        currentIsLabeled = false
     }
 
     func dismissSuggestion(id: UUID) {

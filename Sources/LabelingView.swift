@@ -8,6 +8,7 @@ struct LabelingView: View {
     @State private var dragStart: CGPoint? = nil
     @State private var currentDragRect: CGRect? = nil
     @State private var hoveredBoxID: UUID? = nil
+    @State private var selectedClass: LabelClass = .ad
 
     var body: some View {
         ZStack {
@@ -53,9 +54,17 @@ struct LabelingView: View {
             }
             Spacer()
 
+            Picker("New boxes", selection: $selectedClass) {
+                ForEach(LabelClass.allCases, id: \.self) { labelClass in
+                    Text(labelClass.title).tag(labelClass)
+                }
+            }
+            .frame(width: 170)
+            .help("Choose what the next drawn or accepted box means")
+
             if !labeling.currentSuggestions.isEmpty {
                 Button {
-                    labeling.acceptAllSuggestions()
+                    labeling.acceptAllSuggestions(as: selectedClass)
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "checkmark.seal.fill")
@@ -189,7 +198,7 @@ struct LabelingView: View {
                                 .contentShape(Rectangle())
                             HStack(spacing: 4) {
                                 Button {
-                                    labeling.acceptSuggestion(id: sug.id)
+                                    labeling.acceptSuggestion(id: sug.id, as: selectedClass)
                                 } label: {
                                     Image(systemName: "checkmark.circle.fill")
                                         .imageScale(.large)
@@ -219,21 +228,37 @@ struct LabelingView: View {
                     ForEach(labeling.currentBoxes) { box in
                         let rect = box.rect(in: layout.size)
                         let isHovered = hoveredBoxID == box.id
+                        let boxColor: Color = box.labelClass.isKeep ? .cyan : .green
                         ZStack(alignment: .topTrailing) {
                             Rectangle()
-                                .stroke(Color.green.opacity(isHovered ? 1 : 0.85),
+                                .stroke(boxColor.opacity(isHovered ? 1 : 0.85),
                                         style: StrokeStyle(lineWidth: 2))
-                                .background(Color.green.opacity(isHovered ? 0.18 : 0.08))
+                                .background(boxColor.opacity(isHovered ? 0.18 : 0.08))
                                 .contentShape(Rectangle())
-                            Button {
-                                labeling.removeBox(id: box.id)
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .imageScale(.large)
-                                    .foregroundStyle(.white)
-                                    .background(Circle().fill(Color.black.opacity(0.7)))
+                            HStack(spacing: 4) {
+                                Menu {
+                                    ForEach(LabelClass.allCases, id: \.self) { labelClass in
+                                        Button(labelClass.title) {
+                                            labeling.setClass(labelClass, for: box.id)
+                                        }
+                                    }
+                                } label: {
+                                    Text(box.labelClass.title)
+                                        .font(.caption2.weight(.semibold))
+                                        .padding(3)
+                                        .background(Color.black.opacity(0.75))
+                                        .foregroundStyle(.white)
+                                }
+                                Button {
+                                    labeling.removeBox(id: box.id)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .imageScale(.large)
+                                        .foregroundStyle(.white)
+                                        .background(Circle().fill(Color.black.opacity(0.7)))
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                             .padding(2)
                         }
                         .frame(width: rect.width, height: rect.height)
@@ -402,7 +427,8 @@ struct LabelingView: View {
                 let localY = (r.minY - layout.origin.y) / layout.size.height
                 let localW = r.width / layout.size.width
                 let localH = r.height / layout.size.height
-                let box = LabelBox(x: localX, y: localY, width: localW, height: localH)
+                let box = LabelBox(x: localX, y: localY, width: localW, height: localH,
+                                   labelClass: selectedClass)
                 labeling.addBox(box)
             }
     }

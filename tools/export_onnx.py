@@ -58,7 +58,8 @@ def runtime_onnx_target() -> Path:
     return lb_paths.models_dir() / "yolov8n.onnx"
 
 
-def export(pt_path: Path, *, opset: int, simplify: bool, nms: bool, half: bool, dynamic: bool) -> Path:
+def export(pt_path: Path, *, opset: int, simplify: bool, nms: bool, half: bool, dynamic: bool,
+           imgsz: int = 640) -> Path:
     try:
         from ultralytics import YOLO  # type: ignore
     except ImportError as e:
@@ -81,6 +82,7 @@ def export(pt_path: Path, *, opset: int, simplify: bool, nms: bool, half: bool, 
         nms=nms,
         half=half,
         dynamic=dynamic,
+        imgsz=imgsz,
     )
 
     out_path = Path(output) if not isinstance(output, Path) else output
@@ -153,6 +155,8 @@ def main() -> int:
         default=False,
         help="Dynamic input shapes (default off; fixed 640 is fastest for ORT)",
     )
+    parser.add_argument("--imgsz", type=int, default=640,
+                        help="Square inference input size (default 640)")
     args = parser.parse_args()
 
     out = export(
@@ -162,6 +166,7 @@ def main() -> int:
         nms=args.nms,
         half=args.half,
         dynamic=args.dynamic,
+        imgsz=args.imgsz,
     )
     if args.install:
         install_into_repo(out)

@@ -13,28 +13,34 @@ import Foundation
 /// drive the eraser. User-drawn regions are unaffected — they never pass
 /// through this gate and continue to paint/inpaint exactly as before.
 ///
-/// When a real fine-tuned sponsor/ad model is wired in (see ASSESSMENT.md
-/// Path A / the Rust `decide_verdict` + class-allowlist design), populate
-/// `autoBlockLabels` with that model's removable class identifiers (e.g.
-/// "sponsor", "ad", "logo"). Keep team emblems / player numbers OUT of this
-/// list so they are never auto-erased — that carve-out is enforced in the core
-/// via `build_remove_mask_from_tracks`, and mirrored here by simply not
-/// allowlisting those classes.
+/// Only a trained runtime model with a passing validation manifest can enable
+/// known removable classes. The bundled generic COCO model remains inert.
 enum SponsorClassAllowlist {
+    static let keepLabels: Set<String> = ["team_keep", "number_keep"]
+    private static let removableLabels: Set<String> = ["ad", "sponsor_remove"]
 
-    /// Lower-cased class identifiers that the auto-block pipeline is permitted
-    /// to erase. INTENTIONALLY EMPTY until a real sponsor/logo model ships.
-    ///
-    /// TODO(model): replace with the fine-tuned model's removable classes,
-    /// e.g. ["sponsor", "ad", "logo", "banner"]. Until then this MUST stay
-    /// empty so no generic COCO class auto-erases user content.
-    static let autoBlockLabels: Set<String> = []
+    static func eligibleLabels(in runtimeDirectory: URL) -> Set<String> {
+        let manifest = runtimeDirectory.appendingPathComponent("yolov8n.manifest.json")
+        guard let data = try? Data(contentsOf: manifest),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["schema_version"] as? Int == 1,
+              json["validated"] as? Bool == true,
+              let precision = json["precision"] as? Double, precision >= 0.8,
+              let map50 = json["map50"] as? Double, map50 >= 0.5,
+              let classes = json["classes"] as? [String],
+              let permitted = json["auto_block_labels"] as? [String] else {
+            return []
+        }
+        let available = Set(classes)
+        let candidates = Set(permitted).intersection(removableLabels).intersection(available)
+        if candidates.contains("sponsor_remove") &&
+            !keepLabels.isSubset(of: available) {
+            return candidates.subtracting(["sponsor_remove"])
+        }
+        return candidates
+    }
 
-    /// Returns `true` only when `label` is an explicitly allowlisted removable
-    /// class. With an empty allowlist this is always `false`, so model
-    /// detections never reach the eraser. Case-insensitive.
-    static func allowsAutoBlock(label: String) -> Bool {
-        guard !autoBlockLabels.isEmpty else { return false }
-        return autoBlockLabels.contains(label.lowercased())
+    static func allowsAutoBlock(label: String, eligible: Set<String>) -> Bool {
+        eligible.contains(label.lowercased())
     }
 }

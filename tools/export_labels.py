@@ -40,7 +40,9 @@ of the remove-mask (emblems/numbers must never be erased). See
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import random
 import shutil
 import sys
@@ -91,20 +93,39 @@ def box_class_name(box: dict) -> str:
     """Resolve a box's class string, defaulting to legacy 'ad' when absent.
 
     Mirrors liveblock_labels: a missing/empty `class` key == LabelClass::Ad.
-    Unknown class strings are conservatively treated as 'ad' (REMOVE) so a
-    future label class never silently becomes an un-handled keep — but we warn.
+    Unknown classes are rejected: guessing "remove" could train the model to
+    erase an identity mark that was meant to be kept.
     """
     raw = box.get("class")
     if raw is None or raw == "":
         return "ad"
-    if raw in CLASS_TO_ID:
+    if isinstance(raw, str) and raw in CLASS_TO_ID:
         return raw
-    print(
-        f"Warning: unknown box class {raw!r}; treating as 'ad' (remove). "
-        f"Update CLASS_ORDER in export_labels.py if this is a new class.",
-        file=sys.stderr,
-    )
-    return "ad"
+    raise ValueError(f"unknown box class {raw!r}; expected one of {CLASS_ORDER}")
+
+
+def validate_document(png: Path, doc: dict) -> None:
+    """Reject malformed labels before they can contaminate a training run."""
+    if not isinstance(doc, dict) or doc.get("image") != png.name:
+        raise ValueError(f"{png.name}: label image filename does not match screenshot")
+    if not isinstance(doc.get("imageWidth"), int) or doc["imageWidth"] <= 0:
+        raise ValueError(f"{png.name}: invalid imageWidth")
+    if not isinstance(doc.get("imageHeight"), int) or doc["imageHeight"] <= 0:
+        raise ValueError(f"{png.name}: invalid imageHeight")
+    if not isinstance(doc.get("boxes"), list):
+        raise ValueError(f"{png.name}: boxes must be an array")
+    for index, box in enumerate(doc["boxes"]):
+        if not isinstance(box, dict):
+            raise ValueError(f"{png.name}: box {index} must be an object")
+        box_class_name(box)
+        try:
+            x, y, w, h = (float(box[key]) for key in ("x", "y", "width", "height"))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"{png.name}: box {index} has invalid coordinates") from exc
+        if not all(math.isfinite(v) for v in (x, y, w, h)):
+            raise ValueError(f"{png.name}: box {index} has non-finite coordinates")
+        if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > 1.000001 or y + h > 1.000001:
+            raise ValueError(f"{png.name}: box {index} is empty or outside the image")
 
 
 def to_yolo_lines(label_doc: dict, class_to_id: Dict[str, int], *, binary: bool) -> List[str]:
@@ -171,11 +192,10 @@ def main() -> int:
         help="Fraction held out for validation (default 0.15)",
     )
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument(
-        "--include-empty",
-        action="store_true",
-        help="Include screenshots labeled with zero boxes (negative samples).",
-    )
+    ap.add_argument("--exclude-empty", action="store_true",
+                    help="Drop no-ad screenshots (normally included as negative examples).")
+    ap.add_argument("--include-empty", action="store_true",
+                    help="Compatibility flag; no-ad screenshots are included by default.")
     ap.add_argument(
         "--binary",
         action="store_true",
@@ -197,33 +217,71 @@ def main() -> int:
         names = list(CLASS_ORDER)
         class_to_id = dict(CLASS_TO_ID)
 
-    # Filter empties unless asked. Track per-class counts for the summary.
+    if not 0 < args.val_split < 1:
+        sys.exit("--val-split must be between 0 and 1.")
+
+    # Exact duplicate screenshots must stay in one split. Retain a single copy
+    # only when its annotations match, otherwise fail for human review.
     kept: List[Tuple[Path, dict]] = []
+    seen: Dict[str, Tuple[Path, str]] = {}
     skipped_empty = 0
+    duplicates = 0
     class_counts: Dict[str, int] = {n: 0 for n in CLASS_ORDER}
     for png, json_path in pairs:
         try:
             doc = json.loads(json_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            print(f"Warning: couldn't parse {json_path}: {e}", file=sys.stderr)
-            continue
+            validate_document(png, doc)
+        except (json.JSONDecodeError, ValueError) as e:
+            sys.exit(f"Invalid labels in {json_path}: {e}")
         boxes = doc.get("boxes", [])
-        if not boxes and not args.include_empty:
+        if not boxes and args.exclude_empty:
             skipped_empty += 1
             continue
+        digest = hashlib.sha256(png.read_bytes()).hexdigest()
+        signature = json.dumps(sorted(to_yolo_lines(doc, class_to_id, binary=args.binary)))
+        if digest in seen:
+            prior_path, prior_signature = seen[digest]
+            if signature != prior_signature:
+                sys.exit(f"Conflicting labels on identical screenshots: {prior_path} and {png}")
+            duplicates += 1
+            continue
+        seen[digest] = (png, signature)
         for box in boxes:
             class_counts[box_class_name(box)] += 1
         kept.append((png, doc))
 
-    if not kept:
-        sys.exit("All labels are empty. Add some boxes, or pass --include-empty.")
+    if len(kept) < 2:
+        sys.exit("Need at least two distinct labeled screenshots for train and validation.")
+    if not any(to_yolo_lines(doc, class_to_id, binary=args.binary) for _, doc in kept):
+        sys.exit("All screenshots are negative examples. Label at least one removable ad or sponsor.")
 
     # Split
-    random.seed(args.seed)
-    random.shuffle(kept)
+    random.Random(args.seed).shuffle(kept)
     val_n = max(1, int(len(kept) * args.val_split)) if len(kept) > 1 else 0
     val = kept[:val_n]
     train = kept[val_n:]
+
+    # Every class must occur in training. A rare class assigned only to val
+    # would otherwise be impossible for the detector to learn.
+    all_classes = {box_class_name(b) for _, doc in kept for b in doc["boxes"]}
+    train_classes = {box_class_name(b) for _, doc in train for b in doc["boxes"]}
+    for missing in sorted(all_classes - train_classes):
+        match = next((item for item in val if any(box_class_name(b) == missing
+                                                    for b in item[1]["boxes"])), None)
+        if match is None:
+            sys.exit(f"Class {missing} is absent from training; add more examples.")
+        for replacement in train:
+            candidate_train = [item for item in train if item is not replacement] + [match]
+            candidate_classes = {box_class_name(b) for _, doc in candidate_train
+                                 for b in doc["boxes"]}
+            if candidate_classes == all_classes:
+                train.remove(replacement)
+                val.remove(match)
+                train.append(match)
+                val.append(replacement)
+                break
+        else:
+            sys.exit(f"Cannot make a train/validation split covering {missing}; add more examples.")
 
     # Output structure
     name = args.name or "export-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -250,10 +308,26 @@ def main() -> int:
     data_yaml = out / "data.yaml"
     data_yaml.write_text(render_data_yaml(out, names), encoding="utf-8")
 
+    report = {
+        "schema_version": 1,
+        "seed": args.seed,
+        "train_images": len(train),
+        "val_images": len(val),
+        "negative_images": sum(not doc["boxes"] for _, doc in kept),
+        "duplicate_images_dropped": duplicates,
+        "classes": names,
+        "box_counts": class_counts,
+    }
+    (out / "dataset_report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
     print(f"OK Exported to: {out}")
     print(f"  Train: {len(train)} images")
     print(f"  Val:   {len(val)} images")
     print(f"  Skipped empty: {skipped_empty}")
+    print(f"  Negative images: {report['negative_images']}")
+    print(f"  Exact duplicates dropped: {duplicates}")
     print(f"  Classes: {', '.join(f'{i}:{n}' for i, n in enumerate(names))}")
     if not args.binary:
         remove_n = sum(class_counts[c] for c in REMOVE_CLASSES)

@@ -72,6 +72,7 @@ final class VisionProcessor: @unchecked Sendable {
     private var realtimeRequest: VNCoreMLRequest?  // reused on the videoQueue
     private var labelingRequest: VNCoreMLRequest?  // reused on background labeling tasks
     private var loadFailed = false
+    private var autoBlockLabels: Set<String> = []
     // Unified default (was 0.35). AppController pushes the persisted value
     // (or AppController.defaultMinConfidence = 0.5) at launch via
     // setMinimumConfidence, so this is just the pre-startup fallback and now
@@ -103,8 +104,10 @@ final class VisionProcessor: @unchecked Sendable {
     /// auto-erases. The raw observations are still surfaced for the live
     /// detection log (`detectForDisplay`); only the auto-block path is gated.
     func detect(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
-        return runDetection(in: pixelBuffer).filter {
-            SponsorClassAllowlist.allowsAutoBlock(label: $0.label)
+        let all = runDetection(in: pixelBuffer)
+        let eligible = eligibleAutoBlockLabels()
+        return all.filter {
+            SponsorClassAllowlist.allowsAutoBlock(label: $0.label, eligible: eligible)
         }
     }
 
@@ -117,14 +120,24 @@ final class VisionProcessor: @unchecked Sendable {
     }
 
     /// One inference pass, two views of the result:
-    ///   • `forErase` — allowlist-gated (currently empty), feeds the eraser.
+    ///   • `forErase` — validation-gated removable classes, feeds the eraser.
+    ///   • `forKeep` — team marks and numbers, cut out of model erase boxes.
     ///   • `forDisplay` — ungated, feeds the live detection log only.
     /// Use this on the hot capture path so we don't pay for inference twice.
     func detectGatedAndDisplay(in pixelBuffer: CVPixelBuffer)
-        -> (forErase: [NormalizedDetection], forDisplay: [NormalizedDetection]) {
+        -> (forErase: [NormalizedDetection], forKeep: [NormalizedDetection],
+            forDisplay: [NormalizedDetection]) {
         let all = runDetection(in: pixelBuffer)
-        let gated = all.filter { SponsorClassAllowlist.allowsAutoBlock(label: $0.label) }
-        return (forErase: gated, forDisplay: all)
+        let eligible = eligibleAutoBlockLabels()
+        let gated = all.filter { SponsorClassAllowlist.allowsAutoBlock(label: $0.label,
+                                                                       eligible: eligible) }
+        let keep = all.filter { SponsorClassAllowlist.keepLabels.contains($0.label.lowercased()) }
+        return (forErase: gated, forKeep: keep, forDisplay: all)
+    }
+
+    private func eligibleAutoBlockLabels() -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        return autoBlockLabels
     }
 
     private func runDetection(in pixelBuffer: CVPixelBuffer) -> [NormalizedDetection] {
@@ -151,7 +164,10 @@ final class VisionProcessor: @unchecked Sendable {
 
         let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
         return observations.compactMap { obs -> NormalizedDetection? in
-            guard let top = obs.labels.first, top.confidence >= threshold else { return nil }
+            guard let top = obs.labels.first else { return nil }
+            let required = SponsorClassAllowlist.keepLabels.contains(top.identifier.lowercased())
+                ? min(threshold, 0.20) : threshold
+            guard top.confidence >= required else { return nil }
             // VNRecognizedObjectObservation.boundingBox is already normalized
             // [0..1] with bottom-left origin — cache it as-is, resolution-free.
             return NormalizedDetection(normRect: obs.boundingBox,
@@ -226,6 +242,9 @@ final class VisionProcessor: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         model = nil
+        realtimeRequest = nil
+        labelingRequest = nil
+        autoBlockLabels = []
         loadFailed = false
         NSLog("VisionProcessor: model cache cleared; will reload on next inference.")
     }
@@ -236,9 +255,10 @@ final class VisionProcessor: @unchecked Sendable {
         if loadFailed { return nil }
 
         do {
-            let mlModel = try Self.loadModel()
+            let (mlModel, labels) = try Self.loadModel()
             let vnModel = try VNCoreMLModel(for: mlModel)
             self.model = vnModel
+            self.autoBlockLabels = labels
             NSLog("VisionProcessor: loaded yolov8n CoreML model.")
             return vnModel
         } catch {
@@ -251,23 +271,26 @@ final class VisionProcessor: @unchecked Sendable {
     /// Look up the model in priority order:
     ///   1. The runtime directory the trainer writes to (newer than bundle).
     ///   2. The app bundle (the original ships-with-app default).
-    private static func loadModel() throws -> MLModel {
+    private static func loadModel() throws -> (MLModel, Set<String>) {
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .all
 
         let runtimeDir = runtimeModelDirectory
-        for ext in ["mlmodelc", "mlpackage"] {
+        for ext in ["mlpackage", "mlmodelc"] {
             let url = runtimeDir.appendingPathComponent("yolov8n.\(ext)")
             if FileManager.default.fileExists(atPath: url.path) {
                 NSLog("VisionProcessor: loading model from runtime dir \(url.path)")
-                return try MLModel(contentsOf: url, configuration: configuration)
+                let loaded = try MLModel(contentsOf: url, configuration: configuration)
+                let labels = ext == "mlpackage"
+                    ? SponsorClassAllowlist.eligibleLabels(in: runtimeDir) : []
+                return (loaded, labels)
             }
         }
 
         let bundle = Bundle.main
         for ext in ["mlmodelc", "mlpackage"] {
             if let url = bundle.url(forResource: "yolov8n", withExtension: ext) {
-                return try MLModel(contentsOf: url, configuration: configuration)
+                return (try MLModel(contentsOf: url, configuration: configuration), [])
             }
         }
         throw NSError(domain: "VisionProcessor", code: 1, userInfo: [

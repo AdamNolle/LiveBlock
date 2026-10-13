@@ -259,45 +259,26 @@ final class TrainingController: ObservableObject {
         )
 
         if trainResult.exitCode == 0 {
-            // Copy the freshly trained model into Application Support so the
-            // running app picks it up without a relaunch.
-            installFreshlyTrainedModel()
+            // The trainer publishes the runtime model and its validation
+            // manifest together. Do not copy the repo model over that pair.
+            let modelDir = TrainingPaths.root.deletingLastPathComponent()
+                .appendingPathComponent("models", isDirectory: true)
+            let model = modelDir.appendingPathComponent("yolov8n.mlpackage")
+            let manifest = modelDir.appendingPathComponent("yolov8n.manifest.json")
+            guard FileManager.default.fileExists(atPath: model.path),
+                  FileManager.default.fileExists(atPath: manifest.path) else {
+                failWith("Training finished but the validated runtime model or manifest is missing.")
+                return
+            }
             // Tell VisionProcessor to drop its cached model — next inference
             // will reload from the runtime dir we just populated.
             onModelInstalled?()
             lastSuccessAt = Date()
-            state = .finished(success: true, message: "Trained model installed. Detection updated.")
+            state = .finished(success: true,
+                              message: "Trained model installed. Automatic erasure only uses validation-approved classes.")
             appendLog("=== Pipeline OK \(Date()) ===")
         } else {
             failWith("Training pipeline failed (exit \(trainResult.exitCode)). See log.")
-        }
-    }
-
-    /// Copy the trained `.mlpackage` into Application Support so the running
-    /// VisionProcessor finds it before falling back to the bundled model.
-    private func installFreshlyTrainedModel() {
-        let fm = FileManager.default
-        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory())
-                .appendingPathComponent("Library/Application Support")
-        let modelDir = support.appendingPathComponent("LiveBlock/models", isDirectory: true)
-        try? fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
-
-        // The trainer writes new weights into `Sources/yolov8n.mlpackage` in
-        // the repo. Copy that into the runtime dir so SCStream-driven
-        // inference picks it up immediately.
-        let src = repoRoot.appendingPathComponent("Sources/yolov8n.mlpackage")
-        guard fm.fileExists(atPath: src.path) else {
-            appendLog("Hot-reload skipped: \(src.path) not found.")
-            return
-        }
-        let dst = modelDir.appendingPathComponent("yolov8n.mlpackage")
-        try? fm.removeItem(at: dst)
-        do {
-            try fm.copyItem(at: src, to: dst)
-            appendLog("Hot-reloaded model into \(dst.path)")
-        } catch {
-            appendLog("Hot-reload copy failed: \(error.localizedDescription)")
         }
     }
 

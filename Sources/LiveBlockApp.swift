@@ -197,7 +197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Render layer (always click-through)
         let renderLayer = RenderLayerWindow(
-            rootView: AnyView(RenderLayerView(captureManager: controller.captureManager)),
+            rootView: AnyView(RenderLayerView(captureManager: controller.captureManager,
+                                              controller: controller)),
             targetScreen: screen
         )
         controller.renderLayer = renderLayer
@@ -287,14 +288,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // user see the unblocked frame they're drawing on top of (and
         // sidesteps the z-order problem where the click-through render
         // layer sits visually above the editor).
-        Publishers.CombineLatest(
+        Publishers.CombineLatest3(
             controller.captureManager.$isRunning,
-            controller.$isEditorOpen
+            controller.$isEditorOpen,
+            controller.$captureFreeCoverEnabled
         )
         .receive(on: RunLoop.main)
-        .sink { [weak self] running, editing in
+        .sink { [weak self] running, editing, manualCover in
             guard let self else { return }
-            if running && !editing {
+            if (running || manualCover) && !editing {
                 self.controller.renderLayer?.orderFrontRegardless()
             } else {
                 self.controller.renderLayer?.orderOut(nil)

@@ -32,7 +32,7 @@ use liveblock_core::{
 use liveblock_tracker::{Observation, TrackBox, Tracker, TrackerConfig};
 
 use crate::capture::{FrameTick, FrameView};
-use crate::detection::{class_is_auto_removable, Detector};
+use crate::detection::Detector;
 use crate::overlay::{CoverPatch, OverlayWindow};
 use crate::regions::NormalizedRegion;
 
@@ -173,13 +173,15 @@ fn worker_loop(ctx: PipelineContext, ticks: Receiver<FrameTick>, running: Arc<At
             .filter(|t| t.needs_classification())
             .map(|t| (t.id, t.class_id))
             .collect();
-        for (id, class_id) in pending {
-            if class_is_auto_removable(class_id) {
-                // Currently unreachable (allowlist is empty) but keeps the wiring
-                // honest for when the real classifier lands.
-                tracker.set_verdict(id, Verdict::Remove);
+        {
+            let detector = ctx.detector.lock();
+            for (id, class_id) in pending {
+                if detector.as_ref().is_some_and(|d| d.class_is_keep(class_id)) {
+                    tracker.set_verdict(id, Verdict::Keep);
+                } else if detector.as_ref().is_some_and(|d| d.class_is_auto_removable(class_id)) {
+                    tracker.set_verdict(id, Verdict::Remove);
+                }
             }
-            // else: leave it Unsure — never auto-erase unclassified content.
         }
 
         // ---- 3. Build the detection remove-mask from tracks (carves Keep). ----
@@ -234,8 +236,19 @@ fn worker_loop(ctx: PipelineContext, ticks: Receiver<FrameTick>, running: Arc<At
                     width: t.bbox.width,
                     height: t.bbox.height,
                 };
-                let fill = border_fill(&frame_view.bytes, width, height, rect);
-                patches.push(CoverPatch { rect, fill, mode: OverlayMode::Inpaint });
+                let keeps = tracks_snapshot.iter().filter(|k| k.verdict == Verdict::Keep);
+                let pieces = keeps.fold(vec![rect], |pieces, keep| {
+                    pieces.into_iter().flat_map(|piece| {
+                        subtract_keep(piece, NormRect {
+                            x: keep.bbox.x, y: keep.bbox.y,
+                            width: keep.bbox.width, height: keep.bbox.height,
+                        })
+                    }).collect()
+                });
+                for piece in pieces {
+                    let fill = border_fill(&frame_view.bytes, width, height, piece);
+                    patches.push(CoverPatch { rect: piece, fill, mode: OverlayMode::Inpaint });
+                }
             }
         }
 
@@ -243,6 +256,42 @@ fn worker_loop(ctx: PipelineContext, ticks: Receiver<FrameTick>, running: Arc<At
         if let Err(e) = ctx.overlay.present(&patches) {
             tracing::warn!("overlay present failed: {e}");
         }
+    }
+}
+
+/// Return the portions of a remove box outside a protected mark.
+fn subtract_keep(outer: NormRect, keep: NormRect) -> Vec<NormRect> {
+    let x0 = outer.x.max(keep.x);
+    let y0 = outer.y.max(keep.y);
+    let x1 = (outer.x + outer.width).min(keep.x + keep.width);
+    let y1 = (outer.y + outer.height).min(keep.y + keep.height);
+    if x1 <= x0 || y1 <= y0 {
+        return vec![outer];
+    }
+    [
+        NormRect { x: outer.x, y: outer.y, width: x0 - outer.x, height: outer.height },
+        NormRect { x: x1, y: outer.y, width: outer.x + outer.width - x1, height: outer.height },
+        NormRect { x: x0, y: outer.y, width: x1 - x0, height: y0 - outer.y },
+        NormRect { x: x0, y: y1, width: x1 - x0, height: outer.y + outer.height - y1 },
+    ]
+    .into_iter()
+    .filter(|piece| piece.width > 0.0 && piece.height > 0.0)
+    .collect()
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+
+    #[test]
+    fn keep_box_cuts_hole_in_sponsor_cover() {
+        let pieces = subtract_keep(
+            NormRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+            NormRect { x: 0.4, y: 0.4, width: 0.2, height: 0.2 },
+        );
+        assert_eq!(pieces.len(), 4);
+        let covered: f32 = pieces.iter().map(|p| p.width * p.height).sum();
+        assert!((covered - 0.96).abs() < 0.00001);
     }
 }
 

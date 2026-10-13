@@ -143,6 +143,17 @@ See [`platform/linux/README.md`](platform/linux/README.md).
 
 Windows and Linux mirror the same shortcuts with `Ctrl` instead of `⌘`.
 
+## Protected video
+
+Neural detection needs pixels from the operating system's capture API. A
+protected player may return black pixels or refuse capture; LiveBlock cannot
+promise automatic detection there or prevent a player from enforcing its own
+DRM rules. On macOS, **Cover saved regions without capture** draws opaque
+covers over manually selected areas without starting ScreenCaptureKit. The
+Windows port also has a capture-free manual cover command. These modes avoid
+reading protected frames, so they cannot track moving sponsor marks or do
+content-aware fill.
+
 ## How it works
 
 ```

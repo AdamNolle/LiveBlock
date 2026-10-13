@@ -7,6 +7,8 @@
 .AppleDouble
 .LSOverride
 Icon?
+!platform/windows/src-tauri/icons/
+!platform/windows/src-tauri/icons/*
 
 # Xcode
 xcuserdata/
@@ -55,6 +57,7 @@ env/
 # Training pipeline (user-collected, not for repo)
 tools/.venv/
 tools/runs/
+weights/
 tools/datasets/
 tools/wandb/
 

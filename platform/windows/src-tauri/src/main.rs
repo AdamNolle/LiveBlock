@@ -143,12 +143,14 @@ fn apply_window_styles(app: &AppHandle) {
 fn apply_window_styles(_: &AppHandle) {}
 
 fn try_load_default_detector(app: &AppHandle) {
-    let candidate: PathBuf = match app
-        .path()
-        .resolve("yolov8n.onnx", tauri::path::BaseDirectory::Resource)
-    {
-        Ok(p) => p,
-        Err(_) => return,
+    let runtime = paths::appdata_root().join("models").join("yolov8n.onnx");
+    let candidate: PathBuf = if runtime.exists() {
+        runtime
+    } else {
+        match app.path().resolve("yolov8n.onnx", tauri::path::BaseDirectory::Resource) {
+            Ok(p) => p,
+            Err(_) => return,
+        }
     };
     if !candidate.exists() {
         tracing::warn!(

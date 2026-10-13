@@ -11,6 +11,7 @@ struct ControlPanelView: View {
                 header
                 statusBanner
                 primaryActions
+                captureFreeAction
                 regionList
                 Spacer(minLength: 0)
                 footer
@@ -77,6 +78,16 @@ struct ControlPanelView: View {
 
     private var bannerState: BannerState {
         let cm = controller.captureManager
+
+        if controller.captureFreeCoverEnabled {
+            return BannerState(
+                icon: "rectangle.fill",
+                tint: Theme.success,
+                title: "Manual cover active",
+                detail: "Saved regions are covered without screen capture. Neural detection and inpainting are paused.",
+                action: BannerAction(label: "Stop cover", run: { controller.toggleCaptureFreeCover() })
+            )
+        }
 
         // Highest-priority: missing permission. Nothing else matters until this is fixed.
         if !controller.screenRecordingGranted {
@@ -184,6 +195,25 @@ struct ControlPanelView: View {
     }
 
     // MARK: - Primary actions
+
+    private var captureFreeAction: some View {
+        Button {
+            controller.toggleCaptureFreeCover()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.fill")
+                Text(controller.captureFreeCoverEnabled ? "Stop manual cover" : "Cover saved regions without capture")
+                Spacer()
+                Text("No neural detection")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.glass)
+        .disabled(controller.regionCount == 0 && !controller.captureFreeCoverEnabled)
+        .help("Draw regions first. This mode draws opaque covers without requesting screen pixels.")
+    }
 
     private var primaryActions: some View {
         HStack(spacing: 8) {
@@ -348,8 +378,11 @@ struct ControlPanelView: View {
 
     // MARK: - State
 
-    private var stateColor: Color { controller.isRunning ? Theme.success : Theme.warn }
+    private var stateColor: Color {
+        (controller.isRunning || controller.captureFreeCoverEnabled) ? Theme.success : Theme.warn
+    }
     private var stateLine: String {
+        if controller.captureFreeCoverEnabled { return "Manual cover · no capture" }
         controller.isRunning ? "Active · \(controller.regionCount) region\(controller.regionCount == 1 ? "" : "s")"
                              : "Idle"
     }

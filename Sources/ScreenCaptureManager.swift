@@ -90,6 +90,7 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
     // (currently empty). `displayDetectionCache` holds the ungated boxes used
     // only for the live ML-detector log so the UI shows what the model sees.
     nonisolated private let detectionCache = DetectionCache()
+    nonisolated private let keepDetectionCache = DetectionCache()
     nonisolated private let displayDetectionCache = DetectionCache()
 
     // Throttle main-actor patch updates.
@@ -295,6 +296,7 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
             // real sponsor model ships), ungated set feeds the live UI log.
             let result = visionProcessor.detectGatedAndDisplay(in: pixelBuffer)
             detectionCache.store(result.forErase)
+            keepDetectionCache.store(result.forKeep)
             displayDetectionCache.store(result.forDisplay)
         }
 
@@ -309,9 +311,13 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
         }
         // Allowlist-gated model boxes (currently always empty). Converted from
         // the normalized cache to pixel space for THIS frame's buffer size.
-        let detectedBoxes = (!paused && detectionEnabledStorage.get())
+        let rawDetectedBoxes = (!paused && detectionEnabledStorage.get())
             ? detectionCache.load(forPixelBufferSize: bufferSize)
             : []
+        let keepBoxes = (!paused && detectionEnabledStorage.get())
+            ? keepDetectionCache.load(forPixelBufferSize: bufferSize)
+            : []
+        let detectedBoxes = Self.excludingKeepBoxes(rawDetectedBoxes, keeps: keepBoxes)
         let allBoxes = userBoxes + detectedBoxes
 
         // DRM-safe paint-over split. For every active region, sample the
@@ -401,6 +407,36 @@ final class ScreenCaptureManager: NSObject, ObservableObject, SCStreamOutput, SC
                 }
             }
         }
+    }
+
+    /// Cut detected team marks and numbers out of detected sponsor rectangles.
+    /// Keep wins even when a model puts a broad sponsor box over a jersey.
+    nonisolated static func excludingKeepBoxes(_ removes: [AdBoundingBox],
+                                                keeps: [AdBoundingBox]) -> [AdBoundingBox] {
+        var visible = removes
+        for keep in keeps {
+            visible = visible.flatMap { box -> [AdBoundingBox] in
+                let outer = box.rect.standardized
+                let cut = outer.intersection(keep.rect.standardized)
+                guard !cut.isNull, cut.width > 0, cut.height > 0 else { return [box] }
+                let pieces = [
+                    CGRect(x: outer.minX, y: outer.minY,
+                           width: cut.minX - outer.minX, height: outer.height),
+                    CGRect(x: cut.maxX, y: outer.minY,
+                           width: outer.maxX - cut.maxX, height: outer.height),
+                    CGRect(x: cut.minX, y: outer.minY,
+                           width: cut.width, height: cut.minY - outer.minY),
+                    CGRect(x: cut.minX, y: cut.maxY,
+                           width: cut.width, height: outer.maxY - cut.maxY)
+                ]
+                return pieces.filter { $0.width > 0 && $0.height > 0 }.map {
+                    AdBoundingBox(rect: $0, confidence: box.confidence,
+                                  label: box.label, source: box.source,
+                                  regionID: box.regionID)
+                }
+            }
+        }
+        return visible
     }
 
     /// Convert a CV-space pixel rect (bottom-left origin) into a normalized

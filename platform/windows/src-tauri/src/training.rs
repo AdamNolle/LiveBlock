@@ -1,7 +1,6 @@
 //! Spawn the training pipeline. Mirrors `Sources/TrainingController.swift`.
 //!
-//! macOS shells out to `tools/auto.sh`; on Windows we shell out to
-//! `tools/auto.ps1`. That script doesn't exist yet — see TODO below.
+//! macOS shells out to `tools/auto.sh`; Windows uses `tools/auto.ps1`.
 
 use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader};
@@ -11,6 +10,8 @@ use std::thread;
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
+#[cfg(windows)]
+use tauri::Manager;
 
 #[derive(serde::Serialize, Clone)]
 pub struct TrainingProgress {
@@ -33,8 +34,6 @@ impl TrainingJob {
         batch: u32,
         imgsz: u32,
     ) -> Result<Self> {
-        // TODO(windows-port): tools/auto.ps1 is not yet ported from tools/auto.sh.
-        // Until it lands, the user will see a clear "command not found" log line.
         let repo_root = locate_repo_root()?;
         let script = repo_root.join("tools").join("auto.ps1");
 
@@ -50,7 +49,7 @@ impl TrainingJob {
 
         let mut child = cmd.spawn().with_context(|| {
             format!(
-                "spawn pwsh {} (does the script exist? — auto.ps1 is a TODO)",
+                "spawn pwsh {}",
                 script.display()
             )
         })?;
@@ -86,6 +85,20 @@ impl TrainingJob {
             let mut guard = child_w.lock();
             if let Some(ch) = guard.as_mut() {
                 let status = ch.wait().ok();
+                if status.as_ref().is_some_and(|result| result.success()) {
+                    #[cfg(windows)]
+                    {
+                        let path = crate::paths::appdata_root().join("models/yolov8n.onnx");
+                        match crate::detection::Detector::load(&path) {
+                            Ok(detector) => {
+                                if let Some(state) = app_done.try_state::<crate::state::AppState>() {
+                                    *state.detector.lock() = Some(detector);
+                                }
+                            }
+                            Err(error) => tracing::error!("trained detector reload failed: {error}"),
+                        }
+                    }
+                }
                 let _ = app_done.emit(
                     "training-done",
                     serde_json::json!({ "exit_code": status.and_then(|s| s.code()) }),

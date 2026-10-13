@@ -31,6 +31,7 @@ final class AppController: ObservableObject {
     let trainingController: TrainingController
 
     @Published private(set) var isRunning: Bool = false
+    @Published private(set) var captureFreeCoverEnabled: Bool = false
     @Published private(set) var detectionEnabled: Bool = true
     @Published private(set) var regionCount: Int = 0
     @Published private(set) var isEditorOpen: Bool = false
@@ -274,12 +275,28 @@ final class AppController: ObservableObject {
         if isRunning {
             Task { await captureManager.stop() }
         } else {
+            captureFreeCoverEnabled = false
             guard let screen = currentScreen() else { return }
             // Align the overlay + editor to the screen we're about to capture
             // BEFORE the first frame lands, so patches composite over the right
             // display on multi-monitor setups.
             alignOverlayWindows(to: screen)
             Task { await captureManager.start(on: screen) }
+        }
+    }
+
+    /// Cover manually selected regions without starting ScreenCaptureKit.
+    /// This cannot run neural inference or content-aware fill; it is useful
+    /// when a protected player refuses screen capture.
+    func toggleCaptureFreeCover() {
+        if captureFreeCoverEnabled {
+            captureFreeCoverEnabled = false
+            return
+        }
+        Task { @MainActor in
+            if isRunning { await captureManager.stop() }
+            if let screen = currentScreen() { alignOverlayWindows(to: screen) }
+            captureFreeCoverEnabled = true
         }
     }
 
@@ -395,6 +412,7 @@ final class AppController: ObservableObject {
     func panicDisable() {
         Task { @MainActor in
             stopAutoCapture()
+            captureFreeCoverEnabled = false
             if isRunning { await captureManager.stop() }
             renderLayer?.orderOut(nil)
             if isEditorOpen { closeEditor() }

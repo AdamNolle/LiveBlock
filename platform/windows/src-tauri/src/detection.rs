@@ -20,6 +20,8 @@
 //! `remove(0)` loop is gone.
 
 use anyhow::{anyhow, Context, Result};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use liveblock_detection::{filter_by_score, non_max_suppression, Detection};
@@ -58,10 +60,41 @@ pub struct Detector {
     session: Session,
     input_name: String,
     output_name: String,
-    input_size: u32, // square; 640 for yolov8n
+    input_size: u32,
     min_confidence: f32,
     iou_threshold: f32,
     class_names: Vec<String>,
+    auto_remove_ids: Vec<u32>,
+    keep_ids: Vec<u32>,
+}
+
+#[derive(Deserialize)]
+struct ModelManifest {
+    schema_version: u32,
+    validated: bool,
+    classes: Vec<String>,
+    auto_block_labels: Vec<String>,
+    precision: f32,
+    map50: f32,
+    onnx_sha256: Option<String>,
+    #[serde(default = "default_input_size")]
+    input_size: u32,
+}
+
+fn default_input_size() -> u32 { 640 }
+
+fn matching_manifest(model_path: &Path) -> Option<ModelManifest> {
+    let path = model_path.with_file_name("yolov8n.manifest.json");
+    let manifest: ModelManifest = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if manifest.schema_version != 1
+        || !manifest.precision.is_finite() || !manifest.map50.is_finite()
+        || !(320..=1280).contains(&manifest.input_size)
+    {
+        return None;
+    }
+    let expected = manifest.onnx_sha256.as_ref()?;
+    let actual = format!("{:x}", Sha256::digest(std::fs::read(model_path).ok()?));
+    (actual == *expected).then_some(manifest)
 }
 
 impl Detector {
@@ -102,19 +135,50 @@ impl Detector {
             .map(|o| o.name().to_string())
             .context("model has no outputs")?;
 
-        // COCO 80 classes (Ultralytics yolov8n default). Replace when a logo
-        // model with different classes is bundled.
-        let class_names = coco_class_names();
+        // A checksum-matched but not-yet-validated model may be loaded for
+        // visible detection/label suggestions. It receives no erase or keep
+        // authority unless its quality gate passed.
+        let manifest = matching_manifest(model_path);
+        let input_size = manifest.as_ref().map_or(640, |m| m.input_size);
+        let class_names = manifest.as_ref().map(|m| m.classes.clone())
+            .unwrap_or_else(coco_class_names);
+        let mut auto_remove_ids = Vec::new();
+        let mut keep_ids = Vec::new();
+        if let Some(manifest) = &manifest {
+            let has_keeps = class_names.iter().any(|name| name == "team_keep")
+                && class_names.iter().any(|name| name == "number_keep");
+            for (id, name) in class_names.iter().enumerate() {
+                if manifest.validated && (name == "team_keep" || name == "number_keep") {
+                    keep_ids.push(id as u32);
+                }
+                if manifest.validated && manifest.precision >= 0.8 && manifest.map50 >= 0.5
+                    && (name == "ad" || (name == "sponsor_remove" && has_keeps))
+                    && manifest.auto_block_labels.contains(name)
+                {
+                    auto_remove_ids.push(id as u32);
+                }
+            }
+        }
 
         Ok(Self {
             session,
             input_name,
             output_name,
-            input_size: 640,
+            input_size,
             min_confidence: 0.45,
             iou_threshold: 0.45,
             class_names,
+            auto_remove_ids,
+            keep_ids,
         })
+    }
+
+    pub fn class_is_auto_removable(&self, class_id: u32) -> bool {
+        self.auto_remove_ids.contains(&class_id)
+    }
+
+    pub fn class_is_keep(&self, class_id: u32) -> bool {
+        self.keep_ids.contains(&class_id)
     }
 
     /// Run inference on a packed BGRA frame. Returns normalized detections.
@@ -279,14 +343,6 @@ impl Detector {
 /// TODO(windows-port): when a logo/sponsor model is bundled, populate this with
 /// the sponsor class ids (or switch to gathering real `ClassifySignals` per
 /// track and calling `liveblock_core::decide_verdict`).
-pub const SPONSOR_REMOVE_ALLOWLIST: &[u32] = &[];
-
-/// True only if `class_id` is on the (currently empty) sponsor-remove allowlist.
-#[inline]
-pub fn class_is_auto_removable(class_id: u32) -> bool {
-    SPONSOR_REMOVE_ALLOWLIST.contains(&class_id)
-}
-
 fn coco_class_names() -> Vec<String> {
     [
         "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
@@ -301,4 +357,29 @@ fn coco_class_names() -> Vec<String> {
         "book","clock","vase","scissors","teddy bear","hair drier","toothbrush",
     ]
     .iter().map(|s| s.to_string()).collect()
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_only_authorizes_matching_model_bytes() {
+        let dir = std::env::temp_dir().join(format!("liveblock-manifest-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let model = dir.join("yolov8n.onnx");
+        std::fs::write(&model, b"trained").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"trained"));
+        let manifest = serde_json::json!({
+            "schema_version": 1, "validated": true,
+            "classes": ["ad", "sponsor_remove", "team_keep", "number_keep"],
+            "auto_block_labels": ["ad", "sponsor_remove"],
+            "precision": 0.9, "map50": 0.8, "onnx_sha256": digest,
+        });
+        std::fs::write(dir.join("yolov8n.manifest.json"), manifest.to_string()).unwrap();
+        assert!(matching_manifest(&model).is_some());
+        std::fs::write(&model, b"different model").unwrap();
+        assert!(matching_manifest(&model).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

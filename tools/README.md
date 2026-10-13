@@ -1,5 +1,42 @@
 # LiveBlock — Local Training Tools
 
+## Public sponsor bootstrap dataset
+
+The [ExposureEngine dataset](https://huggingface.co/datasets/SimulaMet-HOST/ExposureEngine)
+provides soccer broadcast frames and oriented sponsor-logo annotations. Its
+dataset card declares MIT; the footage originates from third-party broadcasts,
+so review provenance before distributing images or weights. Keep downloads
+under `tools/datasets/`, which Git ignores.
+
+On Windows, with Git LFS installed:
+
+```powershell
+git clone --depth 1 https://huggingface.co/datasets/SimulaMet-HOST/ExposureEngine tools/datasets/exposureengine
+python tools/prepare_exposureengine.py tools/datasets/exposureengine tools/datasets/exposureengine-liveblock-v1
+pwsh -File tools/setup_env.ps1
+tools/.venv/Scripts/python.exe tools/train_logos.py --data tools/datasets/exposureengine-liveblock-v1/data.yaml --device cuda --epochs 30 --batch 16 --install
+```
+
+The converter collapses brand IDs into `sponsor_remove`, converts oriented
+boxes to axis-aligned boxes, and keeps every frame from a match in one split.
+It excludes missing, invalid, and contradictory labels and writes a
+`dataset_report.json`. A separate test split stays untouched by training and
+checkpoint selection.
+
+This dataset has **no** `team_keep` or `number_keep` annotations. Its trained
+model can suggest sponsor boxes for labeling, but automatic sponsor removal
+stays disabled until held-out keep examples meet the safety gate. Add those
+labels in the macOS label editor or import another reviewed four-class dataset.
+The generic bundled COCO model also remains unable to auto-erase people or cars.
+
+The trainer validates the best checkpoint and writes `quality.json`. `--install`
+installs a checksum-matched model for suggestions even when the overall quality
+gate fails; in that case its manifest grants no automatic erasure classes.
+Automatic erasure requires overall precision ≥0.80 and mAP@50 ≥0.50. Sponsor
+removal has stricter per-class checks: at least five held-out boxes per class,
+sponsor precision ≥0.90, and both keep classes' recall ≥0.90. These checks are
+a deployment gate, not a guarantee on unseen videos.
+
 These scripts let you train a logo/ad detector on your own Mac and drop it into
 the LiveBlock app. Everything runs on Apple Silicon via PyTorch's `mps` backend
 (no Nvidia required).
